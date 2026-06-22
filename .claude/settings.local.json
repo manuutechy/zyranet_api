@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/**)",
+      "Bash(curl -s http://127.0.0.1:8000/health)",
+      "Bash(mysql --version)",
+      "Bash(mariadb -u root -h 127.0.0.1 -P 3306 -e \"SELECT 1;\")",
+      "Bash(mysql -u root -h 127.0.0.1 -P 3306 --default-auth=caching_sha2_password -e \"SELECT 1;\")",
+      "Bash(mariadb -u root -h 127.0.0.1 -P 3306 zyra_net -e ' *)",
+      "Bash(mariadb -u root -h 127.0.0.1 -P 3306 zyra_net -e \"SELECT id,name,router_ip FROM zones; SELECT id,zone_id,name,type FROM packages;\")",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/customer/auth/otp -H \"Content-Type: application/json\" -d '{\"phone\":\"0712345678\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/customer/auth/verify -H \"Content-Type: application/json\" -d '{\"phone\":\"0712345678\",\"otp\":\"123456\"}')",
+      "Bash(node *)",
+      "Bash(grep -n '\\\\$\\(if error\\)' login.html rlogin.html flogin.html)",
+      "Skill(run)"
+    ]
+  }
+}

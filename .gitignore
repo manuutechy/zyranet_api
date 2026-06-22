@@ -1,0 +1,17 @@
+# Environment
+.env
+
+# Build artifacts
+/zyranet-api
+/tmp
+
+# Uploaded files
+/public/uploads
+
+# OS / editor
+.DS_Store
+
+# Dev tooling (ngrok, etc.) — never commit binaries or tunnel configs
+ngrok
+ngrok.tgz
+ngrok.yml
