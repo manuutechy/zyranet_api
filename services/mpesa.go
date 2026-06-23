@@ -77,7 +77,7 @@ func (s *MpesaService) GetAccessToken() (string, error) {
 	creds := base64.StdEncoding.EncodeToString([]byte(consumerKey + ":" + consumerSecret))
 	req.Header.Set("Authorization", "Basic "+creds)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("daraja auth failed: %w", err)
