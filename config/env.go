@@ -48,7 +48,6 @@ type AppConfig struct {
 	HostpinnacleBaseURL  string
 	HostpinnacleApiKey   string
 	HostpinnacleUsername string
-	HostpinnaclePassword string
 	HostpinnacleSenderID string
 
 	// CORS Origins
@@ -103,7 +102,6 @@ func Load() {
 		HostpinnacleBaseURL:  getEnv("HOSTPINNACLE_BASE_URL", "https://smsportal.hostpinnacle.co.ke/SMSApi/send"),
 		HostpinnacleApiKey:   getEnv("HOSTPINNACLE_API_KEY", ""),
 		HostpinnacleUsername: getEnv("HOSTPINNACLE_USERNAME", ""),
-		HostpinnaclePassword: getEnv("HOSTPINNACLE_PASSWORD", ""),
 		HostpinnacleSenderID: getEnv("HOSTPINNACLE_SENDER_ID", ""),
 
 		AllowedOrigins: allowedOrigins(getEnv("APP_ENV", "production")),

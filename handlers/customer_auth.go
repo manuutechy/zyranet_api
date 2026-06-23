@@ -150,6 +150,62 @@ func VerifyOtp(c *fiber.Ctx) error {
 	}, "Verification successful.")
 }
 
+// CustomerAuthGuest authenticates the customer as a guest.
+func CustomerAuthGuest(c *fiber.Ctx) error {
+	// Find guest package and zone
+	var zone models.Zone
+	var pkg models.Package
+	config.DB.First(&zone)
+	config.DB.Where("type = ?", "hotspot").First(&pkg)
+	if pkg.ID == 0 {
+		config.DB.First(&pkg)
+	}
+	if zone.ID == 0 || pkg.ID == 0 {
+		return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
+	}
+
+	// Create a unique guest account number
+	var count int64
+	config.DB.Model(&models.Customer{}).Where("account_number LIKE ?", "ZYR#GUEST#%").Count(&count)
+	guestAcc := fmt.Sprintf("ZYR#GUEST#%d", 10001+count)
+
+	guestPhone := fmt.Sprintf("GUEST%d", 10001+count)
+
+	guestName := fmt.Sprintf("Guest_%d", 10001+count)
+	pppoeUser := "guest_" + guestPhone
+
+	customer := models.Customer{
+		Name:          guestName,
+		Phone:         guestPhone,
+		ZoneID:        zone.ID,
+		PackageID:     pkg.ID,
+		Type:          "hotspot",
+		Status:        "active", // Guest gets direct active access or active status
+		AccountNumber: guestAcc,
+		PPPoEUsername: &pppoeUser,
+	}
+
+	// Give a 1 hour duration or let it use the package billing cycle
+	expiry := time.Now().Add(time.Hour)
+	customer.ExpiresAt = &expiry
+
+	if err := config.DB.Create(&customer).Error; err != nil {
+		return utils.ErrorResponse(c, "Failed to create guest user", err.Error(), fiber.StatusInternalServerError)
+	}
+
+	token, err := middleware.GenerateCustomerToken(customer.ID)
+	if err != nil {
+		return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
+	}
+
+	middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+
+	return utils.SuccessResponse(c, fiber.Map{
+		"token":    token,
+		"customer": buildCustomerProfile(&customer),
+	}, "Guest login successful.")
+}
+
 // CustomerLogout clears the customer session cookie. Public: clearing a
 // cookie that may already be missing/expired is always safe.
 func CustomerLogout(c *fiber.Ctx) error {

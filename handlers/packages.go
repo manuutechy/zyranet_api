@@ -84,3 +84,47 @@ func PackageDestroy(c *fiber.Ctx) error {
 	}
 	return utils.SuccessResponse(c, nil, "Package deleted successfully.")
 }
+
+// PackageDuplicate duplicates a package to multiple target zones.
+func PackageDuplicate(c *fiber.Ctx) error {
+	var pkg models.Package
+	if err := config.DB.First(&pkg, c.Params("id")).Error; err != nil {
+		return utils.ErrorResponse(c, "Source package not found.", "", fiber.StatusNotFound)
+	}
+
+	var body struct {
+		ZoneIDs []uint `json:"zone_ids"`
+	}
+	if err := c.BodyParser(&body); err != nil || len(body.ZoneIDs) == 0 {
+		return utils.ErrorResponse(c, "Target zone_ids list is required.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+
+	duplicatedCount := 0
+	for _, zoneID := range body.ZoneIDs {
+		// Verify zone exists
+		var zone models.Zone
+		if err := config.DB.First(&zone, zoneID).Error; err != nil {
+			continue
+		}
+
+		newPkg := models.Package{
+			Name:              pkg.Name,
+			Type:              pkg.Type,
+			Price:             pkg.Price,
+			SpeedUploadKbps:   pkg.SpeedUploadKbps,
+			SpeedDownloadKbps: pkg.SpeedDownloadKbps,
+			TimeLimitMinutes:  pkg.TimeLimitMinutes,
+			BillingCycle:      pkg.BillingCycle,
+			Status:            pkg.Status,
+			ZoneID:            zoneID,
+		}
+
+		if err := config.DB.Create(&newPkg).Error; err == nil {
+			duplicatedCount++
+		}
+	}
+
+	return utils.SuccessResponse(c, fiber.Map{
+		"duplicated_count": duplicatedCount,
+	}, "Package duplicated successfully to target zones.")
+}

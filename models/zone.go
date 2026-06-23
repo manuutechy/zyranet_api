@@ -19,6 +19,8 @@ type Zone struct {
 	RouterUsername *string        `gorm:"size:255" json:"router_username"`
 	RouterPassword *string        `gorm:"type:text" json:"router_password"`
 	RouterUseSSL   bool           `gorm:"default:false" json:"router_use_ssl"`
+	LanPorts       string         `gorm:"size:255;default:ether2,ether3,ether4" json:"lan_ports"`
+	HotspotAddress string         `gorm:"size:45;default:10.5.50.1/24" json:"hotspot_address"`
 	ManagerID      *uint          `json:"manager_id"`
 	Status         string         `gorm:"size:20;default:active" json:"status"`
 	LastSeenAt     *time.Time     `json:"last_seen_at"`

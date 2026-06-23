@@ -47,11 +47,13 @@ func Register(app *fiber.App) {
 	// Customer portal auth
 	v1.Post("/customer/auth/otp", payLimiter(3, time.Minute), handlers.RequestOtp)
 	v1.Post("/customer/auth/verify", payLimiter(10, time.Minute), handlers.VerifyOtp)
+	v1.Post("/customer/auth/guest", handlers.CustomerAuthGuest)
 	v1.Post("/customer/auth/logout", handlers.CustomerLogout)
 
 	// Public settings & packages
 	v1.Get("/public/settings", handlers.SettingsPublic)
 	v1.Get("/public/packages", handlers.PackagePublic)
+	v1.Get("/payments/:id/invoice", handlers.PaymentInvoice)
 
 	// M-Pesa STK push & callback
 	v1.Post("/mpesa/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
@@ -121,6 +123,7 @@ func Register(app *fiber.App) {
 	admin.Get("/packages/:id", adminAuth, handlers.PackageShow)
 	admin.Put("/packages/:id", adminAuth, managesPackages, handlers.PackageUpdate)
 	admin.Delete("/packages/:id", adminAuth, managesPackages, handlers.PackageDestroy)
+	admin.Post("/packages/:id/duplicate", adminAuth, managesPackages, handlers.PackageDuplicate)
 
 	// Vouchers
 	admin.Get("/vouchers", adminAuth, handlers.VoucherIndex)
@@ -144,6 +147,8 @@ func Register(app *fiber.App) {
 	// Payments
 	admin.Get("/payments", adminAuth, handlers.PaymentIndex)
 	admin.Post("/payments/manual", adminAuth, handlers.PaymentRecordManual)
+	admin.Post("/payments/:id/invoice/email", adminAuth, handlers.PaymentInvoiceEmail)
+	admin.Post("/payments/:id/invoice/sms", adminAuth, handlers.PaymentInvoiceSMS)
 
 	// Reports
 	admin.Get("/reports/revenue", adminAuth, handlers.ReportRevenue)
@@ -154,6 +159,7 @@ func Register(app *fiber.App) {
 	admin.Get("/settings", adminAuth, handlers.SettingsIndex)
 	admin.Post("/settings", adminAuth, handlers.SettingsUpdate)
 	admin.Post("/settings/upload", adminAuth, handlers.SettingsUploadImage)
+	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
 
 	// Users
 	admin.Get("/users", adminAuth, handlers.UserIndex)

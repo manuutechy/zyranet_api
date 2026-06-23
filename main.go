@@ -17,6 +17,7 @@ import (
 	"github.com/zyranet/zyranet-api/routes"
 	"github.com/zyranet/zyranet-api/services"
 	"strings"
+	"fmt"
 )
 
 func main() {
@@ -50,6 +51,37 @@ func main() {
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
 	}
 	config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
+
+	// Backfill existing account numbers
+	log.Println("[database] Backfilling customer account numbers...")
+	var customersWithoutAcc []models.Customer
+	if err := config.DB.Where("account_number IS NULL OR account_number = '' OR account_number LIKE 'ZN-%'").Order("id ASC").Find(&customersWithoutAcc).Error; err == nil {
+		for _, cust := range customersWithoutAcc {
+			if cust.Phone != "" {
+				cust.AccountNumber = fmt.Sprintf("ZYR#%s", cust.Phone)
+			} else {
+				var count int64
+				config.DB.Model(&models.Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)
+				cust.AccountNumber = fmt.Sprintf("ZYR#%d", 10001+count)
+			}
+			if err := config.DB.Model(&cust).Update("account_number", cust.AccountNumber).Error; err != nil {
+				log.Printf("[database] Failed to backfill account number for customer ID %d (trying sequential fallback): %v", cust.ID, err)
+				// Try sequential fallback to avoid duplicate keys
+				var count int64
+				config.DB.Model(&models.Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)
+				cust.AccountNumber = fmt.Sprintf("ZYR#%d", 10001+count)
+				if err2 := config.DB.Model(&cust).Update("account_number", cust.AccountNumber).Error; err2 != nil {
+					log.Printf("[database] Fallback failed for customer ID %d: %v", cust.ID, err2)
+				} else {
+					log.Printf("[database] Backfilled customer %d with fallback account number %s", cust.ID, cust.AccountNumber)
+				}
+			} else {
+				log.Printf("[database] Backfilled customer %d with account number %s", cust.ID, cust.AccountNumber)
+			}
+		}
+	} else {
+		log.Printf("[database] Failed to query customers for backfill: %v", err)
+	}
 
 	// Initialise services
 	smsSvc := services.NewSmsService()

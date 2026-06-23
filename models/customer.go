@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -18,6 +19,8 @@ type Customer struct {
 	PPPoEUsername *string        `gorm:"size:255;column:pppoe_username" json:"pppoe_username"`
 	PPPoEPassword *string        `gorm:"size:255;column:pppoe_password" json:"pppoe_password"`
 	Status        string         `gorm:"size:20;default:active" json:"status"` // active|suspended|expired
+	AccountNumber string         `gorm:"size:100;uniqueIndex" json:"account_number"`
+	MacAddress    *string        `gorm:"size:45" json:"mac_address"`
 	ExpiresAt     *time.Time     `json:"expires_at"`
 	CreditBalance float64        `gorm:"type:decimal(10,2);default:0" json:"credit_balance"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -29,3 +32,17 @@ type Customer struct {
 }
 
 func (Customer) TableName() string { return "customers" }
+
+// BeforeCreate is a GORM hook that runs before a record is created.
+func (c *Customer) BeforeCreate(tx *gorm.DB) (err error) {
+	if c.AccountNumber == "" {
+		if c.Phone != "" {
+			c.AccountNumber = fmt.Sprintf("ZYR#%s", c.Phone)
+		} else {
+			var count int64
+			tx.Model(&Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)
+			c.AccountNumber = fmt.Sprintf("ZYR#%d", 10001+count)
+		}
+	}
+	return nil
+}

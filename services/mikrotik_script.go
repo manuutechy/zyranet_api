@@ -38,6 +38,56 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(fmt.Sprintf("# Generated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
 	sb.WriteString("# ============================================================\n\n")
 
+	// Default configurations for Bridge, LAN Ports, IP and DHCP
+	lanPorts := strings.TrimSpace(zone.LanPorts)
+	if lanPorts == "" {
+		lanPorts = "ether2,ether3,ether4"
+	}
+	hotspotAddr := strings.TrimSpace(zone.HotspotAddress)
+	if hotspotAddr == "" {
+		hotspotAddr = "10.5.50.1/24"
+	}
+
+	gatewayIP := "10.5.50.1"
+	networkCIDR := "10.5.50.0/24"
+	ipPoolRange := "10.5.50.10-10.5.50.254"
+
+	parts := strings.Split(hotspotAddr, "/")
+	if len(parts) > 0 {
+		gatewayIP = parts[0]
+	}
+	ipOctets := strings.Split(gatewayIP, ".")
+	if len(ipOctets) == 4 {
+		networkCIDR = fmt.Sprintf("%s.%s.%s.0/%s", ipOctets[0], ipOctets[1], ipOctets[2], "24")
+		if len(parts) > 1 {
+			networkCIDR = fmt.Sprintf("%s.%s.%s.0/%s", ipOctets[0], ipOctets[1], ipOctets[2], parts[1])
+		}
+		ipPoolRange = fmt.Sprintf("%s.%s.%s.10-%s.%s.%s.254", ipOctets[0], ipOctets[1], ipOctets[2], ipOctets[0], ipOctets[1], ipOctets[2])
+	}
+
+	sb.WriteString("# --- Bridge & LAN Ports Configuration ---\n")
+	sb.WriteString("/interface bridge add name=bridge-hotspot comment=\"Zyra Net Hotspot Bridge\" disabled=no\n")
+	portsList := strings.Split(lanPorts, ",")
+	for _, port := range portsList {
+		port = strings.TrimSpace(port)
+		if port != "" {
+			sb.WriteString(fmt.Sprintf("/interface bridge port add bridge=bridge-hotspot interface=%s\n", port))
+		}
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("# --- IP Address & Gateway Configuration ---\n")
+	sb.WriteString(fmt.Sprintf("/ip address add address=%s interface=bridge-hotspot comment=\"Zyra Net Hotspot Gateway\"\n\n", hotspotAddr))
+
+	sb.WriteString("# --- IP Pool & DHCP Server Configuration ---\n")
+	sb.WriteString(fmt.Sprintf("/ip pool add name=hs-pool-zyranet ranges=%s\n", ipPoolRange))
+	sb.WriteString("/ip dhcp-server add name=hs-dhcp-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet disabled=no lease-time=1h\n")
+	sb.WriteString(fmt.Sprintf("/ip dhcp-server network add address=%s gateway=%s dns-server=8.8.8.8,8.8.4.4 comment=\"Zyra Net Hotspot Network\"\n\n", networkCIDR, gatewayIP))
+
+	sb.WriteString("# --- Hotspot Server Setup ---\n")
+	sb.WriteString(fmt.Sprintf("/ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie split-user-domain=no dns-name=login.zyranet.lan\n", gatewayIP))
+	sb.WriteString("/ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=5m keepalive-timeout=2m disabled=no\n\n")
+
 	// Hotspot Profiles
 	sb.WriteString("# --- Hotspot User Profiles ---\n")
 	for _, pkg := range packages {
@@ -83,6 +133,10 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 			profileName, rateLimit,
 		))
 	}
+
+	// PPPoE Server Setup
+	sb.WriteString("# --- PPPoE Server Setup ---\n")
+	sb.WriteString("/interface pppoe-server server add service-name=pppoe-zyranet interface=bridge-hotspot default-profile=default authentication=pap,chap disabled=no\n\n")
 
 	// PPPoE Secrets
 	sb.WriteString("# --- PPPoE Secrets ---\n")

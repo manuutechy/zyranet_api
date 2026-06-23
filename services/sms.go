@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,7 @@ import (
 	"github.com/zyranet/zyranet-api/utils"
 )
 
-// SmsService sends SMS via Africa's Talking.
+// SmsService sends SMS via the configured provider.
 type SmsService struct{}
 
 // NewSmsService constructs an SmsService.
@@ -32,38 +33,37 @@ func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
 
 		apiURL := s.getSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
 		apiKey := s.getSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
-		username := s.getSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
-		password := s.getSetting("hostpinnacle_password", config.Config.HostpinnaclePassword)
+		userID := s.getSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
 		sender := s.getSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
 
-		// Mock mode if no credentials are set
-		if apiKey == "" && username == "" && password == "" {
+		// Mock mode if required credentials are missing
+		if apiKey == "" || userID == "" {
 			status = "sent"
 			mock := map[string]string{"status": "mock_success", "reason": "No credentials configured for Hostpinnacle"}
 			b, _ := json.Marshal(mock)
 			providerResponse = string(b)
 			log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
 		} else {
-			formData := url.Values{}
-			formData.Set("apikey", apiKey)
-			formData.Set("api_key", apiKey)
-			formData.Set("userid", username)
-			formData.Set("username", username)
-			formData.Set("password", password)
-			formData.Set("mobile", phone)
-			formData.Set("phone", phone)
-			formData.Set("to", phone)
-			formData.Set("msg", message)
-			formData.Set("message", message)
-			formData.Set("senderid", sender)
-			formData.Set("sender_id", sender)
-			formData.Set("msgType", "text")
-			formData.Set("duplicate", "true")
+			// Per live testing against the real API:
+			//   - Correct format: JSON body + "apikey" in the request HEADER
+			//   - Success response: HTTP 204 No Content (empty body)
+			//   - Error response: JSON {"status":"error","statusCode":"...","reason":"..."}
+			//   - Wrong format returns: status=error | errorCode=152 | reason=Invalid method
+			payload := map[string]string{
+				"userid":    userID,
+				"mobile":    phone,
+				"msg":       message,
+				"senderid":  sender,
+				"msgType":   "text",
+				"duplicate": "1",
+			}
+			payloadBytes, _ := json.Marshal(payload)
 
-			req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(formData.Encode()))
+			req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payloadBytes))
 			if err == nil {
-				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Accept", "application/json")
+				req.Header.Set("apikey", apiKey) // API key goes in the header
 
 				client := &http.Client{}
 				resp, err := client.Do(req)
@@ -71,8 +71,12 @@ func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
 					defer resp.Body.Close()
 					body, _ := io.ReadAll(resp.Body)
 					providerResponse = string(body)
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+
+					// HTTP 204 = success (empty body — no content)
+					// HTTP 200 with JSON error = failure
+					if resp.StatusCode == http.StatusNoContent {
 						status = "sent"
+						providerResponse = `{"status":"success","http":204}`
 					} else {
 						log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
 					}
