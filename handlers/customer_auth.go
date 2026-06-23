@@ -166,7 +166,7 @@ func CustomerAuthGuest(c *fiber.Ctx) error {
 
 	// Create a unique guest account number
 	var count int64
-	config.DB.Model(&models.Customer{}).Where("account_number LIKE ?", "ZYR#GUEST#%").Count(&count)
+	config.DB.Unscoped().Model(&models.Customer{}).Where("account_number LIKE ?", "ZYR#GUEST#%").Count(&count)
 	guestAcc := fmt.Sprintf("ZYR#GUEST#%d", 10001+count)
 
 	guestPhone := fmt.Sprintf("GUEST%d", 10001+count)

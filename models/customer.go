@@ -40,7 +40,7 @@ func (c *Customer) BeforeCreate(tx *gorm.DB) (err error) {
 			c.AccountNumber = fmt.Sprintf("ZYR#%s", c.Phone)
 		} else {
 			var count int64
-			tx.Model(&Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)
+			tx.Unscoped().Model(&Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)
 			c.AccountNumber = fmt.Sprintf("ZYR#%d", 10001+count)
 		}
 	}
