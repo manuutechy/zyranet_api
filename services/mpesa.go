@@ -264,6 +264,13 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 		rc = v
 	case int:
 		rc = float64(v)
+	case int64:
+		rc = float64(v)
+	case string:
+		var parsed float64
+		if _, err := fmt.Sscanf(v, "%f", &parsed); err == nil {
+			rc = parsed
+		}
 	}
 
 	if rc != 0 {

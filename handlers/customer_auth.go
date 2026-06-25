@@ -150,8 +150,39 @@ func VerifyOtp(c *fiber.Ctx) error {
 	}, "Verification successful.")
 }
 
-// CustomerAuthGuest authenticates the customer as a guest.
+// CustomerAuthGuest authenticates the customer as a guest. If this device's
+// MAC address already has a guest account from a previous visit, that
+// account is reused (so a returning guest keeps their credit balance /
+// active subscription) instead of minting a new throwaway record every
+// time. The lookup is deliberately scoped to guest accounts only
+// (account_number LIKE 'ZYR#GUEST#%') — a MAC address is easy to spoof, so
+// it must never be sufficient on its own to log in as a real subscriber.
 func CustomerAuthGuest(c *fiber.Ctx) error {
+	var body struct {
+		Mac string `json:"mac"`
+		IP  string `json:"ip"`
+	}
+	c.BodyParser(&body) // mac/ip are optional; an empty body just skips device-binding
+
+	if body.Mac != "" {
+		var existing models.Customer
+		err := config.DB.
+			Where("mac_address = ? AND account_number LIKE ?", body.Mac, "ZYR#GUEST#%").
+			Order("created_at DESC").
+			First(&existing).Error
+		if err == nil {
+			token, err := middleware.GenerateCustomerToken(existing.ID)
+			if err != nil {
+				return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
+			}
+			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+			return utils.SuccessResponse(c, fiber.Map{
+				"token":    token,
+				"customer": buildCustomerProfile(&existing),
+			}, "Welcome back.")
+		}
+	}
+
 	// Find guest package and zone
 	var zone models.Zone
 	var pkg models.Package
@@ -183,6 +214,9 @@ func CustomerAuthGuest(c *fiber.Ctx) error {
 		Status:        "active", // Guest gets direct active access or active status
 		AccountNumber: guestAcc,
 		PPPoEUsername: &pppoeUser,
+	}
+	if body.Mac != "" {
+		customer.MacAddress = &body.Mac
 	}
 
 	// Give a 1 hour duration or let it use the package billing cycle

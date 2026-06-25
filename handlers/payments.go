@@ -270,9 +270,9 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
         .invoice-box table { width: 100%%; line-height: inherit; text-align: left; border-collapse: collapse; }
         .invoice-box table td { padding: 8px; vertical-align: top; }
         .invoice-box table tr td:nth-child(2) { text-align: right; }
-        .invoice-header { border-bottom: 2px solid %%s; padding-bottom: 25px; margin-bottom: 25px; }
+        .invoice-header { border-bottom: 2px solid %s; padding-bottom: 25px; margin-bottom: 25px; }
         .logo { max-height: 60px; margin-bottom: 10px; }
-        .company-name { font-size: 24px; font-weight: bold; color: %%s; margin: 0; }
+        .company-name { font-size: 24px; font-weight: bold; color: %s; margin: 0; }
         .title { font-size: 32px; font-weight: 800; color: #0f172a; margin: 0; tracking-wide: true; }
         .details-table { margin-bottom: 30px; }
         .details-table td { padding: 12px 8px; }
@@ -280,9 +280,9 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
         .items-table th:nth-child(2), .items-table td:nth-child(2) { text-align: right; }
         .items-table td { border-bottom: 1px solid #f1f5f9; padding: 16px 10px; }
         .total-section { margin-top: 30px; padding-top: 20px; }
-        .total-amount { font-size: 20px; font-weight: bold; color: %%s; }
+        .total-amount { font-size: 20px; font-weight: bold; color: %s; }
         .footer { text-align: center; font-size: 12px; color: #94a3b8; margin-top: 50px; border-top: 1px solid #f1f5f9; padding-top: 20px; }
-        .print-btn { display: inline-block; background: %%s; color: #fff; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-bottom: 20px; border: none; cursor: pointer; font-size: 13px; transition: opacity 0.2s; }
+        .print-btn { display: inline-block; background: %s; color: #fff; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-bottom: 20px; border: none; cursor: pointer; font-size: 13px; transition: opacity 0.2s; }
         .print-btn:hover { opacity: 0.9; }
         @media print { .print-btn { display: none; } body { padding: 0; background-color: #fff; } .invoice-box { border: none; box-shadow: none; padding: 0; } }
     </style>
@@ -295,13 +295,13 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
         <table class="invoice-header">
             <tr>
                 <td>
-                    %%s
-                    <p class="company-name">%%s</p>
+                    %s
+                    <p class="company-name">%s</p>
                 </td>
                 <td>
                     <p class="title">INVOICE</p>
-                    <strong>Invoice #:</strong> INV-%%d<br>
-                    <strong>Date:</strong> %%s<br>
+                    <strong>Invoice #:</strong> INV-%d<br>
+                    <strong>Date:</strong> %s<br>
                     <strong>Status:</strong> <span style="color: #10b981; font-weight: bold;">PAID</span>
                 </td>
             </tr>
@@ -311,14 +311,14 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
             <tr>
                 <td>
                     <strong style="color: #475569;">BILL TO</strong><br>
-                    <span style="font-size: 15px; font-weight: 600; color: #0f172a;">%%s</span><br>
-                    Phone: %%s<br>
-                    Account: %%s
+                    <span style="font-size: 15px; font-weight: 600; color: #0f172a;">%s</span><br>
+                    Phone: %s<br>
+                    Account: %s
                 </td>
                 <td>
                     <strong style="color: #475569;">PAYMENT DETAILS</strong><br>
-                    Method: %%s<br>
-                    Receipt: %%s
+                    Method: %s<br>
+                    Receipt: %s
                 </td>
             </tr>
         </table>
@@ -333,10 +333,10 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
             <tbody>
                 <tr>
                     <td>
-                        <strong style="font-size: 15px; color: #0f172a;">%%s</strong> (Speed: Up %%s / Down %%s)<br>
-                        <span style="color: #64748b; font-size: 12px;">Billing Cycle: %%s • Router Zone: %%s</span>
+                        <strong style="font-size: 15px; color: #0f172a;">%s</strong> (Speed: Up %s / Down %s)<br>
+                        <span style="color: #64748b; font-size: 12px;">Billing Cycle: %s • Router Zone: %s</span>
                     </td>
-                    <td style="font-size: 15px; font-weight: 600; color: #0f172a;">KES %%.2f</td>
+                    <td style="font-size: 15px; font-weight: 600; color: #0f172a;">KES %.2f</td>
                 </tr>
             </tbody>
         </table>
@@ -348,11 +348,11 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
                     <table style="width: 100%%;">
                         <tr>
                             <td style="color: #475569; padding: 6px 0;">Subtotal:</td>
-                            <td style="font-weight: 600; color: #0f172a; padding: 6px 0;">KES %%.2f</td>
+                            <td style="font-weight: 600; color: #0f172a; padding: 6px 0;">KES %.2f</td>
                         </tr>
                         <tr style="border-top: 2px solid #e2e8f0;">
                             <td style="padding: 12px 0;"><span class="total-amount">Total Paid:</span></td>
-                            <td style="padding: 12px 0;"><span class="total-amount">KES %%.2f</span></td>
+                            <td style="padding: 12px 0;"><span class="total-amount">KES %.2f</span></td>
                         </tr>
                     </table>
                 </td>
@@ -361,7 +361,7 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 
         <div class="footer">
             Thank you for your business!<br>
-            For inquiries or support, contact us at <strong>%%s</strong>.
+            For inquiries or support, contact us at <strong>%s</strong>.
         </div>
     </div>
 </body>

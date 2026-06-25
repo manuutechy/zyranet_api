@@ -75,10 +75,44 @@ func (s *MikroTikService) TestConnection(zone *models.Zone) (map[string]interfac
 
 // GetStatus retrieves live router health statistics.
 func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
+	var status *RouterStatus
+	var err error
 	if zone.ConnectionType == "api" {
-		return s.getStatusAPI(zone)
+		status, err = s.getStatusAPI(zone)
+	} else {
+		status, err = s.getStatusREST(zone)
 	}
-	return s.getStatusREST(zone)
+
+	// Local dev zones don't have a real reachable MikroTik behind them —
+	// same APP_ENV=local convenience used elsewhere (e.g. HotspotSession)
+	// so the admin dashboard reflects a healthy fleet without real hardware.
+	if status != nil && !status.Online && config.Config.AppEnv == "local" {
+		return s.mockOnlineStatus(zone), nil
+	}
+	return status, err
+}
+
+func (s *MikroTikService) mockOnlineStatus(zone *models.Zone) *RouterStatus {
+	now := time.Now()
+	config.DB.Model(zone).Updates(map[string]interface{}{
+		"last_seen_at": now,
+		"last_status":  "online",
+	})
+
+	var activeCount int64
+	config.DB.Model(&models.Session{}).Where("zone_id = ? AND ended_at IS NULL", zone.ID).Count(&activeCount)
+
+	return &RouterStatus{
+		Online:           true,
+		Uptime:           "14d6h32m10s",
+		CPULoad:          8 + int(zone.ID*7)%25,
+		MemoryUsedMB:     180 + int(zone.ID*53)%150,
+		MemoryTotalMB:    512,
+		ConnectedClients: int(activeCount),
+		BoardName:        zone.RouterName,
+		RouterOSVersion:  "7.15.3 (stable)",
+		LastSeenAt:       now.UTC().Format(time.RFC3339),
+	}
 }
 
 // PushFullConfig pushes hotspot users and PPPoE secrets to the router.

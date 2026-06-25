@@ -193,6 +193,63 @@ func ReportZones(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, comparison, "")
 }
 
+// ReportServiceTypes breaks down hotspot vs PPPoE performance: active
+// sessions right now, sessions started today, today's revenue, and active
+// customers. Revenue is attributed via the payment's package type (rather
+// than the paying customer's type) since anonymous hotspot-pay flows have
+// no customer record at all.
+func ReportServiceTypes(c *fiber.Ctx) error {
+	zoneID := scopedZoneID(c, c.Query("zone_id"))
+	today := time.Now().Format("2006-01-02")
+
+	type ServiceTypeStats struct {
+		Type            string  `json:"type"`
+		ActiveSessions  int64   `json:"active_sessions"`
+		SessionsToday   int64   `json:"sessions_today"`
+		RevenueToday    float64 `json:"revenue_today"`
+		ActiveCustomers int64   `json:"active_customers"`
+	}
+
+	stats := []ServiceTypeStats{}
+	for _, t := range []string{"hotspot", "pppoe"} {
+		s := ServiceTypeStats{Type: t}
+
+		customerQuery := config.DB.Model(&models.Customer{}).Where("type = ? AND status = ?", t, "active")
+		if zoneID != "" {
+			customerQuery = customerQuery.Where("zone_id = ?", zoneID)
+		}
+		customerQuery.Count(&s.ActiveCustomers)
+
+		activeSessionsQuery := config.DB.Model(&models.Session{}).
+			Joins("JOIN customers ON customers.id = sessions.customer_id").
+			Where("customers.type = ? AND sessions.ended_at IS NULL", t)
+		if zoneID != "" {
+			activeSessionsQuery = activeSessionsQuery.Where("sessions.zone_id = ?", zoneID)
+		}
+		activeSessionsQuery.Count(&s.ActiveSessions)
+
+		sessionsTodayQuery := config.DB.Model(&models.Session{}).
+			Joins("JOIN customers ON customers.id = sessions.customer_id").
+			Where("customers.type = ? AND DATE(sessions.started_at) = ?", t, today)
+		if zoneID != "" {
+			sessionsTodayQuery = sessionsTodayQuery.Where("sessions.zone_id = ?", zoneID)
+		}
+		sessionsTodayQuery.Count(&s.SessionsToday)
+
+		revenueQuery := config.DB.Model(&models.Payment{}).
+			Joins("JOIN packages ON packages.id = payments.package_id").
+			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) = ?", t, "completed", today)
+		if zoneID != "" {
+			revenueQuery = revenueQuery.Where("payments.zone_id = ?", zoneID)
+		}
+		revenueQuery.Select("COALESCE(SUM(payments.amount), 0)").Scan(&s.RevenueToday)
+
+		stats = append(stats, s)
+	}
+
+	return utils.SuccessResponse(c, stats, "")
+}
+
 func roundFloat(f float64, precision int) float64 {
 	p := 1.0
 	for i := 0; i < precision; i++ {

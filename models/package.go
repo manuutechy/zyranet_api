@@ -13,6 +13,8 @@ type Package struct {
 	ZoneID             uint           `gorm:"not null" json:"zone_id"`
 	Name               string         `gorm:"size:255;not null" json:"name"`
 	Type               string         `gorm:"size:20;not null" json:"type"` // hotspot | pppoe
+	Category           string         `gorm:"size:20;default:single" json:"category"` // single | multi
+	DeviceLimit        int            `gorm:"default:1" json:"device_limit"`
 	Price              float64        `gorm:"type:decimal(10,2);not null" json:"price"`
 	TimeLimitMinutes   *int           `json:"time_limit_minutes"`
 	DataLimitMB        *int           `json:"data_limit_mb"`

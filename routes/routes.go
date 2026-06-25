@@ -154,6 +154,7 @@ func Register(app *fiber.App) {
 	admin.Get("/reports/revenue", adminAuth, handlers.ReportRevenue)
 	admin.Get("/reports/vouchers", adminAuth, handlers.ReportVouchers)
 	admin.Get("/reports/zones", adminAuth, handlers.ReportZones)
+	admin.Get("/reports/service-types", adminAuth, handlers.ReportServiceTypes)
 
 	// Settings
 	admin.Get("/settings", adminAuth, handlers.SettingsIndex)

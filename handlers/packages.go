@@ -110,6 +110,8 @@ func PackageDuplicate(c *fiber.Ctx) error {
 		newPkg := models.Package{
 			Name:              pkg.Name,
 			Type:              pkg.Type,
+			Category:          pkg.Category,
+			DeviceLimit:       pkg.DeviceLimit,
 			Price:             pkg.Price,
 			SpeedUploadKbps:   pkg.SpeedUploadKbps,
 			SpeedDownloadKbps: pkg.SpeedDownloadKbps,
