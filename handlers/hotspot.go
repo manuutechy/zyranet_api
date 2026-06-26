@@ -160,6 +160,24 @@ func HotspotStatus(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "failed", "message": msg})
 	}
 
+	// Reconcile status with M-Pesa query API as a fallback if the transaction is pending
+	if payment.Status == "pending" && mpesaSvcGlobal != nil {
+		newStatus, err := mpesaSvcGlobal.QueryAndUpdateSTKStatus(&payment)
+		if err == nil {
+			if newStatus == "completed" {
+				return c.JSON(fiber.Map{"status": "paid"})
+			} else if newStatus == "failed" {
+				msg := "Payment failed"
+				if payment.StatusReason != nil {
+					msg = *payment.StatusReason
+				}
+				return c.JSON(fiber.Map{"status": "failed", "message": msg})
+			}
+		} else {
+			log.Printf("[M-Pesa] Error querying STK status: %v", err)
+		}
+	}
+
 	return c.JSON(fiber.Map{"status": "pending"})
 }
 

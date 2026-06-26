@@ -27,11 +27,18 @@ type MpesaService struct {
 	tokenMu     sync.Mutex
 	cachedToken string
 	tokenExpiry time.Time
+
+	// Map to throttle STK status queries per CheckoutRequestID
+	queryThrottles sync.Map
 }
 
 // NewMpesaService constructs an MpesaService.
 func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTikService) *MpesaService {
-	return &MpesaService{SMS: sms, Voucher: voucher, MikroTik: mikrotik}
+	return &MpesaService{
+		SMS:      sms,
+		Voucher:  voucher,
+		MikroTik: mikrotik,
+	}
 }
 
 // MpesaSTKResponse is the result of an STK push initiation.
@@ -278,18 +285,7 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 		if rd, ok := stkCallback["ResultDesc"].(string); ok {
 			reason = rd
 		}
-		res := config.DB.Model(&models.Payment{}).
-			Where("id = ? AND status = ?", payment.ID, "pending").
-			Updates(map[string]interface{}{
-				"status":        "failed",
-				"status_reason": reason,
-			})
-		if res.RowsAffected == 0 {
-			log.Printf("[M-Pesa] Duplicate/late failure callback for payment %d ignored (status already %s)", payment.ID, payment.Status)
-			return nil
-		}
-		log.Printf("[M-Pesa] Payment failed: %s", reason)
-		return nil
+		return s.ProcessPaymentFailure(&payment, reason)
 	}
 
 	// Extract metadata
@@ -337,6 +333,11 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 	}
 	_ = amount
 
+	return s.ProcessPaymentSuccess(&payment, receiptNumber, phone)
+}
+
+// ProcessPaymentSuccess handles database and network/side-effects for a successful STK payment.
+func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNumber, phone string) error {
 	res := config.DB.Model(&models.Payment{}).
 		Where("id = ? AND status = ?", payment.ID, "pending").
 		Updates(map[string]interface{}{
@@ -344,9 +345,13 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 			"mpesa_receipt_number": receiptNumber,
 		})
 	if res.RowsAffected == 0 {
-		log.Printf("[M-Pesa] Duplicate/late success callback for payment %d ignored (status already %s)", payment.ID, payment.Status)
+		log.Printf("[M-Pesa] Duplicate/late success callback/query for payment %d ignored (status already %s)", payment.ID, payment.Status)
 		return nil
 	}
+
+	// update local struct so subsequent logic reads updated status if needed
+	payment.Status = "completed"
+	payment.MpesaReceiptNumber = &receiptNumber
 
 	if payment.PackageID == nil {
 		if payment.CustomerID != nil {
@@ -391,9 +396,6 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 	var zone models.Zone
 	if err := config.DB.First(&zone, payment.ZoneID).Error; err == nil {
 		if payment.MacAddress != "" {
-			// Whitelist by MAC, with a fallback to pushing the voucher as a router
-			// login if whitelisting ultimately fails — gives the customer a manual
-			// way to get online even if the router call keeps failing.
 			go func() {
 				err := s.whitelistWithRetry(&zone, payment.MacAddress, &pkg, 3)
 				if err != nil {
@@ -436,6 +438,173 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 	}
 
 	return nil
+}
+
+// ProcessPaymentFailure handles database updates for a failed STK payment.
+func (s *MpesaService) ProcessPaymentFailure(payment *models.Payment, reason string) error {
+	res := config.DB.Model(&models.Payment{}).
+		Where("id = ? AND status = ?", payment.ID, "pending").
+		Updates(map[string]interface{}{
+			"status":        "failed",
+			"status_reason": reason,
+		})
+	if res.RowsAffected == 0 {
+		log.Printf("[M-Pesa] Duplicate/late failure callback/query for payment %d ignored (status already %s)", payment.ID, payment.Status)
+		return nil
+	}
+
+	// update local struct
+	payment.Status = "failed"
+	payment.StatusReason = &reason
+
+	log.Printf("[M-Pesa] Payment failed: %s", reason)
+	return nil
+}
+
+// QuerySTKPushStatus queries Daraja for the status of an STK push transaction.
+func (s *MpesaService) QuerySTKPushStatus(checkoutRequestID string) (map[string]interface{}, error) {
+	shortcode := s.getSetting("mpesa_shortcode", config.Config.MpesaShortcode)
+	passkey := s.getSetting("mpesa_passkey", config.Config.MpesaPasskey)
+	env := s.getSetting("mpesa_environment", config.Config.MpesaEnv)
+
+	token, err := s.GetAccessToken()
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.ToLower(env) != "production" && token == "mock_token" {
+		return map[string]interface{}{
+			"ResponseCode": "0",
+			"ResultCode":   "0",
+			"ResultDesc":   "Mock STK Query Success",
+		}, nil
+	}
+
+	timestamp := time.Now().Format("20060102150405")
+	password := base64.StdEncoding.EncodeToString([]byte(shortcode + passkey + timestamp))
+
+	payload := map[string]interface{}{
+		"BusinessShortCode": shortcode,
+		"Password":          password,
+		"Timestamp":         timestamp,
+		"CheckoutRequestID": checkoutRequestID,
+	}
+
+	bodyBytes, _ := json.Marshal(payload)
+	apiURL := s.getBaseURL() + "/mpesa/stkpushquery/v1/query"
+	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("STK push query request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+
+	return result, nil
+}
+
+// QueryAndUpdateSTKStatus queries Safaricom to check the status of a pending payment and updates the database accordingly.
+func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string, error) {
+	checkoutID := ""
+	if payment.MpesaTransactionID != nil {
+		checkoutID = *payment.MpesaTransactionID
+	}
+	if checkoutID == "" {
+		return "pending", fmt.Errorf("no checkout request ID found for payment %d", payment.ID)
+	}
+
+	// Throttling check: only query Safaricom at most once every 5 seconds per checkout ID
+	now := time.Now()
+	if val, ok := s.queryThrottles.Load(checkoutID); ok {
+		if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) < 5*time.Second {
+			return payment.Status, nil
+		}
+	}
+	s.queryThrottles.Store(checkoutID, now)
+
+	log.Printf("[M-Pesa] Querying STK status for payment %d (CheckoutID: %s)", payment.ID, checkoutID)
+	result, err := s.QuerySTKPushStatus(checkoutID)
+	if err != nil {
+		return "pending", fmt.Errorf("failed to query status from M-Pesa: %w", err)
+	}
+
+	log.Printf("[M-Pesa] Query result for %s: %+v", checkoutID, result)
+
+	if errCode, ok := result["errorCode"].(string); ok && (errCode == "500.001.1001" || errCode == "404.002.02" || strings.Contains(strings.ToLower(errCode), "process")) {
+		return "pending", nil
+	}
+	if errMsg, ok := result["errorMessage"].(string); ok && (strings.Contains(strings.ToLower(errMsg), "process") || strings.Contains(strings.ToLower(errMsg), "progress")) {
+		return "pending", nil
+	}
+
+	responseCode, _ := result["ResponseCode"].(string)
+	if responseCode != "0" {
+		return "pending", nil
+	}
+
+	resultCodeVal := result["ResultCode"]
+	if resultCodeVal == nil {
+		return "pending", nil
+	}
+
+	var rc float64
+	switch v := resultCodeVal.(type) {
+	case float64:
+		rc = v
+	case int:
+		rc = float64(v)
+	case int64:
+		rc = float64(v)
+	case string:
+		var parsed float64
+		if _, err := fmt.Sscanf(v, "%f", &parsed); err == nil {
+			rc = parsed
+		}
+	}
+
+	if rc == 0 {
+		receiptNumber := fmt.Sprintf("QRY_%s", checkoutID)
+		if meta, ok := result["CallbackMetadata"].(map[string]interface{}); ok {
+			if items, ok := meta["Item"].([]interface{}); ok {
+				for _, itemRaw := range items {
+					item, _ := itemRaw.(map[string]interface{})
+					name, _ := item["Name"].(string)
+					val := item["Value"]
+					if name == "MpesaReceiptNumber" && val != nil {
+						if v, ok := val.(string); ok && v != "" {
+							receiptNumber = v
+						}
+					}
+				}
+			}
+		}
+
+		err := s.ProcessPaymentSuccess(payment, receiptNumber, payment.Phone)
+		if err != nil {
+			return "pending", err
+		}
+		return "completed", nil
+	}
+
+	reason := "Transaction was rejected."
+	if rd, ok := result["ResultDesc"].(string); ok && rd != "" {
+		reason = rd
+	}
+	err = s.ProcessPaymentFailure(payment, reason)
+	if err != nil {
+		return "pending", err
+	}
+	return "failed", nil
 }
 
 // whitelistWithRetry attempts to whitelist a MAC address on the router,
