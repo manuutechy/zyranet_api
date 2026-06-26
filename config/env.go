@@ -36,12 +36,7 @@ type AppConfig struct {
 	MpesaCallbackURL    string
 	MpesaEnv            string
 
-	// Africa's Talking
-	ATApiKey   string
-	ATUsername string
-	ATSenderID string
-
-	// SMS Provider ("africastalking" or "hostpinnacle")
+	// SMS Provider ("hostpinnacle" is the default)
 	SmsProvider string
 
 	// Hostpinnacle
@@ -93,11 +88,7 @@ func Load() {
 		MpesaCallbackURL:    getEnv("MPESA_CALLBACK_URL", ""),
 		MpesaEnv:            getEnv("MPESA_ENV", "sandbox"),
 
-		ATApiKey:   getEnv("AT_API_KEY", ""),
-		ATUsername: getEnv("AT_USERNAME", "sandbox"),
-		ATSenderID: getEnv("AT_SENDER_ID", "ZyraNet"),
-
-		SmsProvider: getEnv("SMS_PROVIDER", "africastalking"),
+		SmsProvider: getEnv("SMS_PROVIDER", "hostpinnacle"),
 
 		HostpinnacleBaseURL:  getEnv("HOSTPINNACLE_BASE_URL", "https://smsportal.hostpinnacle.co.ke/SMSApi/send"),
 		HostpinnacleApiKey:   getEnv("HOSTPINNACLE_API_KEY", ""),

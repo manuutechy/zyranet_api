@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/zyranet/zyranet-api/config"
@@ -21,129 +20,69 @@ type SmsService struct{}
 // NewSmsService constructs an SmsService.
 func NewSmsService() *SmsService { return &SmsService{} }
 
-// Send sends an SMS and saves a log record.
+// Send sends an SMS via HostPinnacle and saves a log record.
 func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
-	provider := strings.ToLower(s.getSetting("sms_provider", config.Config.SmsProvider))
+	phone = utils.FormatPhone(phone) // E.g. 254712345678
 
 	status := "failed"
 	providerResponse := ""
 
-	if provider == "hostpinnacle" {
-		phone = utils.FormatPhone(phone) // E.g. 254712345678
+	apiURL := s.getSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
+	apiKey := s.getSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
+	userID := s.getSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
+	sender := s.getSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
 
-		apiURL := s.getSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
-		apiKey := s.getSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
-		userID := s.getSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
-		sender := s.getSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
-
-		// Mock mode if required credentials are missing
-		if apiKey == "" || userID == "" {
-			status = "sent"
-			mock := map[string]string{"status": "mock_success", "reason": "No credentials configured for Hostpinnacle"}
-			b, _ := json.Marshal(mock)
-			providerResponse = string(b)
-			log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
-		} else {
-			// Per live testing against the real API:
-			//   - Correct format: JSON body + "apikey" in the request HEADER
-			//   - Success response: HTTP 204 No Content (empty body)
-			//   - Error response: JSON {"status":"error","statusCode":"...","reason":"..."}
-			//   - Wrong format returns: status=error | errorCode=152 | reason=Invalid method
-			payload := map[string]string{
-				"userid":    userID,
-				"mobile":    phone,
-				"msg":       message,
-				"senderid":  sender,
-				"msgType":   "text",
-				"duplicate": "1",
-			}
-			payloadBytes, _ := json.Marshal(payload)
-
-			req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payloadBytes))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Accept", "application/json")
-				req.Header.Set("apikey", apiKey) // API key goes in the header
-
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err == nil {
-					defer resp.Body.Close()
-					body, _ := io.ReadAll(resp.Body)
-					providerResponse = string(body)
-
-					// HTTP 204 = success (empty body — no content)
-					// HTTP 200 with JSON error = failure
-					if resp.StatusCode == http.StatusNoContent {
-						status = "sent"
-						providerResponse = `{"status":"success","http":204}`
-					} else {
-						log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
-					}
-				} else {
-					providerResponse = err.Error()
-					log.Printf("[SMS] Hostpinnacle HTTP error: %v", err)
-				}
-			} else {
-				providerResponse = err.Error()
-				log.Printf("[SMS] Request creation error: %v", err)
-			}
-		}
+	// Mock mode if required credentials are missing
+	if apiKey == "" || userID == "" {
+		status = "sent"
+		mock := map[string]string{"status": "mock_success", "reason": "No credentials configured for Hostpinnacle"}
+		b, _ := json.Marshal(mock)
+		providerResponse = string(b)
+		log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
 	} else {
-		// Africa's Talking (default)
-		phone = utils.FormatPhoneE164(phone)
-
-		username := s.getSetting("africastalking_username", config.Config.ATUsername)
-		apiKey := s.getSetting("africastalking_api_key", config.Config.ATApiKey)
-		sender := s.getSetting("africastalking_sender", config.Config.ATSenderID)
-
-		isSandbox := strings.ToLower(username) == "sandbox"
-		apiURL := "https://api.africastalking.com/version1/messaging"
-		if isSandbox {
-			apiURL = "https://api.sandbox.africastalking.com/version1/messaging"
+		// Per live testing against the real API:
+		//   - Correct format: JSON body + "apikey" in the request HEADER
+		//   - Success response: HTTP 204 No Content (empty body)
+		//   - Error response: JSON {"status":"error","statusCode":"...","reason":"..."}
+		//   - Wrong format returns: status=error | errorCode=152 | reason=Invalid method
+		payload := map[string]string{
+			"userid":    userID,
+			"mobile":    phone,
+			"msg":       message,
+			"senderid":  sender,
+			"msgType":   "text",
+			"duplicate": "1",
 		}
+		payloadBytes, _ := json.Marshal(payload)
 
-		if apiKey != "" && apiKey != "mock_api_key" {
-			formData := url.Values{}
-			formData.Set("username", username)
-			formData.Set("to", phone)
-			formData.Set("message", message)
-			if !isSandbox {
-				formData.Set("from", sender)
-			}
+		req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payloadBytes))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("apikey", apiKey) // API key goes in the header
 
-			req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(formData.Encode()))
+			client := &http.Client{}
+			resp, err := client.Do(req)
 			if err == nil {
-				req.Header.Set("apiKey", apiKey)
-				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-				req.Header.Set("Accept", "application/json")
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+				providerResponse = string(body)
 
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err == nil {
-					defer resp.Body.Close()
-					body, _ := io.ReadAll(resp.Body)
-					providerResponse = string(body)
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						status = "sent"
-					} else {
-						log.Printf("[SMS] Africa's Talking error: %s", providerResponse)
-					}
+				// HTTP 204 = success (empty body — no content)
+				// HTTP 200 with JSON error = failure
+				if resp.StatusCode == http.StatusNoContent {
+					status = "sent"
+					providerResponse = `{"status":"success","http":204}`
 				} else {
-					providerResponse = err.Error()
-					log.Printf("[SMS] HTTP error: %v", err)
+					log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
 				}
 			} else {
 				providerResponse = err.Error()
-				log.Printf("[SMS] HTTP error: %v", err)
+				log.Printf("[SMS] Hostpinnacle HTTP error: %v", err)
 			}
 		} else {
-			// Mock mode
-			status = "sent"
-			mock := map[string]string{"status": "mock_success", "reason": "No credentials configured"}
-			b, _ := json.Marshal(mock)
-			providerResponse = string(b)
-			log.Printf("[SMS] Mock: to=%s msg=%s", phone, message)
+			providerResponse = err.Error()
+			log.Printf("[SMS] Request creation error: %v", err)
 		}
 	}
 

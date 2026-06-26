@@ -34,10 +34,7 @@ var settingDefaults = map[string]string{
 	"mpesa_paybill_account":   "",
 	"mpesa_bank_account":      "",
 	"mpesa_bank_name":         "",
-	"africastalking_api_key":   "",
-	"africastalking_username":  "sandbox",
-	"africastalking_sender":    "ZyraNet",
-	"sms_provider":             "africastalking",
+	"sms_provider":             "hostpinnacle",
 	"hostpinnacle_base_url":    "https://smsportal.hostpinnacle.co.ke/SMSApi/send",
 	"hostpinnacle_api_key":     "",
 	"hostpinnacle_username":    "",
@@ -120,7 +117,6 @@ func SettingsUpdate(c *fiber.Ctx) error {
 	credentialKeys := []string{
 		"mpesa_consumer_key", "mpesa_consumer_secret", "mpesa_passkey", "mpesa_shortcode",
 		"mpesa_till_number", "mpesa_paybill_number", "mpesa_paybill_account", "mpesa_bank_account",
-		"africastalking_api_key", "africastalking_username", "africastalking_sender",
 		"hostpinnacle_api_key", "hostpinnacle_username", "hostpinnacle_sender_id",
 	}
 	isCredKey := func(k string) bool {
