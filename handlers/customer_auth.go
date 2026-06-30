@@ -91,8 +91,11 @@ func RequestOtp(c *fiber.Ctx) error {
 
 	log.Printf("[OTP] Phone %s OTP: %s", phone, otp)
 
-	msg := fmt.Sprintf("Your Zyra Net verification code is: %s. Valid for 10 minutes.", otp)
-	if smsServiceGlobal != nil {
+	template := GetSetting("sms_template_otp")
+	msg := utils.RenderTemplate(template, map[string]string{
+		"otp": otp,
+	})
+	if smsServiceGlobal != nil && GetSetting("sms_enable_otp") != "no" {
 		go smsServiceGlobal.Send(phone, msg) //nolint:errcheck
 	}
 
@@ -612,9 +615,15 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 	}
 
 	// Send confirmation SMS
-	msg := fmt.Sprintf("Hi %s, your account is active. Package: %s Expires: %s. Paid KES %.2f via credit. Bal: KES %.2f.",
-		customer.Name, pkg.Name, expiresAt.Format("2006-01-02 15:04"), pkg.Price, newBalance)
-	go smsSvcGlobal.Send(customer.Phone, msg) //nolint:errcheck
+	templateActive := GetSetting("sms_template_active")
+	msg := utils.RenderTemplate(templateActive, map[string]string{
+		"name":    customer.Name,
+		"package": pkg.Name,
+		"expiry":  expiresAt.Format("2006-01-02 15:04"),
+	})
+	if GetSetting("sms_enable_active") != "no" {
+		go smsSvcGlobal.Send(customer.Phone, msg) //nolint:errcheck
+	}
 
 	return utils.SuccessResponse(c, fiber.Map{
 		"credit_balance": newBalance,

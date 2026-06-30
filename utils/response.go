@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -125,3 +126,13 @@ func CalculateExpiry(billingCycle string, base *time.Time) time.Time {
 		return t.AddDate(0, 1, 0)
 	}
 }
+
+// RenderTemplate replaces placeholders like {otp}, {name}, {price}, {code}, {amount}, {balance}, {package}, {expiry} in a template string.
+func RenderTemplate(template string, vars map[string]string) string {
+	res := template
+	for k, v := range vars {
+		res = strings.ReplaceAll(res, "{"+k+"}", v)
+	}
+	return res
+}
+

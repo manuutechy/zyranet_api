@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"strings"
 
@@ -27,10 +28,10 @@ func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
 	status := "failed"
 	providerResponse := ""
 
-	apiURL := s.getSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
-	apiKey := s.getSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
-	userID := s.getSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
-	sender := s.getSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
+	apiURL := s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
+	apiKey := s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
+	userID := s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
+	sender := s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
 
 	// Mock mode if required credentials are missing
 	if apiKey == "" || userID == "" {
@@ -40,41 +41,70 @@ func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
 		providerResponse = string(b)
 		log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
 	} else {
-		// Per live testing against the real API:
-		//   - Correct format: JSON body + "apikey" in the request HEADER
-		//   - Success response: HTTP 204 No Content (empty body)
-		//   - Error response: JSON {"status":"error","statusCode":"...","reason":"..."}
-		//   - Wrong format returns: status=error | errorCode=152 | reason=Invalid method
-		payload := map[string]string{
-			"userid":    userID,
-			"mobile":    phone,
-			"msg":       message,
-			"senderid":  sender,
-			"msgType":   "text",
-			"duplicate": "1",
-		}
-		payloadBytes, _ := json.Marshal(payload)
+		// Per HostPinnacle API documentation:
+		//   - Method: POST
+		//   - Format: multipart/form-data
+		//   - Headers: "apikey" contains the API Key
+		//   - Success Response: JSON {"status":"success", ...} under HTTP 200
+		//   - Error Response: JSON {"status":"error", "reason": "...", ...}
+		
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		_ = writer.WriteField("userid", userID)
+		_ = writer.WriteField("mobile", phone)
+		_ = writer.WriteField("msg", message)
+		_ = writer.WriteField("senderid", sender)
+		_ = writer.WriteField("sendMethod", "quick")
+		_ = writer.WriteField("msgType", "text")
+		_ = writer.WriteField("output", "json")
+		_ = writer.WriteField("duplicatecheck", "true")
+		_ = writer.Close()
 
-		req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payloadBytes))
+		req, err := http.NewRequest(http.MethodPost, apiURL, &body)
 		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Type", writer.FormDataContentType())
 			req.Header.Set("Accept", "application/json")
 			req.Header.Set("apikey", apiKey) // API key goes in the header
+			req.Close = true
 
 			client := &http.Client{}
 			resp, err := client.Do(req)
 			if err == nil {
 				defer resp.Body.Close()
-				body, _ := io.ReadAll(resp.Body)
-				providerResponse = string(body)
+				respBytes, _ := io.ReadAll(resp.Body)
+				providerResponse = string(respBytes)
 
-				// HTTP 204 = success (empty body — no content)
-				// HTTP 200 with JSON error = failure
-				if resp.StatusCode == http.StatusNoContent {
-					status = "sent"
-					providerResponse = `{"status":"success","http":204}`
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+					// Parse response to check for status=success
+					var hpResp struct {
+						Status     string `json:"status"`
+						Reason     string `json:"reason"`
+						StatusCode string `json:"statusCode"`
+					}
+					// Handle JSON response
+					if len(respBytes) > 0 {
+						var parsed map[string]interface{}
+						if errUnmarshal := json.Unmarshal(respBytes, &parsed); errUnmarshal == nil {
+							if statusVal, ok := parsed["status"].(string); ok {
+								hpResp.Status = statusVal
+							}
+							if reasonVal, ok := parsed["reason"].(string); ok {
+								hpResp.Reason = reasonVal
+							}
+							if codeVal, ok := parsed["statusCode"].(string); ok {
+								hpResp.StatusCode = codeVal
+							}
+						}
+					}
+					
+					// HostPinnacle returns "success" status for successful SMS delivery
+					if hpResp.Status == "success" || resp.StatusCode == http.StatusNoContent {
+						status = "sent"
+					} else {
+						log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
+					}
 				} else {
-					log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
+					log.Printf("[SMS] Hostpinnacle HTTP error status=%d: %s", resp.StatusCode, providerResponse)
 				}
 			} else {
 				providerResponse = err.Error()
@@ -102,8 +132,8 @@ func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
 	return logEntry, nil
 }
 
-// getSetting returns value from settings table or falls back to default.
-func (s *SmsService) getSetting(key, defaultVal string) string {
+// GetSetting returns value from settings table or falls back to default.
+func (s *SmsService) GetSetting(key, defaultVal string) string {
 	var setting models.Setting
 	if err := config.DB.Where("`key` = ?", key).First(&setting).Error; err == nil && setting.Value != nil {
 		v := strings.TrimSpace(*setting.Value)

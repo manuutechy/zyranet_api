@@ -92,8 +92,15 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, err.Error(), "Failed to generate voucher.", fiber.StatusInternalServerError)
 		}
 		voucherID = &voucher.ID
-		msg := "Hi, cash payment of KES " + formatAmount(body.Amount) + " received. Your voucher code is " + voucher.Code + ". Enjoy browsing!"
-		go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+		template := GetSetting("sms_template_voucher")
+		msg := utils.RenderTemplate(template, map[string]string{
+			"name":  "Guest",
+			"price": formatAmount(body.Amount),
+			"code":  voucher.Code,
+		})
+		if GetSetting("sms_enable_voucher") != "no" {
+			go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+		}
 	} else {
 		// Renewing an existing customer
 		var customer models.Customer
@@ -106,8 +113,15 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			"package_id": pkg.ID,
 			"expires_at": expiresAt,
 		})
-		msg := "Hi " + customer.Name + ", payment of KES " + formatAmount(body.Amount) + " received. Your account is active. Expires: " + expiresAt.Format("2006-01-02 15:04") + "."
-		go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+		templateActive := GetSetting("sms_template_active")
+		msg := utils.RenderTemplate(templateActive, map[string]string{
+			"name":    customer.Name,
+			"package": pkg.Name,
+			"expiry":  expiresAt.Format("2006-01-02 15:04"),
+		})
+		if GetSetting("sms_enable_active") != "no" {
+			go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+		}
 	}
 
 	payment := models.Payment{

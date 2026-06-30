@@ -368,9 +368,15 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 					Note:       &note,
 				})
 
-				msg := fmt.Sprintf("Hi %s, KES %.2f credited to your account. Your new balance is KES %.2f. Enjoy browsing!",
-					customer.Name, payment.Amount, newBalance)
-				go s.SMS.Send(phone, msg)
+				template := s.SMS.GetSetting("sms_template_credit", "Hi {name}, KES {amount} credited to your account. Your new balance is KES {balance}. Enjoy browsing!")
+				msg := utils.RenderTemplate(template, map[string]string{
+					"name":    customer.Name,
+					"amount":  fmt.Sprintf("%.2f", payment.Amount),
+					"balance": fmt.Sprintf("%.2f", newBalance),
+				})
+				if s.SMS.GetSetting("sms_enable_credit", "yes") != "no" {
+					go s.SMS.Send(phone, msg)
+				}
 			}
 		}
 		return nil
@@ -419,8 +425,15 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	}
 
 	if voucher != nil {
-		msg := fmt.Sprintf("Hi, payment of KES %.0f received. Your voucher code is %s. Enjoy browsing!", payment.Amount, voucher.Code)
-		go s.SMS.Send(phone, msg) //nolint:errcheck
+		template := s.SMS.GetSetting("sms_template_voucher", "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!")
+		msg := utils.RenderTemplate(template, map[string]string{
+			"name":  "Guest",
+			"price": fmt.Sprintf("%.0f", payment.Amount),
+			"code":  voucher.Code,
+		})
+		if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
+			go s.SMS.Send(phone, msg) //nolint:errcheck
+		}
 	} else if payment.CustomerID != nil {
 		var customer models.Customer
 		if err := config.DB.First(&customer, *payment.CustomerID).Error; err == nil {
@@ -431,9 +444,15 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 				"zone_id":    pkg.ZoneID,
 				"expires_at": expiresAt,
 			})
-			msg := fmt.Sprintf("Hi %s, your account is active. Package: %s Expires: %s. Support: 0113297270",
-				customer.Name, pkg.Name, expiresAt.Format("2006-01-02 15:04"))
-			go s.SMS.Send(phone, msg) //nolint:errcheck
+			templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
+			msg := utils.RenderTemplate(templateActive, map[string]string{
+				"name":    customer.Name,
+				"package": pkg.Name,
+				"expiry":  expiresAt.Format("2006-01-02 15:04"),
+			})
+			if s.SMS.GetSetting("sms_enable_active", "yes") != "no" {
+				go s.SMS.Send(phone, msg) //nolint:errcheck
+			}
 		}
 	}
 

@@ -120,8 +120,15 @@ func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, err
 	})
 
 	// Send SMS
-	msg := fmt.Sprintf("Hi %s, payment of KES %.0f received. Your voucher code is %s. Enjoy browsing!", customer.Name, pkg.Price, voucher.Code)
-	go s.SMS.Send(phone, msg) //nolint:errcheck
+	template := s.SMS.GetSetting("sms_template_voucher", "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!")
+	msg := utils.RenderTemplate(template, map[string]string{
+		"name":  customer.Name,
+		"price": fmt.Sprintf("%.0f", pkg.Price),
+		"code":  voucher.Code,
+	})
+	if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
+		go s.SMS.Send(phone, msg) //nolint:errcheck
+	}
 
 	return map[string]interface{}{
 		"voucher":  voucher,

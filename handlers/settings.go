@@ -39,6 +39,14 @@ var settingDefaults = map[string]string{
 	"hostpinnacle_api_key":     "",
 	"hostpinnacle_username":    "",
 	"hostpinnacle_sender_id":   "",
+	"sms_template_otp":         "Your Zyra Net verification code is: {otp}. Valid for 10 minutes.",
+	"sms_template_voucher":     "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!",
+	"sms_template_credit":      "Hi {name}, KES {amount} credited to your account. Your new balance is KES {balance}. Enjoy browsing!",
+	"sms_template_active":      "Hi {name}, your account is active. Package: {package} Expires: {expiry}.",
+	"sms_enable_otp":           "yes",
+	"sms_enable_voucher":       "yes",
+	"sms_enable_credit":        "yes",
+	"sms_enable_active":        "yes",
 	"banner_image_url":         "",
 	"banner_enabled":           "yes",
 }
@@ -210,3 +218,16 @@ func randomHex(n int) string {
 	crand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
+
+// GetSetting returns the value of a setting from the database, or falls back to default.
+func GetSetting(key string) string {
+	var setting models.Setting
+	if err := config.DB.Where("`key` = ?", key).First(&setting).Error; err == nil && setting.Value != nil {
+		v := strings.TrimSpace(*setting.Value)
+		if v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(settingDefaults[key])
+}
+
