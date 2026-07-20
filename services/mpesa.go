@@ -339,7 +339,7 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 // ProcessPaymentSuccess handles database and network/side-effects for a successful STK payment.
 func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNumber, phone string) error {
 	res := config.DB.Model(&models.Payment{}).
-		Where("id = ? AND status = ?", payment.ID, "pending").
+		Where("id = ? AND (status = ? OR (status = ? AND status_reason = ?))", payment.ID, "pending", "failed", "The transaction is still under processing").
 		Updates(map[string]interface{}{
 			"status":               "completed",
 			"mpesa_receipt_number": receiptNumber,
@@ -462,7 +462,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 // ProcessPaymentFailure handles database updates for a failed STK payment.
 func (s *MpesaService) ProcessPaymentFailure(payment *models.Payment, reason string) error {
 	res := config.DB.Model(&models.Payment{}).
-		Where("id = ? AND status = ?", payment.ID, "pending").
+		Where("id = ? AND (status = ? OR (status = ? AND status_reason = ?))", payment.ID, "pending", "failed", "The transaction is still under processing").
 		Updates(map[string]interface{}{
 			"status":        "failed",
 			"status_reason": reason,
@@ -563,6 +563,9 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		return "pending", nil
 	}
 	if errMsg, ok := result["errorMessage"].(string); ok && (strings.Contains(strings.ToLower(errMsg), "process") || strings.Contains(strings.ToLower(errMsg), "progress")) {
+		return "pending", nil
+	}
+	if rd, ok := result["ResultDesc"].(string); ok && (strings.Contains(strings.ToLower(rd), "process") || strings.Contains(strings.ToLower(rd), "progress") || strings.Contains(strings.ToLower(rd), "pending")) {
 		return "pending", nil
 	}
 
