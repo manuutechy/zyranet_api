@@ -115,6 +115,7 @@ func Register(app *fiber.App) {
 	admin.Post("/zones/:id/disconnect-client", adminAuth, handlers.ZoneDisconnectClient)
 	admin.Get("/zones/:id/active-sessions", adminAuth, handlers.ZoneActiveSessions)
 	admin.Get("/zones/:id/stats-history", adminAuth, handlers.ZoneStatsHistory)
+	admin.Post("/zones/:id/exec", adminAuth, handlers.ZoneExecCommand)
 
 	// Packages — pricing/speed changes are restricted to super_admin and zone_manager
 	managesPackages := middleware.RequireRoles("super_admin", "zone_manager")

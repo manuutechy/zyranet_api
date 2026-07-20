@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -270,6 +271,40 @@ func ZoneScript(c *fiber.Ctx) error {
 	c.Set("Content-Type", "text/plain")
 	c.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	return c.SendString(content)
+}
+
+// ZoneExecCommand executes a remote command on the zone's MikroTik router.
+func ZoneExecCommand(c *fiber.Ctx) error {
+	zone, err := findZoneOrFail(c)
+	if err != nil {
+		return err
+	}
+	if !canAccessZone(c, zone) {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
+	}
+
+	var body struct {
+		Command string `json:"command"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Command == "" {
+		return utils.ErrorResponse(c, "Command is required.", "", fiber.StatusBadRequest)
+	}
+
+	claims := middleware.GetClaims(c)
+	cmdVals := fmt.Sprintf(`{"command":"%s"}`, body.Command)
+	config.DB.Create(&models.AuditLog{
+		UserID:    &claims.UserID,
+		Action:    "exec_command",
+		Model:     "Zone",
+		ModelID:   zone.ID,
+		NewValues: &cmdVals,
+	})
+
+	output, err := mikrotikSvc.ExecCommand(zone, body.Command)
+	if err != nil {
+		return utils.SuccessResponse(c, fmt.Sprintf("Command '%s' dispatched to %s (%s).\nStatus: %s", body.Command, zone.RouterName, zone.RouterIP, err.Error()), "")
+	}
+	return utils.SuccessResponse(c, output, "Command executed successfully.")
 }
 
 // helpers

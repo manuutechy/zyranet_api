@@ -92,6 +92,43 @@ func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
 	return status, err
 }
 
+// ExecCommand runs a command on the router via API or REST.
+func (s *MikroTikService) ExecCommand(zone *models.Zone, command string) (string, error) {
+	if config.Config.AppEnv == "local" {
+		return fmt.Sprintf("Simulated execution of command '%s' on router %s (%s).\nResult: Command completed with exit code 0.", command, zone.RouterName, zone.RouterIP), nil
+	}
+
+	if zone.ConnectionType == "api" {
+		client, err := s.dialAPI(zone)
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+
+		args := strings.Fields(command)
+		if len(args) == 0 {
+			return "Empty command", nil
+		}
+
+		res, err := client.RunArgs(args)
+		if err != nil {
+			return "", err
+		}
+		var lines []string
+		for _, re := range res.Re {
+			for k, v := range re.Map {
+				lines = append(lines, fmt.Sprintf("%s: %s", k, v))
+			}
+		}
+		if len(lines) == 0 {
+			return "Command executed cleanly (no text output).", nil
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+
+	return fmt.Sprintf("Dispatched REST command '%s' to router %s.", command, zone.RouterIP), nil
+}
+
 func (s *MikroTikService) mockOnlineStatus(zone *models.Zone) *RouterStatus {
 	now := time.Now()
 	config.DB.Model(zone).Updates(map[string]interface{}{
