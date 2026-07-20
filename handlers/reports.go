@@ -194,31 +194,41 @@ func ReportZones(c *fiber.Ctx) error {
 }
 
 // ReportServiceTypes breaks down hotspot vs PPPoE performance: active
-// sessions right now, sessions started today, today's revenue, and active
-// customers. Revenue is attributed via the payment's package type (rather
-// than the paying customer's type) since anonymous hotspot-pay flows have
-// no customer record at all.
+// sessions right now, sessions started today, today's revenue, weekly revenue,
+// monthly revenue, active customers, and total customers.
 func ReportServiceTypes(c *fiber.Ctx) error {
 	zoneID := scopedZoneID(c, c.Query("zone_id"))
-	today := time.Now().Format("2006-01-02")
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
+	monthStart := now.Format("2006-01") + "-01"
 
 	type ServiceTypeStats struct {
-		Type            string  `json:"type"`
-		ActiveSessions  int64   `json:"active_sessions"`
-		SessionsToday   int64   `json:"sessions_today"`
-		RevenueToday    float64 `json:"revenue_today"`
-		ActiveCustomers int64   `json:"active_customers"`
+		Type             string  `json:"type"`
+		ActiveSessions   int64   `json:"active_sessions"`
+		SessionsToday    int64   `json:"sessions_today"`
+		RevenueToday     float64 `json:"revenue_today"`
+		RevenueThisWeek  float64 `json:"revenue_this_week"`
+		RevenueThisMonth float64 `json:"revenue_this_month"`
+		ActiveCustomers  int64   `json:"active_customers"`
+		TotalCustomers   int64   `json:"total_customers"`
 	}
 
 	stats := []ServiceTypeStats{}
 	for _, t := range []string{"hotspot", "pppoe"} {
 		s := ServiceTypeStats{Type: t}
 
-		customerQuery := config.DB.Model(&models.Customer{}).Where("type = ? AND status = ?", t, "active")
+		customerQuery := config.DB.Model(&models.Customer{}).Where("type = ?", t)
 		if zoneID != "" {
 			customerQuery = customerQuery.Where("zone_id = ?", zoneID)
 		}
-		customerQuery.Count(&s.ActiveCustomers)
+		customerQuery.Count(&s.TotalCustomers)
+
+		activeCustomerQuery := config.DB.Model(&models.Customer{}).Where("type = ? AND status = ?", t, "active")
+		if zoneID != "" {
+			activeCustomerQuery = activeCustomerQuery.Where("zone_id = ?", zoneID)
+		}
+		activeCustomerQuery.Count(&s.ActiveCustomers)
 
 		activeSessionsQuery := config.DB.Model(&models.Session{}).
 			Joins("JOIN customers ON customers.id = sessions.customer_id").
@@ -236,13 +246,32 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		}
 		sessionsTodayQuery.Count(&s.SessionsToday)
 
-		revenueQuery := config.DB.Model(&models.Payment{}).
+		// Revenue Today
+		revTodayQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
 			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) = ?", t, "completed", today)
 		if zoneID != "" {
-			revenueQuery = revenueQuery.Where("payments.zone_id = ?", zoneID)
+			revTodayQuery = revTodayQuery.Where("payments.zone_id = ?", zoneID)
 		}
-		revenueQuery.Select("COALESCE(SUM(payments.amount), 0)").Scan(&s.RevenueToday)
+		revTodayQuery.Select("COALESCE(SUM(payments.amount), 0)").Scan(&s.RevenueToday)
+
+		// Revenue This Week
+		revWeekQuery := config.DB.Model(&models.Payment{}).
+			Joins("JOIN packages ON packages.id = payments.package_id").
+			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) >= ?", t, "completed", weekStart)
+		if zoneID != "" {
+			revWeekQuery = revWeekQuery.Where("payments.zone_id = ?", zoneID)
+		}
+		revWeekQuery.Select("COALESCE(SUM(payments.amount), 0)").Scan(&s.RevenueThisWeek)
+
+		// Revenue This Month
+		revMonthQuery := config.DB.Model(&models.Payment{}).
+			Joins("JOIN packages ON packages.id = payments.package_id").
+			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) >= ?", t, "completed", monthStart)
+		if zoneID != "" {
+			revMonthQuery = revMonthQuery.Where("payments.zone_id = ?", zoneID)
+		}
+		revMonthQuery.Select("COALESCE(SUM(payments.amount), 0)").Scan(&s.RevenueThisMonth)
 
 		stats = append(stats, s)
 	}
