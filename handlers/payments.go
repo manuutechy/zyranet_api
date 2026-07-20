@@ -52,7 +52,7 @@ func PaymentShow(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, payment, "")
 }
 
-// PaymentRecordManual records a cash/manual payment.
+// PaymentRecordManual records a cash, C2B, or offline manual payment.
 func PaymentRecordManual(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	allowed := []string{"super_admin", "zone_manager", "finance"}
@@ -64,30 +64,51 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		}
 	}
 	if !isAllowed {
-		return utils.ErrorResponse(c, "Unauthorized to record manual payments.", "", fiber.StatusForbidden)
+		return utils.ErrorResponse(c, "Unauthorized to record manual/C2B payments.", "", fiber.StatusForbidden)
 	}
 
 	var body struct {
-		CustomerID *uint   `json:"customer_id"`
-		ZoneID     uint    `json:"zone_id"`
-		PackageID  uint    `json:"package_id"`
-		Phone      string  `json:"phone"`
-		Amount     float64 `json:"amount"`
+		CustomerID         *uint   `json:"customer_id"`
+		ZoneID             uint    `json:"zone_id"`
+		PackageID          *uint   `json:"package_id"`
+		Phone              string  `json:"phone"`
+		Amount             float64 `json:"amount"`
+		Method             string  `json:"method"` // manual | mpesa_c2b | bank
+		MpesaReceiptNumber string  `json:"mpesa_receipt_number"`
+		Action             string  `json:"action"` // renew | credit | credit_and_renew
 	}
-	if err := c.BodyParser(&body); err != nil {
-		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	if err := c.BodyParser(&body); err != nil || body.Amount <= 0 {
+		return utils.ErrorResponse(c, "Invalid request body or amount.", "", fiber.StatusBadRequest)
+	}
+
+	if body.Method == "" {
+		body.Method = "manual"
+	}
+	if body.Action == "" {
+		body.Action = "renew"
 	}
 
 	var pkg models.Package
-	if err := config.DB.First(&pkg, body.PackageID).Error; err != nil {
-		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
+	var packageIDPtr *uint
+	if body.PackageID != nil && *body.PackageID > 0 {
+		if err := config.DB.First(&pkg, *body.PackageID).Error; err == nil {
+			packageIDPtr = &pkg.ID
+		}
 	}
 
 	var voucherID *uint
+	var receiptPtr *string
+	if strings.TrimSpace(body.MpesaReceiptNumber) != "" {
+		ref := strings.TrimSpace(body.MpesaReceiptNumber)
+		receiptPtr = &ref
+	}
 
-	if body.CustomerID == nil {
-		// Hotspot voucher cash purchase
-		voucher, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, "single_use", 1)
+	if body.CustomerID == nil || *body.CustomerID == 0 {
+		// Hotspot voucher cash/C2B purchase
+		if packageIDPtr == nil {
+			return utils.ErrorResponse(c, "Package required for voucher generation.", "", fiber.StatusBadRequest)
+		}
+		voucher, err := voucherSvcGlobal.Generate(body.ZoneID, *packageIDPtr, "single_use", 1)
 		if err != nil {
 			return utils.ErrorResponse(c, err.Error(), "Failed to generate voucher.", fiber.StatusInternalServerError)
 		}
@@ -98,45 +119,90 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			"price": formatAmount(body.Amount),
 			"code":  voucher.Code,
 		})
-		if GetSetting("sms_enable_voucher") != "no" {
+		if GetSetting("sms_enable_voucher") != "no" && body.Phone != "" {
 			go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
 		}
 	} else {
-		// Renewing an existing customer
+		// Existing subscriber payment
 		var customer models.Customer
 		if err := config.DB.First(&customer, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
-		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, nil)
-		config.DB.Model(&customer).Updates(map[string]interface{}{
-			"status":     "active",
-			"package_id": pkg.ID,
-			"expires_at": expiresAt,
-		})
-		templateActive := GetSetting("sms_template_active")
-		msg := utils.RenderTemplate(templateActive, map[string]string{
-			"name":    customer.Name,
-			"package": pkg.Name,
-			"expiry":  expiresAt.Format("2006-01-02 15:04"),
-		})
-		if GetSetting("sms_enable_active") != "no" {
-			go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+
+		if body.Action == "credit" || body.Action == "credit_and_renew" {
+			// Add amount as credit balance
+			customer.CreditBalance += body.Amount
+			config.DB.Model(&customer).Update("credit_balance", customer.CreditBalance)
+
+			note := fmt.Sprintf("Offline/C2B payment added as credit (%s)", body.Method)
+			if receiptPtr != nil {
+				note = fmt.Sprintf("C2B/Offline Payment Ref: %s (%s)", *receiptPtr, body.Method)
+			}
+			config.DB.Create(&models.CreditLog{
+				CustomerID: customer.ID,
+				Amount:     body.Amount,
+				Type:       "credit",
+				Note:       &note,
+				AddedBy:    &claims.UserID,
+			})
+		}
+
+		if (body.Action == "renew" || body.Action == "credit_and_renew") && packageIDPtr != nil {
+			// Check if auto-renewing from credit balance
+			if body.Action == "credit_and_renew" && customer.CreditBalance >= pkg.Price {
+				customer.CreditBalance -= pkg.Price
+				config.DB.Model(&customer).Update("credit_balance", customer.CreditBalance)
+
+				debitNote := fmt.Sprintf("Package %s auto-renewed from credit", pkg.Name)
+				config.DB.Create(&models.CreditLog{
+					CustomerID: customer.ID,
+					Amount:     pkg.Price,
+					Type:       "debit",
+					Note:       &debitNote,
+					AddedBy:    &claims.UserID,
+				})
+			}
+
+			expiresAt := utils.CalculateExpiry(pkg.BillingCycle, nil)
+			config.DB.Model(&customer).Updates(map[string]interface{}{
+				"status":     "active",
+				"package_id": pkg.ID,
+				"expires_at": expiresAt,
+			})
+
+			templateActive := GetSetting("sms_template_active")
+			msg := utils.RenderTemplate(templateActive, map[string]string{
+				"name":    customer.Name,
+				"package": pkg.Name,
+				"expiry":  expiresAt.Format("2006-01-02 15:04"),
+			})
+			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
+				go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+			}
+		} else if body.Action == "credit" {
+			// Send credit notification SMS
+			msg := fmt.Sprintf("Hi %s, KES %.2f has been credited to your Zyra Net account. New Balance: KES %.2f.",
+				customer.Name, body.Amount, customer.CreditBalance)
+			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
+				go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+			}
 		}
 	}
 
 	payment := models.Payment{
-		CustomerID: body.CustomerID,
-		VoucherID:  voucherID,
-		ZoneID:     body.ZoneID,
-		PackageID:  &body.PackageID,
-		Phone:      body.Phone,
-		Amount:     body.Amount,
-		Currency:   "KES",
-		Method:     "manual",
-		Status:     "completed",
+		CustomerID:         body.CustomerID,
+		VoucherID:          voucherID,
+		ZoneID:             body.ZoneID,
+		PackageID:          packageIDPtr,
+		Phone:              body.Phone,
+		Amount:             body.Amount,
+		Currency:           "KES",
+		Method:             body.Method,
+		MpesaReceiptNumber: receiptPtr,
+		Status:             "completed",
 	}
 	config.DB.Create(&payment)
-	return utils.SuccessResponse(c, payment, "Manual payment recorded successfully.", fiber.StatusCreated)
+	return utils.SuccessResponse(c, payment, "Payment and credit recorded successfully.", fiber.StatusCreated)
 }
 
 func formatAmount(amount float64) string {
