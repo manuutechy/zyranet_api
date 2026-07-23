@@ -19,12 +19,25 @@ import (
 func OrganizationMpesaShow(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 
-	var cfg models.OrganizationMpesaConfig
-	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&cfg).Error; err != nil {
-		return utils.SuccessResponse(c, fiber.Map{"mode": "platform"}, "")
+	var org models.Organization
+	config.DB.First(&org, claims.OrganizationID)
+	settlement := fiber.Map{
+		"settlement_type":           org.SettlementType,
+		"settlement_till_number":    org.SettlementTillNumber,
+		"settlement_paybill_number": org.SettlementPaybillNumber,
+		"settlement_account_number": org.SettlementAccountNumber,
 	}
 
-	return utils.SuccessResponse(c, fiber.Map{
+	var cfg models.OrganizationMpesaConfig
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&cfg).Error; err != nil {
+		result := fiber.Map{"mode": "platform"}
+		for k, v := range settlement {
+			result[k] = v
+		}
+		return utils.SuccessResponse(c, result, "")
+	}
+
+	result := fiber.Map{
 		"mode":                cfg.Mode,
 		"consumer_key":        cfg.ConsumerKey,
 		"has_consumer_secret": cfg.ConsumerSecret != "",
@@ -38,7 +51,11 @@ func OrganizationMpesaShow(c *fiber.Ctx) error {
 		"paybill_account":     cfg.PaybillAccount,
 		"bank_name":           cfg.BankName,
 		"bank_account":        cfg.BankAccount,
-	}, "")
+	}
+	for k, v := range settlement {
+		result[k] = v
+	}
+	return utils.SuccessResponse(c, result, "")
 }
 
 // OrganizationMpesaUpdate lets an ISP super_admin switch between the
@@ -66,12 +83,36 @@ func OrganizationMpesaUpdate(c *fiber.Ctx) error {
 		PaybillAccount string `json:"paybill_account"`
 		BankName       string `json:"bank_name"`
 		BankAccount    string `json:"bank_account"`
+
+		// Where Zyra Net should route this ISP's share when they're on
+		// "platform" Daraja mode. Ignored (left untouched) when mode is "own".
+		SettlementType          string `json:"settlement_type"`
+		SettlementTillNumber    string `json:"settlement_till_number"`
+		SettlementPaybillNumber string `json:"settlement_paybill_number"`
+		SettlementAccountNumber string `json:"settlement_account_number"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 	if body.Mode != "platform" && body.Mode != "own" {
 		return utils.ErrorResponse(c, "mode must be 'platform' or 'own'.", "", fiber.StatusUnprocessableEntity)
+	}
+	if body.Mode == "platform" {
+		if body.SettlementType != "till" && body.SettlementType != "paybill" {
+			return utils.ErrorResponse(c, "settlement_type must be 'till' or 'paybill'.", "", fiber.StatusUnprocessableEntity)
+		}
+		if body.SettlementType == "till" && body.SettlementTillNumber == "" {
+			return utils.ErrorResponse(c, "settlement_till_number is required for till settlement.", "", fiber.StatusUnprocessableEntity)
+		}
+		if body.SettlementType == "paybill" && (body.SettlementPaybillNumber == "" || body.SettlementAccountNumber == "") {
+			return utils.ErrorResponse(c, "settlement_paybill_number and settlement_account_number are required for paybill settlement.", "", fiber.StatusUnprocessableEntity)
+		}
+		config.DB.Model(&models.Organization{}).Where("id = ?", claims.OrganizationID).Updates(map[string]interface{}{
+			"settlement_type":           body.SettlementType,
+			"settlement_till_number":    body.SettlementTillNumber,
+			"settlement_paybill_number": body.SettlementPaybillNumber,
+			"settlement_account_number": body.SettlementAccountNumber,
+		})
 	}
 
 	var cfg models.OrganizationMpesaConfig

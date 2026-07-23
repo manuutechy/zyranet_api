@@ -88,6 +88,14 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(fmt.Sprintf("/ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie split-user-domain=no dns-name=login.zyranet.lan\n", gatewayIP))
 	sb.WriteString("/ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=5m keepalive-timeout=2m disabled=no\n\n")
 
+	// Allow the cloud captive portal through the walled garden so a client
+	// can reach it before authenticating. The router's own login.html (see
+	// the "Download Login Page" button in the admin panel — it must be
+	// uploaded separately via WinBox's Files pane, since RouterOS hotspot
+	// login pages aren't provisionable via .rsc script) redirects there.
+	sb.WriteString("# --- Walled Garden: allow the cloud captive portal ---\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=captive.zyranet.co.ke action=allow comment=\"Zyra Net Captive Portal\"\n\n")
+
 	// Hotspot Profiles
 	sb.WriteString("# --- Hotspot User Profiles ---\n")
 	for _, pkg := range packages {

@@ -53,6 +53,7 @@ func Register(app *fiber.App) {
 	// Public settings & packages
 	v1.Get("/public/settings", handlers.SettingsPublic)
 	v1.Get("/public/packages", handlers.PackagePublic)
+	v1.Get("/public/captive-settings", handlers.CaptivePortalPublicSettings)
 	v1.Get("/payments/:id/invoice", handlers.PaymentInvoice)
 
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
@@ -117,6 +118,7 @@ func Register(app *fiber.App) {
 	admin.Put("/zones/:id", adminAuth, handlers.ZoneUpdate)
 	admin.Delete("/zones/:id", adminAuth, handlers.ZoneDestroy)
 	admin.Get("/zones/:id/script", adminAuth, handlers.MikroTikScriptGenerate)
+	admin.Get("/zones/:id/captive-login-html", adminAuth, handlers.ZoneCaptiveLoginHTML)
 	admin.Get("/zones/:id/status", adminAuth, handlers.ZoneStatus)
 	admin.Post("/zones/:id/test-connection", adminAuth, handlers.ZoneTestConnection)
 	admin.Post("/zones/:id/push-config", adminAuth, handlers.ZonePushConfig)
@@ -172,6 +174,8 @@ func Register(app *fiber.App) {
 	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
 	admin.Get("/settings/mpesa", adminAuth, handlers.OrganizationMpesaShow)
 	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
+	admin.Get("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsShow)
+	admin.Post("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsUpdate)
 
 	// Platform billing (read-only view of what Zyra Net has invoiced this ISP)
 	admin.Get("/billing/invoices", adminAuth, handlers.AdminPlatformInvoiceIndex)
