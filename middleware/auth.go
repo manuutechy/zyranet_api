@@ -12,17 +12,20 @@ import (
 
 // Claims holds the JWT payload fields.
 type Claims struct {
-	UserID     uint   `json:"user_id,omitempty"`
-	CustomerID uint   `json:"customer_id,omitempty"`
-	Role       string `json:"role,omitempty"`
-	ZoneID     *uint  `json:"zone_id,omitempty"`
-	Type       string `json:"type"` // "admin" or "customer"
+	UserID         uint   `json:"user_id,omitempty"`
+	CustomerID     uint   `json:"customer_id,omitempty"`
+	PlatformUserID uint   `json:"platform_user_id,omitempty"`
+	Role           string `json:"role,omitempty"`
+	ZoneID         *uint  `json:"zone_id,omitempty"`
+	OrganizationID uint   `json:"organization_id,omitempty"`
+	Type           string `json:"type"` // "admin", "customer", or "platform"
 	jwt.RegisteredClaims
 }
 
 const (
 	AdminCookieName    = "zyra_admin_token"
 	CustomerCookieName = "zyra_customer_token"
+	PlatformCookieName = "zyra_platform_token"
 )
 
 // SetAuthCookie writes an httpOnly session cookie carrying the JWT. The
@@ -69,6 +72,26 @@ func AdminAuth() fiber.Handler {
 		c.Locals("userID", claims.UserID)
 		c.Locals("role", claims.Role)
 		c.Locals("zoneID", claims.ZoneID)
+		c.Locals("organizationID", claims.OrganizationID)
+		return c.Next()
+	}
+}
+
+// PlatformAuth validates the JWT token for Super Admin (SA) platform users.
+// It is deliberately separate from AdminAuth/CustomerAuth so a platform
+// credential is never reachable through the per-ISP admin or customer
+// login flows.
+func PlatformAuth() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, err := extractAndValidate(c, PlatformCookieName)
+		if err != nil {
+			return utils.ErrorResponse(c, "Unauthenticated.", "Invalid or missing token.", fiber.StatusUnauthorized)
+		}
+		if claims.Type != "platform" {
+			return utils.ErrorResponse(c, "Forbidden.", "Platform access required.", fiber.StatusForbidden)
+		}
+		c.Locals("claims", claims)
+		c.Locals("platformUserID", claims.PlatformUserID)
 		return c.Next()
 	}
 }
@@ -90,12 +113,25 @@ func CustomerAuth() fiber.Handler {
 }
 
 // GenerateAdminToken creates a signed JWT for an admin user.
-func GenerateAdminToken(userID uint, role string, zoneID *uint) (string, error) {
+func GenerateAdminToken(userID uint, role string, zoneID *uint, organizationID uint) (string, error) {
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
-		ZoneID: zoneID,
-		Type:   "admin",
+		UserID:         userID,
+		Role:           role,
+		ZoneID:         zoneID,
+		OrganizationID: organizationID,
+		Type:           "admin",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.Config.JWTExpiry)),
+		},
+	}
+	return signToken(claims)
+}
+
+// GeneratePlatformToken creates a signed JWT for a Super Admin platform user.
+func GeneratePlatformToken(platformUserID uint) (string, error) {
+	claims := Claims{
+		PlatformUserID: platformUserID,
+		Type:           "platform",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.Config.JWTExpiry)),
 		},

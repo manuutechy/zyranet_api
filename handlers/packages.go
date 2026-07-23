@@ -3,17 +3,23 @@ package handlers
 import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
+	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
 // PackageIndex lists all packages (paginated with filters).
 func PackageIndex(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
 	page, perPage := utils.ParsePage(c)
 	var pkgs []models.Package
 	var total int64
 
-	query := config.DB.Model(&models.Package{}).Preload("Zone")
+	query := config.DB.Model(&models.Package{}).Preload("Zone").Where("zone_id IN (?)", orgZoneIDs)
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
@@ -42,9 +48,14 @@ func PackagePublic(c *fiber.Ctx) error {
 
 // PackageStore creates a new package.
 func PackageStore(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
 	var pkg models.Package
 	if err := c.BodyParser(&pkg); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+	var targetZone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, pkg.ZoneID).Error; err != nil {
+		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 	}
 	if err := config.DB.Create(&pkg).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create package.", fiber.StatusInternalServerError)
@@ -55,8 +66,12 @@ func PackageStore(c *fiber.Ctx) error {
 
 // PackageShow returns a single package.
 func PackageShow(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var pkg models.Package
-	if err := config.DB.Preload("Zone").First(&pkg, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, pkg, "")
@@ -64,8 +79,12 @@ func PackageShow(c *fiber.Ctx) error {
 
 // PackageUpdate updates a package.
 func PackageUpdate(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var pkg models.Package
-	if err := config.DB.First(&pkg, c.Params("id")).Error; err != nil {
+	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
 	var body map[string]interface{}
@@ -79,7 +98,15 @@ func PackageUpdate(c *fiber.Ctx) error {
 
 // PackageDestroy soft-deletes a package.
 func PackageDestroy(c *fiber.Ctx) error {
-	if err := config.DB.Delete(&models.Package{}, c.Params("id")).Error; err != nil {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+	var pkg models.Package
+	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
+		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
+	}
+	if err := config.DB.Delete(&models.Package{}, pkg.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Package deleted successfully.")
@@ -87,8 +114,13 @@ func PackageDestroy(c *fiber.Ctx) error {
 
 // PackageDuplicate duplicates a package to multiple target zones.
 func PackageDuplicate(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var pkg models.Package
-	if err := config.DB.First(&pkg, c.Params("id")).Error; err != nil {
+	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Source package not found.", "", fiber.StatusNotFound)
 	}
 
@@ -101,9 +133,9 @@ func PackageDuplicate(c *fiber.Ctx) error {
 
 	duplicatedCount := 0
 	for _, zoneID := range body.ZoneIDs {
-		// Verify zone exists
+		// Verify the target zone exists and belongs to the same Organization
 		var zone models.Zone
-		if err := config.DB.First(&zone, zoneID).Error; err != nil {
+		if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, zoneID).Error; err != nil {
 			continue
 		}
 

@@ -20,7 +20,7 @@ func UserIndex(c *fiber.Ctx) error {
 	var users []models.User
 	var total int64
 
-	query := config.DB.Model(&models.User{}).Preload("Zone")
+	query := config.DB.Model(&models.User{}).Preload("Zone").Where("organization_id = ?", claims.OrganizationID)
 	if r := c.Query("role"); r != "" {
 		query = query.Where("role = ?", r)
 	}
@@ -68,13 +68,14 @@ func UserStore(c *fiber.Ctx) error {
 	}
 
 	user := models.User{
-		Name:     body.Name,
-		Email:    body.Email,
-		Password: string(hash),
-		Phone:    body.Phone,
-		Role:     body.Role,
-		ZoneID:   body.ZoneID,
-		Status:   body.Status,
+		Name:           body.Name,
+		Email:          body.Email,
+		Password:       string(hash),
+		Phone:          body.Phone,
+		Role:           body.Role,
+		ZoneID:         body.ZoneID,
+		OrganizationID: claims.OrganizationID,
+		Status:         body.Status,
 	}
 
 	if err := config.DB.Create(&user).Error; err != nil {
@@ -90,7 +91,7 @@ func UserShow(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	var user models.User
-	if err := config.DB.Preload("Zone").First(&user, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone").Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, user, "")
@@ -104,12 +105,13 @@ func UserUpdate(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := config.DB.First(&user, c.Params("id")).Error; err != nil {
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "", fiber.StatusNotFound)
 	}
 
 	var body map[string]interface{}
 	c.BodyParser(&body)
+	delete(body, "organization_id") // never allow reassigning a user's tenant via this endpoint
 
 	if pw, ok := body["password"].(string); ok && pw != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
@@ -136,7 +138,7 @@ func UserDestroy(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := config.DB.First(&user, c.Params("id")).Error; err != nil {
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "", fiber.StatusNotFound)
 	}
 	if user.ID == claims.UserID {

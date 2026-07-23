@@ -24,21 +24,123 @@ type MpesaService struct {
 	Voucher  *VoucherService
 	MikroTik *MikroTikService
 
-	tokenMu     sync.Mutex
-	cachedToken string
-	tokenExpiry time.Time
+	tokenMu sync.Mutex
+	// tokenCache is keyed by consumer key rather than a single shared field,
+	// since different Organizations can now use different Daraja apps (see
+	// resolveMpesaCreds) — a single cached token would otherwise leak one
+	// tenant's OAuth token into another tenant's requests.
+	tokenCache map[string]cachedToken
 
 	// Map to throttle STK status queries per CheckoutRequestID
 	queryThrottles sync.Map
 }
 
+type cachedToken struct {
+	token  string
+	expiry time.Time
+}
+
+// mpesaCreds is the resolved set of Daraja credentials/billing routing to
+// use for one request, from either the platform-wide defaults or a
+// tenant's own configured Daraja app.
+type mpesaCreds struct {
+	ConsumerKey    string
+	ConsumerSecret string
+	Shortcode      string
+	Passkey        string
+	CallbackURL    string
+	Env            string
+	BillingType    string
+	TillNumber     string
+	PaybillNumber  string
+	PaybillAccount string
+	BankName       string
+	BankAccount    string
+}
+
 // NewMpesaService constructs an MpesaService.
 func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTikService) *MpesaService {
 	return &MpesaService{
-		SMS:      sms,
-		Voucher:  voucher,
-		MikroTik: mikrotik,
+		SMS:        sms,
+		Voucher:    voucher,
+		MikroTik:   mikrotik,
+		tokenCache: make(map[string]cachedToken),
 	}
+}
+
+// resolveMpesaCreds returns the Daraja credentials/billing routing to use
+// for a payment tied to zoneID. If that zone's Organization has configured
+// its own Daraja app (OrganizationMpesaConfig.Mode == "own"), those
+// credentials are used; any field left blank on the org's config still
+// falls back to the platform-wide default for that one field. A zoneID of
+// 0, or an org with no config row (the default), uses the platform-wide
+// credentials unchanged — identical to the single-tenant behavior before
+// per-org Daraja support existed.
+func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
+	creds := mpesaCreds{
+		ConsumerKey:    s.getSetting("mpesa_consumer_key", config.Config.MpesaConsumerKey),
+		ConsumerSecret: s.getSetting("mpesa_consumer_secret", config.Config.MpesaConsumerSecret),
+		Shortcode:      s.getSetting("mpesa_shortcode", config.Config.MpesaShortcode),
+		Passkey:        s.getSetting("mpesa_passkey", config.Config.MpesaPasskey),
+		CallbackURL:    s.getSetting("mpesa_callback_url", config.Config.MpesaCallbackURL),
+		Env:            s.getSetting("mpesa_environment", config.Config.MpesaEnv),
+		BillingType:    s.getSetting("mpesa_billing_type", "paybill"),
+		TillNumber:     s.getSetting("mpesa_till_number", ""),
+		PaybillNumber:  s.getSetting("mpesa_paybill_number", ""),
+		PaybillAccount: s.getSetting("mpesa_paybill_account", ""),
+		BankName:       s.getSetting("mpesa_bank_name", ""),
+		BankAccount:    s.getSetting("mpesa_bank_account", ""),
+	}
+	if zoneID == 0 {
+		return creds
+	}
+
+	var zone models.Zone
+	if err := config.DB.Select("organization_id").First(&zone, zoneID).Error; err != nil {
+		return creds
+	}
+	var orgCfg models.OrganizationMpesaConfig
+	if err := config.DB.Where("organization_id = ? AND mode = ?", zone.OrganizationID, "own").First(&orgCfg).Error; err != nil {
+		return creds
+	}
+
+	if orgCfg.ConsumerKey != "" {
+		creds.ConsumerKey = orgCfg.ConsumerKey
+	}
+	if orgCfg.ConsumerSecret != "" {
+		creds.ConsumerSecret = orgCfg.ConsumerSecret
+	}
+	if orgCfg.Shortcode != "" {
+		creds.Shortcode = orgCfg.Shortcode
+	}
+	if orgCfg.Passkey != "" {
+		creds.Passkey = orgCfg.Passkey
+	}
+	if orgCfg.CallbackURL != "" {
+		creds.CallbackURL = orgCfg.CallbackURL
+	}
+	if orgCfg.Env != "" {
+		creds.Env = orgCfg.Env
+	}
+	if orgCfg.BillingType != "" {
+		creds.BillingType = orgCfg.BillingType
+	}
+	if orgCfg.TillNumber != "" {
+		creds.TillNumber = orgCfg.TillNumber
+	}
+	if orgCfg.PaybillNumber != "" {
+		creds.PaybillNumber = orgCfg.PaybillNumber
+	}
+	if orgCfg.PaybillAccount != "" {
+		creds.PaybillAccount = orgCfg.PaybillAccount
+	}
+	if orgCfg.BankName != "" {
+		creds.BankName = orgCfg.BankName
+	}
+	if orgCfg.BankAccount != "" {
+		creds.BankAccount = orgCfg.BankAccount
+	}
+	return creds
 }
 
 // MpesaSTKResponse is the result of an STK push initiation.
@@ -49,40 +151,37 @@ type MpesaSTKResponse struct {
 	IsMock              bool   `json:"is_mock"`
 }
 
-// getBaseURL returns the Daraja API base URL.
-func (s *MpesaService) getBaseURL() string {
-	env := s.getSetting("mpesa_environment", config.Config.MpesaEnv)
+// getBaseURL returns the Daraja API base URL for the given environment.
+func (s *MpesaService) getBaseURL(env string) string {
 	if strings.ToLower(env) == "production" {
 		return "https://api.safaricom.co.ke"
 	}
 	return "https://sandbox.safaricom.co.ke"
 }
 
-// GetAccessToken fetches the OAuth token from Daraja, caching it in-memory
-// for its reported lifetime (Daraja tokens are valid ~1 hour) so we don't
-// make a round trip to Safaricom on every STK push.
-func (s *MpesaService) GetAccessToken() (string, error) {
-	consumerKey := s.getSetting("mpesa_consumer_key", config.Config.MpesaConsumerKey)
-	consumerSecret := s.getSetting("mpesa_consumer_secret", config.Config.MpesaConsumerSecret)
-
-	if consumerKey == "" || consumerKey == "mock_consumer_key" {
+// GetAccessToken fetches the OAuth token from Daraja for the given
+// credentials, caching it in-memory (keyed by consumer key) for its
+// reported lifetime (Daraja tokens are valid ~1 hour) so we don't make a
+// round trip to Safaricom on every STK push.
+func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
+	if creds.ConsumerKey == "" || creds.ConsumerKey == "mock_consumer_key" {
 		return "mock_token", nil
 	}
 
 	s.tokenMu.Lock()
-	defer s.tokenMu.Unlock()
-
-	if s.cachedToken != "" && time.Now().Before(s.tokenExpiry) {
-		return s.cachedToken, nil
+	if cached, ok := s.tokenCache[creds.ConsumerKey]; ok && cached.token != "" && time.Now().Before(cached.expiry) {
+		s.tokenMu.Unlock()
+		return cached.token, nil
 	}
+	s.tokenMu.Unlock()
 
-	apiURL := s.getBaseURL() + "/oauth/v1/generate?grant_type=client_credentials"
+	apiURL := s.getBaseURL(creds.Env) + "/oauth/v1/generate?grant_type=client_credentials"
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", err
 	}
-	creds := base64.StdEncoding.EncodeToString([]byte(consumerKey + ":" + consumerSecret))
-	req.Header.Set("Authorization", "Basic "+creds)
+	basicAuth := base64.StdEncoding.EncodeToString([]byte(creds.ConsumerKey + ":" + creds.ConsumerSecret))
+	req.Header.Set("Authorization", "Basic "+basicAuth)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -115,21 +214,26 @@ func (s *MpesaService) GetAccessToken() (string, error) {
 		expiresIn = 60 * time.Second
 	}
 
-	s.cachedToken = token
-	s.tokenExpiry = time.Now().Add(expiresIn)
+	s.tokenMu.Lock()
+	s.tokenCache[creds.ConsumerKey] = cachedToken{token: token, expiry: time.Now().Add(expiresIn)}
+	s.tokenMu.Unlock()
 	return token, nil
 }
 
-// InitiateSTKPush sends a payment prompt to the customer's phone.
-func (s *MpesaService) InitiateSTKPush(phone string, amount float64, reference, description string) (*MpesaSTKResponse, error) {
+// InitiateSTKPush sends a payment prompt to the customer's phone, using
+// zoneID to resolve whether that zone's Organization has its own Daraja
+// app configured or should use the platform-wide default (see
+// resolveMpesaCreds). Pass 0 for zoneID to force the platform default.
+func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64, reference, description string) (*MpesaSTKResponse, error) {
 	phone = utils.FormatPhone(phone)
 
-	shortcode := s.getSetting("mpesa_shortcode", config.Config.MpesaShortcode)
-	passkey := s.getSetting("mpesa_passkey", config.Config.MpesaPasskey)
-	callbackURL := s.getSetting("mpesa_callback_url", config.Config.MpesaCallbackURL)
-	env := s.getSetting("mpesa_environment", config.Config.MpesaEnv)
+	creds := s.resolveMpesaCreds(zoneID)
+	shortcode := creds.Shortcode
+	passkey := creds.Passkey
+	callbackURL := creds.CallbackURL
+	env := creds.Env
 
-	token, err := s.GetAccessToken()
+	token, err := s.GetAccessToken(creds)
 	if err != nil {
 		return nil, err
 	}
@@ -151,30 +255,23 @@ func (s *MpesaService) InitiateSTKPush(phone string, amount float64, reference, 
 		}, nil
 	}
 
-	billingType := s.getSetting("mpesa_billing_type", "paybill")
-	tillNumber := s.getSetting("mpesa_till_number", "")
-	paybillNumber := s.getSetting("mpesa_paybill_number", "")
-	paybillAccount := s.getSetting("mpesa_paybill_account", "")
-	bankAccount := s.getSetting("mpesa_bank_account", "")
-
 	transactionType := "CustomerPayBillOnline"
-	partyB := paybillNumber
+	partyB := creds.PaybillNumber
 	if partyB == "" {
 		partyB = shortcode
 	}
-	accountReference := paybillAccount
+	accountReference := creds.PaybillAccount
 	if accountReference == "" {
 		accountReference = reference
 	}
 
-	if billingType == "till" {
+	if creds.BillingType == "till" {
 		transactionType = "CustomerBuyGoodsOnline"
-		partyB = tillNumber
+		partyB = creds.TillNumber
 		accountReference = reference
-	} else if billingType == "bank" {
-		bankName := s.getSetting("mpesa_bank_name", "")
-		partyB = bankPaybill(bankName)
-		accountReference = bankAccount
+	} else if creds.BillingType == "bank" {
+		partyB = bankPaybill(creds.BankName)
+		accountReference = creds.BankAccount
 		if accountReference == "" {
 			accountReference = reference
 		}
@@ -198,7 +295,7 @@ func (s *MpesaService) InitiateSTKPush(phone string, amount float64, reference, 
 	}
 
 	bodyBytes, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, s.getBaseURL()+"/mpesa/stkpush/v1/processrequest", strings.NewReader(string(bodyBytes)))
+	req, err := http.NewRequest(http.MethodPost, s.getBaseURL(env)+"/mpesa/stkpush/v1/processrequest", strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return nil, err
 	}
@@ -480,13 +577,16 @@ func (s *MpesaService) ProcessPaymentFailure(payment *models.Payment, reason str
 	return nil
 }
 
-// QuerySTKPushStatus queries Daraja for the status of an STK push transaction.
-func (s *MpesaService) QuerySTKPushStatus(checkoutRequestID string) (map[string]interface{}, error) {
-	shortcode := s.getSetting("mpesa_shortcode", config.Config.MpesaShortcode)
-	passkey := s.getSetting("mpesa_passkey", config.Config.MpesaPasskey)
-	env := s.getSetting("mpesa_environment", config.Config.MpesaEnv)
+// QuerySTKPushStatus queries Daraja for the status of an STK push
+// transaction, using zoneID to resolve the same tenant credentials that
+// initiated the push (see resolveMpesaCreds).
+func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string) (map[string]interface{}, error) {
+	creds := s.resolveMpesaCreds(zoneID)
+	shortcode := creds.Shortcode
+	passkey := creds.Passkey
+	env := creds.Env
 
-	token, err := s.GetAccessToken()
+	token, err := s.GetAccessToken(creds)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +610,7 @@ func (s *MpesaService) QuerySTKPushStatus(checkoutRequestID string) (map[string]
 	}
 
 	bodyBytes, _ := json.Marshal(payload)
-	apiURL := s.getBaseURL() + "/mpesa/stkpushquery/v1/query"
+	apiURL := s.getBaseURL(env) + "/mpesa/stkpushquery/v1/query"
 	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return nil, err
@@ -552,7 +652,7 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 	s.queryThrottles.Store(checkoutID, now)
 
 	log.Printf("[M-Pesa] Querying STK status for payment %d (CheckoutID: %s)", payment.ID, checkoutID)
-	result, err := s.QuerySTKPushStatus(checkoutID)
+	result, err := s.QuerySTKPushStatus(payment.ZoneID, checkoutID)
 	if err != nil {
 		return "pending", fmt.Errorf("failed to query status from M-Pesa: %w", err)
 	}

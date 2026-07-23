@@ -81,7 +81,7 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	}
 	description := "Internet Payment for " + pkg.Name
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(body.Phone, pkg.Price, ref, description)
+	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(pkg.ZoneID, body.Phone, pkg.Price, ref, description)
 	if err != nil {
 		reason := err.Error()
 		config.DB.Model(&payment).Updates(map[string]interface{}{

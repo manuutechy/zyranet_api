@@ -490,7 +490,7 @@ func CustomerTopUp(c *fiber.Ctx) error {
 	ref := fmt.Sprintf("Cust-%d", customer.ID)
 	description := fmt.Sprintf("Credit Top Up for %s", customer.Name)
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(body.Phone, body.Amount, ref, description)
+	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(customer.ZoneID, body.Phone, body.Amount, ref, description)
 	if err != nil {
 		reason := err.Error()
 		config.DB.Model(&payment).Updates(map[string]interface{}{

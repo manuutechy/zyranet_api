@@ -47,6 +47,8 @@ func main() {
 	log.Println("[seed] Running schema auto-migrations...")
 	db.Exec("SET FOREIGN_KEY_CHECKS = 0")
 	if err := db.AutoMigrate(
+		&models.Organization{},
+		&models.PlatformUser{},
 		&models.User{},
 		&models.Zone{},
 		&models.Package{},
@@ -75,14 +77,22 @@ func main() {
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+	log.Println("[seed] Creating demo organization...")
+	var org models.Organization
+	if err := db.Where(models.Organization{Slug: "demo"}).FirstOrCreate(&org, models.Organization{
+		Name: "Zyra Net Demo", Slug: "demo", Status: "active",
+	}).Error; err != nil {
+		log.Fatalf("[seed] failed to create demo organization: %v", err)
+	}
+
 	log.Println("[seed] Creating admin user...")
-	admin := seedAdmin(db)
+	admin := seedAdmin(db, org)
 
 	log.Println("[seed] Creating zones...")
-	zones := seedZones(db)
+	zones := seedZones(db, org)
 
 	log.Println("[seed] Creating zone manager...")
-	seedZoneManager(db, zones[0])
+	seedZoneManager(db, zones[0], org)
 
 	log.Println("[seed] Creating packages...")
 	pkgs := seedPackages(db, zones)
@@ -125,17 +135,18 @@ func main() {
 // seedAdmin is idempotent (FirstOrCreate by email) so re-running the seeder
 // to add another batch of demo zones/customers/payments doesn't blow up on
 // a duplicate-email error the first time it hits the users table.
-func seedAdmin(db *gorm.DB) models.User {
+func seedAdmin(db *gorm.DB, org models.Organization) models.User {
 	hash, err := bcrypt.GenerateFromPassword([]byte(demoPassword), bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("[seed] bcrypt failed: %v", err)
 	}
 	admin := models.User{
-		Name:     "Demo Admin",
-		Email:    "demo@zyranet.co.ke",
-		Password: string(hash),
-		Role:     "super_admin",
-		Status:   "active",
+		Name:           "Demo Admin",
+		Email:          "demo@zyranet.co.ke",
+		Password:       string(hash),
+		Role:           "super_admin",
+		Status:         "active",
+		OrganizationID: org.ID,
 	}
 	if err := db.Where(models.User{Email: admin.Email}).FirstOrCreate(&admin).Error; err != nil {
 		log.Fatalf("[seed] failed to create admin user: %v", err)
@@ -143,18 +154,19 @@ func seedAdmin(db *gorm.DB) models.User {
 	return admin
 }
 
-func seedZoneManager(db *gorm.DB, zone models.Zone) {
+func seedZoneManager(db *gorm.DB, zone models.Zone, org models.Organization) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(demoPassword), bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("[seed] bcrypt failed: %v", err)
 	}
 	manager := models.User{
-		Name:     "Zone Manager",
-		Email:    "manager@zyranet.co.ke",
-		Password: string(hash),
-		Role:     "zone_manager",
-		Status:   "active",
-		ZoneID:   &zone.ID,
+		Name:           "Zone Manager",
+		Email:          "manager@zyranet.co.ke",
+		Password:       string(hash),
+		Role:           "zone_manager",
+		Status:         "active",
+		ZoneID:         &zone.ID,
+		OrganizationID: org.ID,
 	}
 	if err := db.Where(models.User{Email: manager.Email}).FirstOrCreate(&manager).Error; err != nil {
 		log.Fatalf("[seed] failed to create zone manager: %v", err)
@@ -162,11 +174,11 @@ func seedZoneManager(db *gorm.DB, zone models.Zone) {
 	db.Model(&zone).Update("manager_id", manager.ID)
 }
 
-func seedZones(db *gorm.DB) []models.Zone {
+func seedZones(db *gorm.DB, org models.Organization) []models.Zone {
 	zones := []models.Zone{
-		{Name: "Kasarani Hotspot Hub", Location: "Kasarani, Nairobi", RouterName: "MikroTik hAP ac2", RouterIP: "10.5.50.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "online", LastSeenAt: ptrTime(time.Now().Add(-2 * time.Minute))},
-		{Name: "Westlands Business Park", Location: "Westlands, Nairobi", RouterName: "MikroTik RB4011", RouterIP: "10.5.60.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "online", LastSeenAt: ptrTime(time.Now().Add(-5 * time.Minute))},
-		{Name: "Ruiru Junction", Location: "Ruiru, Kiambu", RouterName: "MikroTik hAP ac3", RouterIP: "10.5.70.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "offline", LastSeenAt: ptrTime(time.Now().Add(-3 * time.Hour))},
+		{Name: "Kasarani Hotspot Hub", Location: "Kasarani, Nairobi", RouterName: "MikroTik hAP ac2", RouterIP: "10.5.50.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "online", LastSeenAt: ptrTime(time.Now().Add(-2 * time.Minute)), OrganizationID: org.ID},
+		{Name: "Westlands Business Park", Location: "Westlands, Nairobi", RouterName: "MikroTik RB4011", RouterIP: "10.5.60.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "online", LastSeenAt: ptrTime(time.Now().Add(-5 * time.Minute)), OrganizationID: org.ID},
+		{Name: "Ruiru Junction", Location: "Ruiru, Kiambu", RouterName: "MikroTik hAP ac3", RouterIP: "10.5.70.1", ConnectionType: "api", RouterPort: 8728, Status: "active", LastStatus: "offline", LastSeenAt: ptrTime(time.Now().Add(-3 * time.Hour)), OrganizationID: org.ID},
 	}
 	for i := range zones {
 		if err := db.Create(&zones[i]).Error; err != nil {

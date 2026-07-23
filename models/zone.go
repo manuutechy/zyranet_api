@@ -22,6 +22,7 @@ type Zone struct {
 	LanPorts       string         `gorm:"size:255;default:ether2,ether3,ether4" json:"lan_ports"`
 	HotspotAddress string         `gorm:"size:45;default:10.5.50.1/24" json:"hotspot_address"`
 	ManagerID      *uint          `json:"manager_id"`
+	OrganizationID uint           `gorm:"not null;index" json:"organization_id"`
 	Status         string         `gorm:"size:20;default:active" json:"status"`
 	LastSeenAt     *time.Time     `json:"last_seen_at"`
 	LastStatus     string         `gorm:"size:20;default:unknown" json:"last_status"` // online | offline | unknown
@@ -29,8 +30,9 @@ type Zone struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
-	Manager  *User     `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
-	Packages []Package `gorm:"foreignKey:ZoneID" json:"packages,omitempty"`
+	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
+	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
+	Packages     []Package     `gorm:"foreignKey:ZoneID" json:"packages,omitempty"`
 }
 
 func (Zone) TableName() string { return "zones" }

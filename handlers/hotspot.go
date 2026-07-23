@@ -106,7 +106,7 @@ func HotspotPay(c *fiber.Ctx) error {
 	ref := fmt.Sprintf("Vouch-%d", voucher.ID)
 	description := "Internet Payment for " + pkg.Name
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(phone, pkg.Price, ref, description)
+	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(zone.ID, phone, pkg.Price, ref, description)
 	if err != nil {
 		reason := err.Error()
 		config.DB.Model(&payment).Updates(map[string]interface{}{

@@ -17,7 +17,12 @@ func CustomerIndex(c *fiber.Ctx) error {
 	var customers []models.Customer
 	var total int64
 
-	query := config.DB.Model(&models.Customer{}).Preload("Zone").Preload("Package")
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
+	query := config.DB.Model(&models.Customer{}).Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
 	claims := middleware.GetClaims(c)
 	if claims.Role == "zone_manager" && claims.ZoneID != nil {
 		query = query.Where("zone_id = ?", *claims.ZoneID)
@@ -53,6 +58,10 @@ func CustomerStore(c *fiber.Ctx) error {
 	if claims.Role == "zone_manager" && claims.ZoneID != nil && customer.ZoneID != *claims.ZoneID {
 		return utils.ErrorResponse(c, "Unauthorized to add customer to this zone.", "", fiber.StatusForbidden)
 	}
+	var targetZone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, customer.ZoneID).Error; err != nil {
+		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+	}
 	if customer.Type == "pppoe" && (customer.PPPoEPassword == nil || *customer.PPPoEPassword == "") {
 		pw := generatePPPoEPassword()
 		customer.PPPoEPassword = &pw
@@ -73,7 +82,9 @@ func generatePPPoEPassword() string {
 }
 
 // customerInScope reports whether the requesting admin is allowed to act on
-// this customer — zone_managers are restricted to their own zone.
+// this customer — zone_managers are restricted to their own zone. Tenant
+// isolation itself is enforced earlier, by findCustomerOrFail scoping the
+// lookup to the caller's Organization.
 func customerInScope(c *fiber.Ctx, customer *models.Customer) bool {
 	claims := middleware.GetClaims(c)
 	if claims.Role == "zone_manager" && claims.ZoneID != nil && customer.ZoneID != *claims.ZoneID {
@@ -82,13 +93,34 @@ func customerInScope(c *fiber.Ctx, customer *models.Customer) bool {
 	return true
 }
 
+// findCustomerOrFail loads a customer by ID, scoped to the caller's
+// Organization via its zone, so no admin can reach another tenant's
+// customer by guessing an ID.
+func findCustomerOrFail(c *fiber.Ctx, preload ...string) (*models.Customer, error) {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+		return nil, fiber.ErrInternalServerError
+	}
+	query := config.DB.Where("zone_id IN (?)", orgZoneIDs)
+	for _, p := range preload {
+		query = query.Preload(p)
+	}
+	var customer models.Customer
+	if err := query.First(&customer, c.Params("id")).Error; err != nil {
+		utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+		return nil, fiber.ErrNotFound
+	}
+	return &customer, nil
+}
+
 // CustomerShow returns a single customer.
 func CustomerShow(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.Preload("Zone").Preload("Package").First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c, "Zone", "Package")
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to view this customer.", "", fiber.StatusForbidden)
 	}
 	return utils.SuccessResponse(c, customer, "")
@@ -96,10 +128,11 @@ func CustomerShow(c *fiber.Ctx) error {
 
 // CustomerUpdate updates a customer.
 func CustomerUpdate(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customerPtr, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
+	customer := *customerPtr
 	if !customerInScope(c, &customer) {
 		return utils.ErrorResponse(c, "Unauthorized to update this customer.", "", fiber.StatusForbidden)
 	}
@@ -118,7 +151,11 @@ func CustomerDestroy(c *fiber.Ctx) error {
 	if claims.Role != "super_admin" {
 		return utils.ErrorResponse(c, "Unauthorized to delete customers.", "", fiber.StatusForbidden)
 	}
-	if err := config.DB.Delete(&models.Customer{}, c.Params("id")).Error; err != nil {
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
+	}
+	if err := config.DB.Delete(&models.Customer{}, customer.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Customer deleted successfully.")
@@ -126,37 +163,37 @@ func CustomerDestroy(c *fiber.Ctx) error {
 
 // CustomerSuspend suspends a customer's account.
 func CustomerSuspend(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to suspend this customer.", "", fiber.StatusForbidden)
 	}
-	config.DB.Model(&customer).Update("status", "suspended")
+	config.DB.Model(customer).Update("status", "suspended")
 	return utils.SuccessResponse(c, customer, "Customer account suspended successfully.")
 }
 
 // CustomerActivate reactivates a customer's account.
 func CustomerActivate(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to activate this customer.", "", fiber.StatusForbidden)
 	}
-	config.DB.Model(&customer).Update("status", "active")
+	config.DB.Model(customer).Update("status", "active")
 	return utils.SuccessResponse(c, customer, "Customer account activated successfully.")
 }
 
 // CustomerPayments returns payment history for a customer.
 func CustomerPayments(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to view this customer.", "", fiber.StatusForbidden)
 	}
 	var payments []models.Payment
@@ -166,11 +203,11 @@ func CustomerPayments(c *fiber.Ctx) error {
 
 // CustomerSessions returns internet sessions for a customer.
 func CustomerSessions(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to view this customer.", "", fiber.StatusForbidden)
 	}
 	var sessions []models.Session
@@ -180,11 +217,11 @@ func CustomerSessions(c *fiber.Ctx) error {
 
 // CustomerAddCredit adjusts a customer's credit balance.
 func CustomerAddCredit(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to adjust credit for this customer.", "", fiber.StatusForbidden)
 	}
 
@@ -208,7 +245,7 @@ func CustomerAddCredit(c *fiber.Ctx) error {
 	} else {
 		customer.CreditBalance -= body.Amount
 	}
-	config.DB.Save(&customer)
+	config.DB.Save(customer)
 
 	claims := middleware.GetClaims(c)
 	note := body.Note
@@ -232,11 +269,11 @@ func CustomerPayments_Admin(c *fiber.Ctx) error {
 
 // CustomerCreditLogs returns credit/debit history for a customer.
 func CustomerCreditLogs(c *fiber.Ctx) error {
-	var customer models.Customer
-	if err := config.DB.First(&customer, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	customer, err := findCustomerOrFail(c)
+	if err != nil {
+		return err
 	}
-	if !customerInScope(c, &customer) {
+	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to view this customer.", "", fiber.StatusForbidden)
 	}
 	page, perPage := utils.ParsePage(c)

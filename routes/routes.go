@@ -170,6 +170,11 @@ func Register(app *fiber.App) {
 	admin.Post("/settings", adminAuth, handlers.SettingsUpdate)
 	admin.Post("/settings/upload", adminAuth, handlers.SettingsUploadImage)
 	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
+	admin.Get("/settings/mpesa", adminAuth, handlers.OrganizationMpesaShow)
+	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
+
+	// Platform billing (read-only view of what Zyra Net has invoiced this ISP)
+	admin.Get("/billing/invoices", adminAuth, handlers.AdminPlatformInvoiceIndex)
 
 	// Users
 	admin.Get("/users", adminAuth, handlers.UserIndex)
@@ -183,4 +188,47 @@ func Register(app *fiber.App) {
 	admin.Get("/tickets/:id", adminAuth, handlers.TicketShow)
 	admin.Put("/tickets/:id", adminAuth, handlers.TicketUpdate)
 	admin.Delete("/tickets/:id", adminAuth, handlers.TicketDestroy)
+
+	// ---- PLATFORM (SUPER ADMIN) JWT ROUTES ----
+	// Deliberately separate from the admin/customer groups above — see
+	// middleware.PlatformAuth. A platform credential can only ever reach
+	// these routes, never the per-ISP /zones, /customers, etc. handlers.
+	platform := v1.Group("/platform")
+	platform.Post("/auth/login", payLimiter(10, time.Minute), handlers.PlatformLogin)
+
+	platformAuth := middleware.PlatformAuth()
+	platform.Post("/auth/logout", platformAuth, handlers.PlatformLogout)
+	platform.Get("/auth/me", platformAuth, handlers.PlatformMe)
+
+	platform.Get("/overview", platformAuth, handlers.PlatformOverview)
+	platform.Get("/settings", platformAuth, handlers.PlatformSettingsIndex)
+	platform.Post("/settings", platformAuth, handlers.PlatformSettingsUpdate)
+
+	// Shared infrastructure credentials (Zyra Net's own Daraja app + Hostpinnacle SMS)
+	platform.Get("/daraja", platformAuth, handlers.PlatformDarajaShow)
+	platform.Post("/daraja", platformAuth, handlers.PlatformDarajaUpdate)
+	platform.Get("/sms", platformAuth, handlers.PlatformSmsShow)
+	platform.Post("/sms", platformAuth, handlers.PlatformSmsUpdate)
+	platform.Post("/sms/test", platformAuth, handlers.PlatformSmsTest)
+
+	platform.Get("/organizations", platformAuth, handlers.OrganizationIndex)
+	platform.Post("/organizations", platformAuth, handlers.OrganizationStore)
+	platform.Get("/organizations/:id", platformAuth, handlers.OrganizationShow)
+	platform.Patch("/organizations/:id", platformAuth, handlers.OrganizationUpdate)
+	platform.Get("/organizations/:id/users", platformAuth, handlers.OrganizationUsers)
+	platform.Post("/organizations/:id/users/:userId/reset-password", platformAuth, handlers.OrganizationResetUserPassword)
+
+	// Billing — Zyra Net invoicing its ISP tenants (distinct from the ISP's
+	// own customer billing, which stays entirely within admin/payments.go)
+	platform.Get("/invoices", platformAuth, handlers.PlatformInvoiceIndex)
+	platform.Post("/invoices/generate", platformAuth, handlers.PlatformInvoiceGenerate)
+	platform.Patch("/invoices/:id", platformAuth, handlers.PlatformInvoiceUpdate)
+	platform.Post("/invoices/:id/send-email", platformAuth, handlers.PlatformInvoiceSendEmail)
+	platform.Post("/invoices/:id/send-sms", platformAuth, handlers.PlatformInvoiceSendSMS)
+
+	// Platform staff (SA account management)
+	platform.Get("/staff", platformAuth, handlers.PlatformStaffIndex)
+	platform.Post("/staff", platformAuth, handlers.PlatformStaffStore)
+	platform.Patch("/staff/:id", platformAuth, handlers.PlatformStaffUpdate)
+	platform.Delete("/staff/:id", platformAuth, handlers.PlatformStaffDestroy)
 }
