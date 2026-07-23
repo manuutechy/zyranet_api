@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"fmt"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -17,7 +18,6 @@ import (
 	"github.com/zyranet/zyranet-api/routes"
 	"github.com/zyranet/zyranet-api/services"
 	"strings"
-	"fmt"
 )
 
 func main() {
@@ -37,6 +37,7 @@ func main() {
 		&models.PlatformInvoice{},
 		&models.PlatformSetting{},
 		&models.OrganizationMpesaConfig{},
+		&models.UnmatchedC2BPayment{},
 		&models.User{},
 		&models.Zone{},
 		&models.Package{},
@@ -160,7 +161,7 @@ func main() {
 			c.Set("Access-Control-Allow-Credentials", "true")
 			c.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept")
-			
+
 			if c.Method() == "OPTIONS" {
 				return c.SendStatus(fiber.StatusNoContent)
 			}

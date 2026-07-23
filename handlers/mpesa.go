@@ -191,17 +191,40 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		}
 	}
 
-	var customerID *uint
-	var zoneID uint = 1
-	var packageID *uint
 	transIDStr := body.TransID
 
-	if foundCustomer {
-		customerID = &customer.ID
-		zoneID = customer.ZoneID
-		pkgID := customer.PackageID
-		packageID = &pkgID
+	// A C2B payment that can't be matched to a customer (e.g. a mistyped
+	// account reference) can't be safely attributed to any zone — Zyra
+	// Net's shared paybill can receive payments for many different ISPs,
+	// so guessing wrong here would misattribute one tenant's revenue to
+	// another. Queue it for a platform staff member to manually resolve
+	// instead (see handlers/platform_c2b.go).
+	if !foundCustomer {
+		unmatched := models.UnmatchedC2BPayment{
+			TransID:           transIDStr,
+			Phone:             phone,
+			Amount:            body.TransAmount,
+			BillRefNumber:     body.BillRefNumber,
+			BusinessShortCode: body.BusinessShortCode,
+			FirstName:         body.FirstName,
+			LastName:          body.LastName,
+			Status:            "pending",
+		}
+		if err := config.DB.Create(&unmatched).Error; err != nil {
+			log.Printf("[C2B Confirmation] Failed to queue unmatched payment %s: %v", transIDStr, err)
+		}
+		return c.JSON(fiber.Map{
+			"ResultCode": 0,
+			"ResultDesc": "Success",
+		})
+	}
 
+	customerID := &customer.ID
+	zoneID := customer.ZoneID
+	pkgID := customer.PackageID
+	packageID := &pkgID
+
+	{
 		customer.CreditBalance += body.TransAmount
 		config.DB.Model(&customer).Update("credit_balance", customer.CreditBalance)
 

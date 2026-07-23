@@ -176,6 +176,7 @@ func Register(app *fiber.App) {
 	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
 	admin.Get("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsShow)
 	admin.Post("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsUpdate)
+	admin.Post("/settings/test-stk", adminAuth, handlers.OrganizationStkTest)
 
 	// Platform billing (read-only view of what Zyra Net has invoiced this ISP)
 	admin.Get("/billing/invoices", adminAuth, handlers.AdminPlatformInvoiceIndex)
@@ -221,6 +222,13 @@ func Register(app *fiber.App) {
 	platform.Patch("/organizations/:id", platformAuth, handlers.OrganizationUpdate)
 	platform.Get("/organizations/:id/users", platformAuth, handlers.OrganizationUsers)
 	platform.Post("/organizations/:id/users/:userId/reset-password", platformAuth, handlers.OrganizationResetUserPassword)
+	platform.Post("/organizations/:id/test-stk", platformAuth, handlers.PlatformOrganizationStkTest)
+
+	// C2B reconciliation — payments confirmed on the shared paybill that
+	// couldn't be auto-matched to a customer (see MpesaC2BConfirmation)
+	platform.Get("/c2b/unmatched", platformAuth, handlers.PlatformC2BUnmatchedIndex)
+	platform.Post("/c2b/unmatched/:id/resolve", platformAuth, handlers.PlatformC2BUnmatchedResolve)
+	platform.Get("/customers/search", platformAuth, handlers.PlatformCustomerSearch)
 
 	// Billing — Zyra Net invoicing its ISP tenants (distinct from the ISP's
 	// own customer billing, which stays entirely within admin/payments.go)
