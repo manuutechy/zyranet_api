@@ -14,11 +14,16 @@ import (
 
 
 func PaymentIndex(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
 	page, perPage := utils.ParsePage(c)
 	var payments []models.Payment
 	var total int64
 
-	query := config.DB.Model(&models.Payment{}).Preload("Customer").Preload("Zone").Preload("Package")
+	query := config.DB.Model(&models.Payment{}).Preload("Customer").Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
@@ -88,6 +93,11 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		body.Action = "renew"
 	}
 
+	var targetZone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, body.ZoneID).Error; err != nil {
+		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+	}
+
 	var pkg models.Package
 	var packageIDPtr *uint
 	if body.PackageID != nil && *body.PackageID > 0 {
@@ -124,8 +134,12 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		}
 	} else {
 		// Existing subscriber payment
+		orgZoneIDs, err := middleware.OrgZoneIDs(c)
+		if err != nil {
+			return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+		}
 		var customer models.Customer
-		if err := config.DB.First(&customer, *body.CustomerID).Error; err != nil {
+		if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&customer, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
 
@@ -225,8 +239,12 @@ func PaymentInvoice(c *fiber.Ctx) error {
 
 // PaymentInvoiceEmail sends the invoice to the customer via email.
 func PaymentInvoiceEmail(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var payment models.Payment
-	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").First(&payment, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs).First(&payment, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Payment not found.", "", fiber.StatusNotFound)
 	}
 
@@ -249,8 +267,12 @@ func PaymentInvoiceEmail(c *fiber.Ctx) error {
 
 // PaymentInvoiceSMS sends the invoice summary and link via SMS.
 func PaymentInvoiceSMS(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var payment models.Payment
-	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").First(&payment, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs).First(&payment, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Payment not found.", "", fiber.StatusNotFound)
 	}
 

@@ -28,7 +28,8 @@ func ZoneIndex(c *fiber.Ctx) error {
 	var zones []models.Zone
 	var total int64
 
-	query := config.DB.Model(&models.Zone{}).Preload("Manager")
+	claims := middleware.GetClaims(c)
+	query := config.DB.Model(&models.Zone{}).Preload("Manager").Where("organization_id = ?", claims.OrganizationID)
 
 	if s := c.Query("status"); s != "" {
 		query = query.Where("status = ?", s)
@@ -38,8 +39,7 @@ func ZoneIndex(c *fiber.Ctx) error {
 	}
 
 	// Zone managers only see their own zone
-	claims := middleware.GetClaims(c)
-	if claims != nil && claims.Role == "zone_manager" && claims.ZoneID != nil {
+	if claims.Role == "zone_manager" && claims.ZoneID != nil {
 		query = query.Where("id = ?", *claims.ZoneID)
 	}
 
@@ -60,6 +60,7 @@ func ZoneStore(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	body.OrganizationID = claims.OrganizationID
 
 	if err := config.DB.Create(&body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create zone.", fiber.StatusInternalServerError)
@@ -69,9 +70,10 @@ func ZoneStore(c *fiber.Ctx) error {
 
 // ZoneShow returns a single zone.
 func ZoneShow(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
 	id := c.Params("id")
 	var zone models.Zone
-	if err := config.DB.Preload("Manager").First(&zone, id).Error; err != nil {
+	if err := config.DB.Preload("Manager").Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, zone, "")
@@ -83,7 +85,7 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 
 	var zone models.Zone
-	if err := config.DB.First(&zone, id).Error; err != nil {
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != zone.ID) {
@@ -94,6 +96,7 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	delete(body, "organization_id") // never allow moving a zone to another tenant via this endpoint
 
 	if err := config.DB.Model(&zone).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
@@ -109,7 +112,7 @@ func ZoneDestroy(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthorized to delete zones.", "", fiber.StatusForbidden)
 	}
 	id := c.Params("id")
-	if err := config.DB.Delete(&models.Zone{}, id).Error; err != nil {
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).Delete(&models.Zone{}, id).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Zone deleted successfully.")
@@ -226,7 +229,12 @@ func ZoneAlerts(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	filter := c.Query("filter", "unresolved")
 
-	query := config.DB.Model(&models.ZoneAlert{}).Preload("Zone")
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
+	query := config.DB.Model(&models.ZoneAlert{}).Preload("Zone").Where("zone_id IN (?)", orgZoneIDs)
 	if filter == "unresolved" {
 		query = query.Where("resolved_at IS NULL")
 	}
@@ -242,11 +250,17 @@ func ZoneAlerts(c *fiber.Ctx) error {
 // ZoneResolveAlert marks an alert as resolved.
 func ZoneResolveAlert(c *fiber.Ctx) error {
 	id := c.Params("id")
+	claims := middleware.GetClaims(c)
+
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
 	var alert models.ZoneAlert
-	if err := config.DB.Preload("Zone").First(&alert, id).Error; err != nil {
+	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&alert, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Alert not found.", "", fiber.StatusNotFound)
 	}
-	claims := middleware.GetClaims(c)
 	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != alert.ZoneID) {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
@@ -258,8 +272,9 @@ func ZoneResolveAlert(c *fiber.Ctx) error {
 
 // ZoneScript generates and downloads a .rsc script for the zone.
 func ZoneScript(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
 	var zone models.Zone
-	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 
@@ -310,8 +325,13 @@ func ZoneExecCommand(c *fiber.Ctx) error {
 // helpers
 
 func findZoneOrFail(c *fiber.Ctx) (*models.Zone, error) {
+	claims := middleware.GetClaims(c)
 	var zone models.Zone
-	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
+	query := config.DB
+	if claims != nil {
+		query = query.Where("organization_id = ?", claims.OrganizationID)
+	}
+	if err := query.First(&zone, c.Params("id")).Error; err != nil {
 		utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 		return nil, fiber.ErrNotFound
 	}
@@ -323,6 +343,9 @@ func canAccessZone(c *fiber.Ctx, zone *models.Zone) bool {
 	if claims == nil {
 		return false
 	}
+	// findZoneOrFail already constrains the zone to the caller's
+	// Organization, so at this point only the ISP-internal role check
+	// (super_admin vs. the assigned manager) remains.
 	if claims.Role == "super_admin" {
 		return true
 	}

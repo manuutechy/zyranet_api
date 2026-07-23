@@ -9,8 +9,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Login authenticates an admin user and returns a JWT.
-func Login(c *fiber.Ctx) error {
+// PlatformLogin authenticates a Zyra Net Super Admin (SA) platform user.
+// This is intentionally a separate table/JWT flow from admin/customer auth
+// (see middleware.PlatformAuth) so a platform credential is never reachable
+// through the per-ISP admin login.
+func PlatformLogin(c *fiber.Ctx) error {
 	var body struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -22,7 +25,7 @@ func Login(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Email and password are required.", "Validation failed.", fiber.StatusUnprocessableEntity)
 	}
 
-	var user models.User
+	var user models.PlatformUser
 	if err := config.DB.Where("email = ?", body.Email).First(&user).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid login credentials.", "Authentication failed.", fiber.StatusUnauthorized)
 	}
@@ -35,52 +38,45 @@ func Login(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Your account is inactive.", "Account disabled.", fiber.StatusForbidden)
 	}
 
-	token, err := middleware.GenerateAdminToken(user.ID, user.Role, user.ZoneID, user.OrganizationID)
+	token, err := middleware.GeneratePlatformToken(user.ID)
 	if err != nil {
 		return utils.ErrorResponse(c, "Token generation failed.", "Server error.", fiber.StatusInternalServerError)
 	}
 
-	middleware.SetAuthCookie(c, middleware.AdminCookieName, token)
+	middleware.SetAuthCookie(c, middleware.PlatformCookieName, token)
 
 	return utils.SuccessResponse(c, fiber.Map{
 		"token": token,
 		"user": fiber.Map{
-			"id":              user.ID,
-			"name":            user.Name,
-			"email":           user.Email,
-			"role":            user.Role,
-			"zone_id":         user.ZoneID,
-			"organization_id": user.OrganizationID,
+			"id":    user.ID,
+			"name":  user.Name,
+			"email": user.Email,
 		},
 	}, "Login successful.")
 }
 
-// Logout clears the admin session cookie (stateless JWT — nothing server-side to invalidate).
-func Logout(c *fiber.Ctx) error {
-	middleware.ClearAuthCookie(c, middleware.AdminCookieName)
+// PlatformLogout clears the platform session cookie.
+func PlatformLogout(c *fiber.Ctx) error {
+	middleware.ClearAuthCookie(c, middleware.PlatformCookieName)
 	return utils.SuccessResponse(c, nil, "Logged out successfully.")
 }
 
-// Me returns the authenticated admin user's profile.
-func Me(c *fiber.Ctx) error {
+// PlatformMe returns the authenticated platform user's profile.
+func PlatformMe(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	if claims == nil {
 		return utils.ErrorResponse(c, "Unauthenticated.", "Token invalid.", fiber.StatusUnauthorized)
 	}
 
-	var user models.User
-	if err := config.DB.First(&user, claims.UserID).Error; err != nil {
+	var user models.PlatformUser
+	if err := config.DB.First(&user, claims.PlatformUserID).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "Not found.", fiber.StatusNotFound)
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
-		"id":              user.ID,
-		"name":            user.Name,
-		"email":           user.Email,
-		"role":            user.Role,
-		"zone_id":         user.ZoneID,
-		"organization_id": user.OrganizationID,
-		"phone":           user.Phone,
-		"status":          user.Status,
+		"id":     user.ID,
+		"name":   user.Name,
+		"email":  user.Email,
+		"status": user.Status,
 	}, "")
 }

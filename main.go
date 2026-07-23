@@ -32,6 +32,11 @@ func main() {
 	log.Println("[database] Running schema auto-migrations...")
 	config.DB.Exec("SET FOREIGN_KEY_CHECKS = 0")
 	if err := config.DB.AutoMigrate(
+		&models.Organization{},
+		&models.PlatformUser{},
+		&models.PlatformInvoice{},
+		&models.PlatformSetting{},
+		&models.OrganizationMpesaConfig{},
 		&models.User{},
 		&models.Zone{},
 		&models.Package{},
@@ -51,6 +56,27 @@ func main() {
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
 	}
 	config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
+
+	// Backfill Organization #1 for the existing single-tenant install, and
+	// assign every pre-existing User/Zone to it. Multi-tenancy is additive:
+	// this keeps the current ISP working exactly as before as "tenant #1".
+	log.Println("[database] Backfilling default organization...")
+	var defaultOrg models.Organization
+	if err := config.DB.Where("slug = ?", "default").FirstOrCreate(&defaultOrg, models.Organization{
+		Name:   "Zyra Net",
+		Slug:   "default",
+		Status: "active",
+	}).Error; err != nil {
+		log.Fatalf("[database] Failed to create default organization: %v", err)
+	}
+	if err := config.DB.Model(&models.Zone{}).Where("organization_id = 0 OR organization_id IS NULL").
+		Update("organization_id", defaultOrg.ID).Error; err != nil {
+		log.Printf("[database] Failed to backfill zones.organization_id: %v", err)
+	}
+	if err := config.DB.Model(&models.User{}).Where("organization_id = 0 OR organization_id IS NULL").
+		Update("organization_id", defaultOrg.ID).Error; err != nil {
+		log.Printf("[database] Failed to backfill users.organization_id: %v", err)
+	}
 
 	// Backfill existing account numbers
 	log.Println("[database] Backfilling customer account numbers...")

@@ -22,7 +22,12 @@ func VoucherIndex(c *fiber.Ctx) error {
 	var vouchers []models.Voucher
 	var total int64
 
-	query := config.DB.Model(&models.Voucher{}).Preload("Zone").Preload("Package")
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+
+	query := config.DB.Model(&models.Voucher{}).Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
@@ -73,6 +78,11 @@ func VoucherGenerate(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthorized to generate vouchers for this zone.", "", fiber.StatusForbidden)
 	}
 
+	var targetZone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, body.ZoneID).Error; err != nil {
+		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+	}
+
 	if body.Quantity == 1 {
 		voucher, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
 		if err != nil {
@@ -95,8 +105,12 @@ func VoucherGenerate(c *fiber.Ctx) error {
 
 // VoucherShow returns a single voucher.
 func VoucherShow(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var voucher models.Voucher
-	if err := config.DB.Preload("Zone").Preload("Package").First(&voucher, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs).First(&voucher, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Voucher not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, voucher, "")
@@ -108,7 +122,15 @@ func VoucherDestroy(c *fiber.Ctx) error {
 	if claims.Role != "super_admin" && claims.Role != "zone_manager" {
 		return utils.ErrorResponse(c, "Unauthorized to delete vouchers.", "", fiber.StatusForbidden)
 	}
-	if err := config.DB.Delete(&models.Voucher{}, c.Params("id")).Error; err != nil {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+	var voucher models.Voucher
+	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&voucher, c.Params("id")).Error; err != nil {
+		return utils.ErrorResponse(c, "Voucher not found.", "", fiber.StatusNotFound)
+	}
+	if err := config.DB.Delete(&models.Voucher{}, voucher.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Voucher deleted successfully.")

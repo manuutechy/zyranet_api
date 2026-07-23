@@ -17,43 +17,58 @@ import (
 )
 
 var settingDefaults = map[string]string{
-	"company_name":            "Zyra Net ISP",
-	"logo":                    "",
-	"primary_color":           "#f97316",
-	"support_phone":           "0113297270",
-	"support_whatsapp":        "",
-	"mpesa_environment":       "sandbox",
-	"mpesa_consumer_key":      "",
-	"mpesa_consumer_secret":   "",
-	"mpesa_shortcode":         "174379",
-	"mpesa_passkey":           "",
-	"mpesa_callback_url":      "",
-	"mpesa_billing_type":      "paybill",
-	"mpesa_till_number":       "",
-	"mpesa_paybill_number":    "",
-	"mpesa_paybill_account":   "",
-	"mpesa_bank_account":      "",
-	"mpesa_bank_name":         "",
-	"sms_provider":             "hostpinnacle",
-	"hostpinnacle_base_url":    "https://smsportal.hostpinnacle.co.ke/SMSApi/send",
-	"hostpinnacle_api_key":     "",
-	"hostpinnacle_username":    "",
-	"hostpinnacle_sender_id":   "",
-	"sms_template_otp":         "Your Zyra Net verification code is: {otp}. Valid for 10 minutes.",
-	"sms_template_voucher":     "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!",
-	"sms_template_credit":      "Hi {name}, KES {amount} credited to your account. Your new balance is KES {balance}. Enjoy browsing!",
-	"sms_template_active":      "Hi {name}, your account is active. Package: {package} Expires: {expiry}.",
-	"sms_enable_otp":           "yes",
-	"sms_enable_voucher":       "yes",
-	"sms_enable_credit":        "yes",
-	"sms_enable_active":        "yes",
-	"banner_image_url":         "",
-	"banner_enabled":           "yes",
+	"company_name":           "Zyra Net ISP",
+	"logo":                   "",
+	"primary_color":          "#f97316",
+	"support_phone":          "0113297270",
+	"support_whatsapp":       "",
+	"mpesa_environment":      "sandbox",
+	"mpesa_consumer_key":     "",
+	"mpesa_consumer_secret":  "",
+	"mpesa_shortcode":        "174379",
+	"mpesa_passkey":          "",
+	"mpesa_callback_url":     "",
+	"mpesa_billing_type":     "paybill",
+	"mpesa_till_number":      "",
+	"mpesa_paybill_number":   "",
+	"mpesa_paybill_account":  "",
+	"mpesa_bank_account":     "",
+	"mpesa_bank_name":        "",
+	"sms_provider":           "hostpinnacle",
+	"hostpinnacle_base_url":  "https://smsportal.hostpinnacle.co.ke/SMSApi/send",
+	"hostpinnacle_api_key":   "",
+	"hostpinnacle_username":  "",
+	"hostpinnacle_sender_id": "",
+	"sms_template_otp":       "Your Zyra Net verification code is: {otp}. Valid for 10 minutes.",
+	"sms_template_voucher":   "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!",
+	"sms_template_credit":    "Hi {name}, KES {amount} credited to your account. Your new balance is KES {balance}. Enjoy browsing!",
+	"sms_template_active":    "Hi {name}, your account is active. Package: {package} Expires: {expiry}.",
+	"sms_enable_otp":         "yes",
+	"sms_enable_voucher":     "yes",
+	"sms_enable_credit":      "yes",
+	"sms_enable_active":      "yes",
+	"banner_image_url":       "",
+	"banner_enabled":         "yes",
 }
+
+// platformOnlyKeys are Setting keys that now belong exclusively to the SA
+// platform side (see handlers/platform_infrastructure.go daraKeys/smsKeys)
+// — Zyra Net's own shared Daraja app and Hostpinnacle gateway credentials.
+// They're stripped out of the ISP-facing settings endpoints entirely, both
+// on read and write, so no ISP admin — not even tenant #1's, which
+// historically held these values before per-tenant Daraja existed — can
+// see or change the platform's shared secrets through their own admin
+// panel. ISPs configure their own Daraja via /settings/mpesa
+// (OrganizationMpesaConfig) instead; SMS template wording/toggles
+// (sms_template_*, sms_enable_*) are unaffected and remain ISP-editable.
+var platformOnlyKeys = append(append([]string{}, daraKeys...), smsKeys...)
 
 // SettingsIndex returns all settings.
 func SettingsIndex(c *fiber.Ctx) error {
 	settings := loadAllSettings()
+	for _, k := range platformOnlyKeys {
+		delete(settings, k)
+	}
 	return utils.SuccessResponse(c, settings, "")
 }
 
@@ -71,20 +86,20 @@ func SettingsPublic(c *fiber.Ctx) error {
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
-		"companyName":       settings["company_name"],
-		"logoUrl":           logoURL,
-		"primaryColor":      settings["primary_color"],
-		"supportPhone":      settings["support_phone"],
-		"supportWhatsapp":   settings["support_whatsapp"],
-		"bannerImageUrl":    bannerURL,
-		"bannerEnabled":     settings["banner_enabled"],
-		"mpesaBillingType":  settings["mpesa_billing_type"],
-		"mpesaBankName":     settings["mpesa_bank_name"],
-		"mpesaShortcode":    settings["mpesa_shortcode"],
-		"mpesaTillNumber":   settings["mpesa_till_number"],
-		"mpesaPaybillNumber": settings["mpesa_paybill_number"],
+		"companyName":         settings["company_name"],
+		"logoUrl":             logoURL,
+		"primaryColor":        settings["primary_color"],
+		"supportPhone":        settings["support_phone"],
+		"supportWhatsapp":     settings["support_whatsapp"],
+		"bannerImageUrl":      bannerURL,
+		"bannerEnabled":       settings["banner_enabled"],
+		"mpesaBillingType":    settings["mpesa_billing_type"],
+		"mpesaBankName":       settings["mpesa_bank_name"],
+		"mpesaShortcode":      settings["mpesa_shortcode"],
+		"mpesaTillNumber":     settings["mpesa_till_number"],
+		"mpesaPaybillNumber":  settings["mpesa_paybill_number"],
 		"mpesaPaybillAccount": settings["mpesa_paybill_account"],
-		"mpesaBankAccount":  settings["mpesa_bank_account"],
+		"mpesaBankAccount":    settings["mpesa_bank_account"],
 	}, "")
 }
 
@@ -122,33 +137,16 @@ func SettingsUpdate(c *fiber.Ctx) error {
 		}
 	}
 
-	credentialKeys := []string{
-		"mpesa_consumer_key", "mpesa_consumer_secret", "mpesa_passkey", "mpesa_shortcode",
-		"mpesa_till_number", "mpesa_paybill_number", "mpesa_paybill_account", "mpesa_bank_account",
-		"hostpinnacle_api_key", "hostpinnacle_username", "hostpinnacle_sender_id",
+	for _, k := range platformOnlyKeys {
+		delete(settingsToUpdate, k)
 	}
-	isCredKey := func(k string) bool {
-		for _, ck := range credentialKeys {
-			if ck == k {
-				return true
-			}
-		}
-		return false
-	}
+	UpsertSettings(settingsToUpdate)
 
-	for key, val := range settingsToUpdate {
-		trimmed := strings.TrimSpace(val)
-		if isCredKey(key) {
-			trimmed = strings.ReplaceAll(trimmed, " ", "")
-		}
-		if trimmed == "" {
-			config.DB.Where("`key` = ?", key).Delete(&models.Setting{})
-		} else {
-			config.DB.Where(models.Setting{Key: key}).Assign(models.Setting{Value: &trimmed}).FirstOrCreate(&models.Setting{})
-		}
+	result := loadAllSettings()
+	for _, k := range platformOnlyKeys {
+		delete(result, k)
 	}
-
-	return utils.SuccessResponse(c, loadAllSettings(), "Settings updated successfully.")
+	return utils.SuccessResponse(c, result, "Settings updated successfully.")
 }
 
 // SettingsUploadImage handles logo/banner image uploads.
@@ -197,6 +195,40 @@ func SettingsUploadImage(c *fiber.Ctx) error {
 	}, "Image uploaded successfully.")
 }
 
+// UpsertSettings writes a batch of key/value pairs to the global Setting
+// table, stripping whitespace from credential-shaped values and deleting
+// the row entirely for blank values (so blank means "unset", not "empty
+// string"). Shared by the admin-facing SettingsUpdate and any
+// platform-facing settings endpoint that manages the same global keys
+// (e.g. Zyra Net's own shared Daraja/Hostpinnacle credentials).
+func UpsertSettings(settingsToUpdate map[string]string) {
+	credentialKeys := []string{
+		"mpesa_consumer_key", "mpesa_consumer_secret", "mpesa_passkey", "mpesa_shortcode",
+		"mpesa_till_number", "mpesa_paybill_number", "mpesa_paybill_account", "mpesa_bank_account",
+		"hostpinnacle_api_key", "hostpinnacle_username", "hostpinnacle_sender_id",
+	}
+	isCredKey := func(k string) bool {
+		for _, ck := range credentialKeys {
+			if ck == k {
+				return true
+			}
+		}
+		return false
+	}
+
+	for key, val := range settingsToUpdate {
+		trimmed := strings.TrimSpace(val)
+		if isCredKey(key) {
+			trimmed = strings.ReplaceAll(trimmed, " ", "")
+		}
+		if trimmed == "" {
+			config.DB.Where("`key` = ?", key).Delete(&models.Setting{})
+		} else {
+			config.DB.Where(models.Setting{Key: key}).Assign(models.Setting{Value: &trimmed}).FirstOrCreate(&models.Setting{})
+		}
+	}
+}
+
 // loadAllSettings merges DB settings with defaults.
 func loadAllSettings() map[string]string {
 	result := make(map[string]string)
@@ -230,4 +262,3 @@ func GetSetting(key string) string {
 	}
 	return strings.TrimSpace(settingDefaults[key])
 }
-

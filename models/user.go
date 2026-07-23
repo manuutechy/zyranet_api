@@ -16,13 +16,15 @@ type User struct {
 	Phone           *string        `gorm:"size:20" json:"phone"`
 	Role            string         `gorm:"size:50;default:field_agent" json:"role"`
 	ZoneID          *uint          `json:"zone_id"`
+	OrganizationID  uint           `gorm:"not null;index" json:"organization_id"`
 	Status          string         `gorm:"size:20;default:active" json:"status"`
 	RememberToken   *string        `gorm:"size:100" json:"-"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
-	Zone *Zone `gorm:"foreignKey:ZoneID" json:"zone,omitempty"`
+	Zone         *Zone         `gorm:"foreignKey:ZoneID" json:"zone,omitempty"`
+	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
 }
 
 func (User) TableName() string { return "users" }

@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"github.com/gofiber/fiber/v2"
+	"github.com/zyranet/zyranet-api/config"
+	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -44,4 +46,24 @@ func CanManagePayments() fiber.Handler {
 // CanManageVouchers allows super_admin, zone_manager, and field_agent.
 func CanManageVouchers() fiber.Handler {
 	return RequireRoles("super_admin", "zone_manager", "field_agent")
+}
+
+// OrgZoneIDs returns every Zone ID belonging to the caller's Organization.
+// Every zone-scoping check in the handlers (zones, customers, vouchers,
+// reports, alerts) should additionally constrain against this set so that
+// no admin — including a super_admin — can see or act on another
+// Organization's zones. zone_manager's existing single-zone restriction is
+// applied on top of this, not instead of it.
+func OrgZoneIDs(c *fiber.Ctx) ([]uint, error) {
+	claims := GetClaims(c)
+	if claims == nil {
+		return nil, fiber.ErrUnauthorized
+	}
+	var ids []uint
+	if err := config.DB.Model(&models.Zone{}).
+		Where("organization_id = ?", claims.OrganizationID).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
