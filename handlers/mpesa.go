@@ -8,7 +8,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
-	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
@@ -49,36 +48,22 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	// captive-portal purchase flow (no customer_id: a fresh voucher is
 	// generated below) and the "existing subscriber renews without a JWT
 	// session" flow (customer_id supplied, e.g. resolved client-side from a
-	// previous guest/MAC lookup).
-	//
-	// The customer app now sends its session cookie on every request
-	// (credentials: 'include'), and by the time a customer reaches package
-	// purchase they've already gone through guest-login or OTP login, so a
-	// valid customerAuth session is very likely present here. Prefer that
-	// over any body-supplied customer_id — it's the actual authenticated
-	// identity and needs no further trust decision.
-	if cc := middleware.OptionalCustomerClaims(c); cc != nil && cc.CustomerID != 0 {
-		cid := cc.CustomerID
-		body.CustomerID = &cid
-	} else if body.CustomerID != nil {
-		// No session — the "existing subscriber renews without a JWT"
-		// case. We used to require the supplied phone to match the
-		// account's registered phone here, but that check can never pass
-		// for guest accounts (CustomerAuthGuest gives them a synthetic
-		// placeholder Phone like "GUEST10001", not a real number — so no
-		// guest could ever top up via STK push) and in practice customers
-		// often pay from a phone that isn't the one on their account (a
-		// family member's or shared phone). We now accept the supplied
-		// customer_id as-is, without a phone-match check. Worst case an
-		// attacker who guesses/enumerates a customer_id "gifts" that
-		// account a package renewal by paying for it themselves — no fund
-		// theft, no PII exposure — a materially smaller risk than the
-		// callback-forgery/IDOR issues guarded against elsewhere (see
-		// mpesaCallbackAuthorized). We still confirm the ID refers to a
-		// real customer.
+	// previous guest/MAC lookup). Without a JWT to trust, an attacker could
+	// otherwise pass any customer_id and, once the M-Pesa payment succeeds,
+	// have ProcessPaymentSuccess activate/renew a package on an account
+	// they don't own. Requiring the supplied phone to match that
+	// customer's registered phone ties attribution to whoever actually
+	// receives (and approves with their PIN) the STK push — the same trust
+	// boundary M-Pesa itself relies on. Authenticated top-ups from the
+	// logged-in customer dashboard use CustomerTopUp instead, which derives
+	// the customer from the JWT and never trusts a body-supplied ID.
+	if body.CustomerID != nil {
 		var owner models.Customer
 		if err := config.DB.First(&owner, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+		}
+		if normalizePhone(owner.Phone) == "" || normalizePhone(owner.Phone) != normalizePhone(body.Phone) {
+			return utils.ErrorResponse(c, "Phone number does not match the specified customer account.", "", fiber.StatusForbidden)
 		}
 	}
 
