@@ -189,6 +189,20 @@ func extractAndValidate(c *fiber.Ctx, cookieName string) (*Claims, error) {
 	return claims, nil
 }
 
+// OptionalCustomerClaims returns the parsed customer claims from the
+// customer session cookie (or Bearer header) if present and valid, or nil
+// otherwise. Unlike CustomerAuth, it never fails the request — callers use
+// it to prefer an authenticated customer's identity when a session happens
+// to be present while still allowing fully anonymous access (e.g.
+// MpesaStkPush's first-time/no-session purchase flow).
+func OptionalCustomerClaims(c *fiber.Ctx) *Claims {
+	claims, err := extractAndValidate(c, CustomerCookieName)
+	if err != nil || claims.Type != "customer" {
+		return nil
+	}
+	return claims
+}
+
 // GetClaims is a helper to retrieve claims from Fiber context.
 func GetClaims(c *fiber.Ctx) *Claims {
 	if v := c.Locals("claims"); v != nil {
