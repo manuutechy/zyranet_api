@@ -146,8 +146,11 @@ func TestHandleCallback_Failure(t *testing.T) {
 	if reloaded.Status != "failed" {
 		t.Errorf("expected status 'failed', got %q", reloaded.Status)
 	}
-	if reloaded.StatusReason == nil || *reloaded.StatusReason != "Request cancelled by user" {
-		t.Errorf("expected status_reason to be set, got %v", reloaded.StatusReason)
+	// ResultCode 1032 is mapped to a friendly, actionable message rather
+	// than Safaricom's raw ResultDesc — see friendlySTKFailureReason.
+	want := "Payment cancelled. You closed the M-Pesa prompt before approving it."
+	if reloaded.StatusReason == nil || *reloaded.StatusReason != want {
+		t.Errorf("expected status_reason %q, got %v", want, reloaded.StatusReason)
 	}
 }
 

@@ -378,10 +378,8 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 	}
 
 	if rc != 0 {
-		reason := "Transaction was rejected."
-		if rd, ok := stkCallback["ResultDesc"].(string); ok {
-			reason = rd
-		}
+		resultDesc, _ := stkCallback["ResultDesc"].(string)
+		reason := friendlySTKFailureReason(rc, resultDesc)
 		return s.ProcessPaymentFailure(&payment, reason)
 	}
 
@@ -557,6 +555,37 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 }
 
 // ProcessPaymentFailure handles database updates for a failed STK payment.
+// friendlySTKFailureReason maps a Daraja STK push ResultCode to a short,
+// actionable message for the customer. Safaricom's own ResultDesc strings
+// are internal/inconsistent wording (e.g. "DS timeout user cannot be
+// reached", or terse codes with no real description at all) — showing them
+// verbatim in the app ("Failed due to an unresolved reason type.") reads as
+// broken rather than explaining what the customer should do next. Known
+// codes get a clear message; anything unmapped falls back to a generic,
+// still-actionable message instead of Safaricom's raw text.
+func friendlySTKFailureReason(resultCode float64, resultDesc string) string {
+	switch resultCode {
+	case 1:
+		return "Payment failed: insufficient M-Pesa balance."
+	case 1032:
+		return "Payment cancelled. You closed the M-Pesa prompt before approving it."
+	case 1037:
+		return "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
+	case 1025, 9999:
+		return "We couldn't process this payment. Please try again."
+	case 2001:
+		return "Payment failed: wrong M-Pesa PIN entered."
+	case 1001:
+		return "Payment failed: you have another M-Pesa transaction in progress. Please finish or cancel it, then try again."
+	case 1019:
+		return "Payment request expired. Please try again."
+	}
+	if resultDesc != "" {
+		log.Printf("[M-Pesa] Unmapped STK failure ResultCode=%.0f ResultDesc=%q — showing generic message to customer", resultCode, resultDesc)
+	}
+	return "Payment could not be completed. Please try again, or contact support if you were charged."
+}
+
 func (s *MpesaService) ProcessPaymentFailure(payment *models.Payment, reason string) error {
 	res := config.DB.Model(&models.Payment{}).
 		Where("id = ? AND (status = ? OR (status = ? AND status_reason = ?))", payment.ID, "pending", "failed", "The transaction is still under processing").
@@ -718,10 +747,8 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		return "completed", nil
 	}
 
-	reason := "Transaction was rejected."
-	if rd, ok := result["ResultDesc"].(string); ok && rd != "" {
-		reason = rd
-	}
+	resultDesc, _ := result["ResultDesc"].(string)
+	reason := friendlySTKFailureReason(rc, resultDesc)
 	err = s.ProcessPaymentFailure(payment, reason)
 	if err != nil {
 		return "pending", err
