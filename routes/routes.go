@@ -172,6 +172,8 @@ func Register(app *fiber.App) {
 	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
 	admin.Get("/settings/mpesa", adminAuth, handlers.OrganizationMpesaShow)
 	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
+	admin.Get("/settings/sms", adminAuth, handlers.OrganizationSmsShow)
+	admin.Post("/settings/sms", adminAuth, handlers.OrganizationSmsUpdate)
 	admin.Get("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsShow)
 	admin.Post("/settings/captive-portal", adminAuth, handlers.CaptivePortalSettingsUpdate)
 	admin.Post("/settings/test-stk", adminAuth, handlers.OrganizationStkTest)

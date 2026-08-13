@@ -170,7 +170,7 @@ func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, err
 		"code":  redeemedVoucher.Code,
 	})
 	if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
-		go s.SMS.Send(phone, msg) //nolint:errcheck
+		go s.SMS.SendForZone(redeemedVoucher.ZoneID, phone, msg) //nolint:errcheck
 	}
 
 	return result, nil

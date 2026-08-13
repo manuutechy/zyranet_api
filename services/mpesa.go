@@ -472,7 +472,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 					"balance": fmt.Sprintf("%.2f", newBalance),
 				})
 				if s.SMS.GetSetting("sms_enable_credit", "yes") != "no" {
-					go s.SMS.Send(phone, msg)
+					go s.SMS.SendForZone(payment.ZoneID, phone, msg)
 				}
 			}
 		}
@@ -529,7 +529,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			"code":  voucher.Code,
 		})
 		if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
-			go s.SMS.Send(phone, msg) //nolint:errcheck
+			go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
 		}
 	} else if payment.CustomerID != nil {
 		var customer models.Customer
@@ -548,7 +548,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 				"expiry":  expiresAt.Format("2006-01-02 15:04"),
 			})
 			if s.SMS.GetSetting("sms_enable_active", "yes") != "no" {
-				go s.SMS.Send(phone, msg) //nolint:errcheck
+				go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
 			}
 		}
 	}

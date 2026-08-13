@@ -139,7 +139,7 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			"code":  voucher.Code,
 		})
 		if GetSetting("sms_enable_voucher") != "no" && body.Phone != "" {
-			go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+			go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
 		}
 	} else {
 		// Existing subscriber payment
@@ -200,14 +200,14 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 				"expiry":  expiresAt.Format("2006-01-02 15:04"),
 			})
 			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
-				go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+				go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
 			}
 		} else if body.Action == "credit" {
 			// Send credit notification SMS
 			msg := fmt.Sprintf("Hi %s, KES %.2f has been credited to your Zyra Net account. New Balance: KES %.2f.",
 				customer.Name, body.Amount, customer.CreditBalance)
 			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
-				go smsSvcGlobal.Send(body.Phone, msg) //nolint:errcheck
+				go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
 			}
 		}
 	}
@@ -312,7 +312,7 @@ func PaymentInvoiceSMS(c *fiber.Ctx) error {
 		companyName, payment.ID, payment.Amount, invoiceURL)
 
 	go func() {
-		_, _ = smsSvcGlobal.Send(body.Phone, msg)
+		_, _ = smsSvcGlobal.SendForZone(payment.ZoneID, body.Phone, msg)
 	}()
 
 	return utils.SuccessResponse(c, nil, "Invoice SMS sent successfully.")

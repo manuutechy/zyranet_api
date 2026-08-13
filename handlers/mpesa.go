@@ -353,7 +353,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 
 		if smsSvcGlobal != nil && customer.Phone != "" {
 			smsMsg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", body.TransAmount, body.TransID, customer.CreditBalance)
-			go smsSvcGlobal.Send(customer.Phone, smsMsg)
+			go smsSvcGlobal.SendForZone(customer.ZoneID, customer.Phone, smsMsg)
 		}
 	}
 

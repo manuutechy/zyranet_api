@@ -21,17 +21,88 @@ type SmsService struct{}
 // NewSmsService constructs an SmsService.
 func NewSmsService() *SmsService { return &SmsService{} }
 
-// Send sends an SMS via HostPinnacle and saves a log record.
-func (s *SmsService) Send(phone, message string) (*models.SmsLog, error) {
+// smsCreds is the resolved set of Hostpinnacle credentials to use for one
+// outgoing SMS, from either the platform-wide defaults or a tenant's own
+// configured Hostpinnacle account.
+type smsCreds struct {
+	BaseURL  string
+	APIKey   string
+	Username string
+	SenderID string
+}
+
+// resolveSmsCreds returns the Hostpinnacle credentials to use for a send
+// tied to organizationID, mirroring resolveMpesaCreds in services/mpesa.go.
+// If that Organization has configured its own Hostpinnacle account
+// (OrganizationSmsConfig.Mode == "own"), those credentials are used; any
+// field left blank on the org's config still falls back to the
+// platform-wide default for that one field. An organizationID of 0 (e.g.
+// platform-staff test sends), or an org with no config row (the default),
+// uses the platform-wide credentials unchanged.
+func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
+	creds := smsCreds{
+		BaseURL:  s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL),
+		APIKey:   s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey),
+		Username: s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername),
+		SenderID: s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID),
+	}
+	if organizationID == 0 {
+		return creds
+	}
+
+	var cfg models.OrganizationSmsConfig
+	if err := config.DB.Where("organization_id = ? AND mode = ?", organizationID, "own").First(&cfg).Error; err != nil {
+		return creds
+	}
+
+	if cfg.HostpinnacleBaseURL != "" {
+		creds.BaseURL = cfg.HostpinnacleBaseURL
+	}
+	if cfg.HostpinnacleAPIKey != "" {
+		creds.APIKey = cfg.HostpinnacleAPIKey
+	}
+	if cfg.HostpinnacleUsername != "" {
+		creds.Username = cfg.HostpinnacleUsername
+	}
+	if cfg.HostpinnacleSenderID != "" {
+		creds.SenderID = cfg.HostpinnacleSenderID
+	}
+	return creds
+}
+
+// SendForZone is a convenience wrapper over Send for callers that have a
+// zoneID (payment/customer context) handy rather than an organizationID —
+// it resolves the zone's Organization first, then sends on its behalf. A
+// zoneID of 0, or a zone that no longer exists, falls back to
+// organizationID 0 (platform-wide shared credentials), matching
+// resolveSmsCreds' behavior for organizationID 0.
+func (s *SmsService) SendForZone(zoneID uint, phone, message string) (*models.SmsLog, error) {
+	var organizationID uint
+	if zoneID != 0 {
+		var zone models.Zone
+		if err := config.DB.Select("organization_id").First(&zone, zoneID).Error; err == nil {
+			organizationID = zone.OrganizationID
+		}
+	}
+	return s.Send(organizationID, phone, message)
+}
+
+// Send sends an SMS via HostPinnacle (using organizationID to resolve
+// whether that Organization has its own Hostpinnacle account configured or
+// should use the platform-wide default — see resolveSmsCreds) and saves a
+// log record. Pass 0 for organizationID to force the platform default
+// (e.g. platform-staff test sends).
+func (s *SmsService) Send(organizationID uint, phone, message string) (*models.SmsLog, error) {
 	phone = utils.FormatPhone(phone) // E.g. 254712345678
 
 	status := "failed"
 	providerResponse := ""
 
-	apiURL := s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL)
-	apiKey := s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
-	userID := s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
-	sender := s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
+	creds := s.resolveSmsCreds(organizationID)
+	apiURL := creds.BaseURL
+	apiKey := creds.APIKey
+	userID := creds.Username
+	sender := creds.SenderID
 
 	// Mock mode if required credentials are missing
 	if apiKey == "" || userID == "" {

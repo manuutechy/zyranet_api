@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -24,9 +25,17 @@ var daraKeys = []string{
 	"mpesa_bank_account",
 }
 
+// hostpinnacle_password is deliberately not included here: HostPinnacle's
+// send API (see services/sms.go Send) authenticates with just the "apikey"
+// header plus userid/mobile/msg/senderid form fields — no password field is
+// part of the request. A password key used to be collected in the platform
+// SMS settings UI and stored in Setting, but nothing ever read it back out
+// when actually sending, so it was a dead UI field. Removed rather than
+// wired in, since HostPinnacle's documented auth for this endpoint doesn't
+// use one.
 var smsKeys = []string{
 	"sms_provider", "hostpinnacle_base_url", "hostpinnacle_api_key",
-	"hostpinnacle_username", "hostpinnacle_password", "hostpinnacle_sender_id",
+	"hostpinnacle_username", "hostpinnacle_sender_id",
 }
 
 func filterSettings(all map[string]string, keys []string) fiber.Map {
@@ -91,7 +100,8 @@ func PlatformSmsTest(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil || body.Phone == "" {
 		return utils.ErrorResponse(c, "A phone number is required.", "", fiber.StatusUnprocessableEntity)
 	}
-	if _, err := smsSvcGlobal.Send(body.Phone, "This is a test message from Zyra Net Platform."); err != nil {
+	claims := middleware.GetClaims(c)
+	if _, err := smsSvcGlobal.Send(claims.OrganizationID, body.Phone, "This is a test message from Zyra Net Platform."); err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to send test SMS.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Test SMS sent successfully.")

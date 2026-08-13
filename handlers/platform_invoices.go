@@ -239,7 +239,7 @@ func PlatformInvoiceSendSMS(c *fiber.Ctx) error {
 	msg := fmt.Sprintf("Zyra Net Platform Invoice PLAT-%d: KES %.2f due for %s. %d active customers @ KES %.2f each.",
 		invoice.ID, invoice.Total, invoice.PeriodStart.Format("Jan 2006"), invoice.ActiveCustomerCount, invoice.RatePerCustomer)
 
-	if _, err := smsSvcGlobal.Send(*invoice.Organization.ContactPhone, msg); err != nil {
+	if _, err := smsSvcGlobal.Send(invoice.OrganizationID, *invoice.Organization.ContactPhone, msg); err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to send invoice SMS.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Invoice SMS sent successfully.")

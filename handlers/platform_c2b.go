@@ -101,7 +101,7 @@ func PlatformC2BUnmatchedResolve(c *fiber.Ctx) error {
 
 		if smsSvcGlobal != nil && customer.Phone != "" {
 			msg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", unmatched.Amount, unmatched.TransID, customer.CreditBalance)
-			go smsSvcGlobal.Send(customer.Phone, msg)
+			go smsSvcGlobal.Send(zone.OrganizationID, customer.Phone, msg)
 		}
 	}
 

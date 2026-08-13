@@ -37,6 +37,7 @@ func main() {
 		&models.PlatformInvoice{},
 		&models.PlatformSetting{},
 		&models.OrganizationMpesaConfig{},
+		&models.OrganizationSmsConfig{},
 		&models.UnmatchedC2BPayment{},
 		&models.User{},
 		&models.Zone{},

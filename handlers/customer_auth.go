@@ -116,7 +116,7 @@ func RequestOtp(c *fiber.Ctx) error {
 		"otp": otp,
 	})
 	if smsServiceGlobal != nil && GetSetting("sms_enable_otp") != "no" {
-		go smsServiceGlobal.Send(phone, msg) //nolint:errcheck
+		go smsServiceGlobal.SendForZone(customer.ZoneID, phone, msg) //nolint:errcheck
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
@@ -661,7 +661,7 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 		"expiry":  expiresAt.Format("2006-01-02 15:04"),
 	})
 	if GetSetting("sms_enable_active") != "no" {
-		go smsSvcGlobal.Send(customer.Phone, msg) //nolint:errcheck
+		go smsSvcGlobal.SendForZone(pkg.ZoneID, customer.Phone, msg) //nolint:errcheck
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{

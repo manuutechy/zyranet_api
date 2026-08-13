@@ -36,7 +36,7 @@ func TestSms(c *fiber.Ctx) error {
 	}
 
 	svc := services.NewSmsService()
-	log, err := svc.Send(body.Phone, body.Message)
+	log, err := svc.Send(claims.OrganizationID, body.Phone, body.Message)
 	if err != nil {
 		return utils.ErrorResponse(c, "SMS sending failed: "+err.Error(), "", fiber.StatusBadGateway)
 	}
