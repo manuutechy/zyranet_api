@@ -44,6 +44,29 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
 
+	// This endpoint is intentionally public — it also serves the anonymous
+	// captive-portal purchase flow (no customer_id: a fresh voucher is
+	// generated below) and the "existing subscriber renews without a JWT
+	// session" flow (customer_id supplied, e.g. resolved client-side from a
+	// previous guest/MAC lookup). Without a JWT to trust, an attacker could
+	// otherwise pass any customer_id and, once the M-Pesa payment succeeds,
+	// have ProcessPaymentSuccess activate/renew a package on an account
+	// they don't own. Requiring the supplied phone to match that
+	// customer's registered phone ties attribution to whoever actually
+	// receives (and approves with their PIN) the STK push — the same trust
+	// boundary M-Pesa itself relies on. Authenticated top-ups from the
+	// logged-in customer dashboard use CustomerTopUp instead, which derives
+	// the customer from the JWT and never trusts a body-supplied ID.
+	if body.CustomerID != nil {
+		var owner models.Customer
+		if err := config.DB.First(&owner, *body.CustomerID).Error; err != nil {
+			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+		}
+		if normalizePhone(owner.Phone) == "" || normalizePhone(owner.Phone) != normalizePhone(body.Phone) {
+			return utils.ErrorResponse(c, "Phone number does not match the specified customer account.", "", fiber.StatusForbidden)
+		}
+	}
+
 	var voucherID *uint = body.VoucherID
 
 	// Auto-generate voucher if neither customer nor voucher specified
@@ -114,8 +137,43 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	return utils.ErrorResponse(c, reason, "", fiber.StatusBadRequest)
 }
 
-// MpesaCallback handles the async Daraja payment notification (PUBLIC).
+// mpesaCallbackAuthorized guards the public Daraja callback/C2B endpoints.
+//
+// These routes must stay unauthenticated (Safaricom calls them directly,
+// with no way for us to hand it a JWT), but that also means anyone who
+// knows the URL can POST a forged "payment succeeded" notification. The
+// CheckoutRequestID alone isn't a secret — MpesaStkPush returns it straight
+// to the client that just initiated the push — so matching it to a pending
+// Payment row (done in HandleCallback) blocks a *stranger* from crediting
+// someone else's payment, but doesn't stop the very customer who requested
+// that STK push from replaying/forging their own "it succeeded" callback
+// before actually paying.
+//
+// The simplest robust fix that doesn't require IP allowlisting (Safaricom's
+// published callback IP ranges change and aren't guaranteed stable, and
+// Railway/most PaaS deployments sit behind a proxy that complicates trusting
+// c.IP() anyway) is a shared secret embedded in the callback URL itself:
+// operators append `?token=<MPESA_CALLBACK_SECRET>` to the CallBackURL /
+// ValidationURL / ConfirmationURL they register with Daraja. That token is
+// never returned to the payer in any API response, so it can't be derived
+// from the STK-push flow the way CheckoutRequestID can.
+func mpesaCallbackAuthorized(c *fiber.Ctx) bool {
+	secret := config.Config.MpesaCallbackSecret
+	if secret == "" {
+		log.Printf("[M-Pesa] WARNING: MPESA_CALLBACK_SECRET is not set — callback/C2B endpoints accept requests from anyone. Set MPESA_CALLBACK_SECRET and append ?token=<secret> to your Daraja CallBackURL/ValidationURL/ConfirmationURL.")
+		return true
+	}
+	return c.Query("token") == secret
+}
+
+// MpesaCallback handles the async Daraja payment notification (PUBLIC, but
+// see mpesaCallbackAuthorized).
 func MpesaCallback(c *fiber.Ctx) error {
+	if !mpesaCallbackAuthorized(c) {
+		log.Printf("[M-Pesa] Rejected callback with missing/invalid token from %s", c.IP())
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Unauthorized"})
+	}
+
 	var payload map[string]interface{}
 	if err := c.BodyParser(&payload); err != nil {
 		log.Printf("[M-Pesa] Failed to parse callback: %v", err)
@@ -130,8 +188,14 @@ func MpesaCallback(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Success"})
 }
 
-// MpesaC2BValidation handles M-Pesa C2B Paybill validation requests from Safaricom.
+// MpesaC2BValidation handles M-Pesa C2B Paybill validation requests from
+// Safaricom (PUBLIC, but see mpesaCallbackAuthorized).
 func MpesaC2BValidation(c *fiber.Ctx) error {
+	if !mpesaCallbackAuthorized(c) {
+		log.Printf("[C2B Validation] Rejected request with missing/invalid token from %s", c.IP())
+		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Rejected"})
+	}
+
 	var body struct {
 		TransactionType   string  `json:"TransactionType"`
 		TransID           string  `json:"TransID"`
@@ -153,8 +217,19 @@ func MpesaC2BValidation(c *fiber.Ctx) error {
 	})
 }
 
-// MpesaC2BConfirmation handles M-Pesa C2B Paybill confirmation notifications from Safaricom.
+// MpesaC2BConfirmation handles M-Pesa C2B Paybill confirmation notifications
+// from Safaricom (PUBLIC, but see mpesaCallbackAuthorized). This endpoint
+// credits customer.CreditBalance directly off unauthenticated POST body
+// fields, so the shared-secret check is the only thing standing between a
+// forged request and free credit — there is no equivalent of the
+// "matching pending Payment row" check MpesaCallback has, since a C2B
+// payment isn't tied to a payment we initiated.
 func MpesaC2BConfirmation(c *fiber.Ctx) error {
+	if !mpesaCallbackAuthorized(c) {
+		log.Printf("[C2B Confirmation] Rejected request with missing/invalid token from %s", c.IP())
+		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Rejected"})
+	}
+
 	var body struct {
 		TransactionType   string  `json:"TransactionType"`
 		TransID           string  `json:"TransID"`

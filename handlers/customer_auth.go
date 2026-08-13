@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,12 +17,22 @@ import (
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // otpStore is an in-memory OTP cache (phone → otp, expires).
 var (
 	otpStore   = sync.Map{}
 	otpTimeout = 10 * time.Minute
+
+	// otpRequestStore tracks the last time an OTP was requested for a given
+	// phone (phone → time.Time), so we can enforce a per-phone cooldown.
+	// The existing payLimiter on /customer/auth/otp is IP-keyed only, so a
+	// distributed attacker (many source IPs) could still OTP-bomb a single
+	// victim phone number by rotating IPs; this closes that gap regardless
+	// of caller IP.
+	otpRequestStore = sync.Map{}
+	otpCooldown     = 60 * time.Second
 )
 
 type otpEntry struct {
@@ -46,6 +58,16 @@ func RequestOtp(c *fiber.Ctx) error {
 	}
 
 	phone := normalizePhone(body.Phone)
+
+	// Per-phone cooldown, independent of the caller's IP (see
+	// otpRequestStore doc comment above).
+	if v, ok := otpRequestStore.Load(phone); ok {
+		if lastReq, ok := v.(time.Time); ok && time.Since(lastReq) < otpCooldown {
+			wait := otpCooldown - time.Since(lastReq)
+			return utils.ErrorResponse(c, fmt.Sprintf("Please wait %d seconds before requesting another code.", int(wait.Seconds())+1), "", fiber.StatusTooManyRequests)
+		}
+	}
+	otpRequestStore.Store(phone, time.Now())
 
 	var customer models.Customer
 	if err := config.DB.Where("phone = ?", phone).First(&customer).Error; err != nil {
@@ -89,8 +111,6 @@ func RequestOtp(c *fiber.Ctx) error {
 	otp := generateOtp()
 	otpStore.Store(phone, otpEntry{OTP: otp, ExpiresAt: time.Now().Add(otpTimeout)})
 
-	log.Printf("[OTP] Phone %s OTP: %s", phone, otp)
-
 	template := GetSetting("sms_template_otp")
 	msg := utils.RenderTemplate(template, map[string]string{
 		"otp": otp,
@@ -120,9 +140,14 @@ func VerifyOtp(c *fiber.Ctx) error {
 	phone := normalizePhone(body.Phone)
 	otp := body.OTP
 
-	// Sandbox bypass — only ever active outside production, so this can
-	// never be used as an account-takeover backdoor on the live system.
-	sandboxPass := config.Config.AppEnv != "production" && (otp == "1234" || otp == "123456")
+	// Sandbox bypass — gated on an explicit opt-in (APP_ENV=local, or
+	// ALLOW_SANDBOX_OTP=true for other non-production setups like CI/QA),
+	// not merely `AppEnv != "production"`. Gating only on "not production"
+	// is the same fragile-string-match class of bug as the old JWT_SECRET
+	// check: a typo'd or unexpected APP_ENV value (e.g. "staging", "prod",
+	// a blank string) would silently leave this full auth bypass enabled.
+	sandboxOtpAllowed := config.Config.AppEnv == "local" || strings.EqualFold(os.Getenv("ALLOW_SANDBOX_OTP"), "true")
+	sandboxPass := sandboxOtpAllowed && (otp == "1234" || otp == "123456")
 
 	if !sandboxPass {
 		v, ok := otpStore.Load(phone)
@@ -559,45 +584,59 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Insufficient credit balance. Please top up your account.", "Insufficient balance", fiber.StatusBadRequest)
 	}
 
-	// Deduct credit balance
+	// Deduct credit balance, log the deduction, record the payment, and
+	// activate the subscription as a single DB transaction. Previously
+	// these were separate writes with the payment-record error only
+	// logged — if that Create failed, the customer was left charged
+	// (balance deducted, package activated) with no payment record at all.
+	// Wrapping them means any failure rolls back the whole operation
+	// instead of leaving a paid-but-unrecorded state.
 	newBalance := customer.CreditBalance - pkg.Price
-	config.DB.Model(&customer).Update("credit_balance", newBalance)
-
-	// Log credit deduction
-	note := fmt.Sprintf("Purchased Package: %s", pkg.Name)
-	config.DB.Create(&models.CreditLog{
-		CustomerID: customer.ID,
-		Amount:     pkg.Price,
-		Type:       "debit",
-		Note:       &note,
-	})
-
-	// Create completed payment record
-	payment := models.Payment{
-		CustomerID: &customer.ID,
-		VoucherID:  nil,
-		ZoneID:     pkg.ZoneID,
-		PackageID:  &pkg.ID,
-		Phone:      customer.Phone,
-		Amount:     pkg.Price,
-		Currency:   "KES",
-		Method:     "credit", // paid via credit balance
-		Status:     "completed",
-		MacAddress: body.Mac,
-		IpAddress:  body.IP,
-	}
-	if err := config.DB.Create(&payment).Error; err != nil {
-		log.Printf("[Credit Purchase] Failed to record payment for Customer %d: %v", customer.ID, err)
-	}
-
-	// Activate subscription
 	expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
-	config.DB.Model(&customer).Updates(map[string]interface{}{
-		"status":     "active",
-		"package_id": pkg.ID,
-		"zone_id":    pkg.ZoneID,
-		"expires_at": expiresAt,
+	var payment models.Payment
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&customer).Update("credit_balance", newBalance).Error; err != nil {
+			return err
+		}
+
+		note := fmt.Sprintf("Purchased Package: %s", pkg.Name)
+		if err := tx.Create(&models.CreditLog{
+			CustomerID: customer.ID,
+			Amount:     pkg.Price,
+			Type:       "debit",
+			Note:       &note,
+		}).Error; err != nil {
+			return err
+		}
+
+		payment = models.Payment{
+			CustomerID: &customer.ID,
+			VoucherID:  nil,
+			ZoneID:     pkg.ZoneID,
+			PackageID:  &pkg.ID,
+			Phone:      customer.Phone,
+			Amount:     pkg.Price,
+			Currency:   "KES",
+			Method:     "credit", // paid via credit balance
+			Status:     "completed",
+			MacAddress: body.Mac,
+			IpAddress:  body.IP,
+		}
+		if err := tx.Create(&payment).Error; err != nil {
+			return err
+		}
+
+		return tx.Model(&customer).Updates(map[string]interface{}{
+			"status":     "active",
+			"package_id": pkg.ID,
+			"zone_id":    pkg.ZoneID,
+			"expires_at": expiresAt,
+		}).Error
 	})
+	if err != nil {
+		log.Printf("[Credit Purchase] Transaction failed for Customer %d: %v", customer.ID, err)
+		return utils.ErrorResponse(c, "Failed to complete purchase. Your credit balance was not charged.", "", fiber.StatusInternalServerError)
+	}
 
 	// Load Zone to run MikroTik commands
 	var zone models.Zone

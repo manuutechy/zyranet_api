@@ -35,6 +35,18 @@ type AppConfig struct {
 	MpesaPasskey        string
 	MpesaCallbackURL    string
 	MpesaEnv            string
+	// MpesaCallbackSecret, when set, must be supplied as a `?token=` query
+	// parameter on inbound STK callback / C2B validation / C2B confirmation
+	// requests (see handlers/mpesa.go mpesaCallbackAuthorized). Append it to
+	// the CallBackURL/ValidationURL/ConfirmationURL you register with Daraja.
+	MpesaCallbackSecret string
+
+	// MikroTik router connection safety toggles — see services/mikrotik.go.
+	// Both default to the secure behavior and are meant to be flipped on
+	// only for local/dev testing against self-signed certs or routers on
+	// private/loopback ranges (e.g. a LAN test rig or Docker network).
+	MikroTikInsecureSkipVerify bool
+	MikroTikAllowPrivateIPs    bool
 
 	// SMS Provider ("hostpinnacle" is the default)
 	SmsProvider string
@@ -87,6 +99,10 @@ func Load() {
 		MpesaPasskey:        getEnv("MPESA_PASSKEY", ""),
 		MpesaCallbackURL:    getEnv("MPESA_CALLBACK_URL", ""),
 		MpesaEnv:            getEnv("MPESA_ENV", "sandbox"),
+		MpesaCallbackSecret: getEnv("MPESA_CALLBACK_SECRET", ""),
+
+		MikroTikInsecureSkipVerify: getEnvBool("MIKROTIK_INSECURE_SKIP_VERIFY", false),
+		MikroTikAllowPrivateIPs:    getEnvBool("MIKROTIK_ALLOW_PRIVATE_IPS", false),
 
 		SmsProvider: getEnv("SMS_PROVIDER", "hostpinnacle"),
 
@@ -102,8 +118,15 @@ func Load() {
 		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
 	}
 
-	if Config.AppEnv == "production" && Config.JWTSecret == "change-me-in-production" {
-		log.Fatal("[config] JWT_SECRET is still the default placeholder — set a long random secret before running in production")
+	// Refuse to boot with an unsafe JWT secret regardless of AppEnv. Gating
+	// this only on `AppEnv == "production"` (the previous behavior) meant a
+	// typo'd or unexpected APP_ENV value (e.g. "prod", "Production", a
+	// blank string) would silently skip the check and let the API sign
+	// tokens with a secret anyone can read off GitHub. A short/default/empty
+	// secret is unsafe in every environment, not just the one spelled
+	// exactly "production".
+	if Config.JWTSecret == "" || Config.JWTSecret == "change-me-in-production" || len(Config.JWTSecret) < 32 {
+		log.Fatal("[config] JWT_SECRET is missing, the default placeholder, or too short (<32 chars) — set a long random secret (openssl rand -base64 48) before starting the API")
 	}
 
 	fmt.Printf("[config] Loaded — env=%s port=%s db=%s@%s/%s\n",
@@ -146,6 +169,18 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

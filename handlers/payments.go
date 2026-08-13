@@ -48,10 +48,19 @@ func PaymentIndex(c *fiber.Ctx) error {
 	return utils.PaginatedResponse(c, payments, total, page, perPage)
 }
 
-// PaymentShow returns a single payment (public for polling status).
+// PaymentShow returns a single payment, scoped to the caller's organization
+// (admin-authenticated). Previously this had no auth and no org/zone
+// filter at all, which let anyone enumerate payment IDs and read another
+// tenant's customer PII (phone, receipt numbers, amounts). Status polling
+// for the payer's own in-flight STK push is served by the customer JWT
+// route (CustomerAuthPayments) / hotspot status endpoints instead.
 func PaymentShow(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var payment models.Payment
-	if err := config.DB.Preload("Package").Preload("Zone").First(&payment, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Package").Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&payment, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Payment record not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, payment, "")
@@ -225,10 +234,19 @@ func formatAmount(amount float64) string {
 
 var emailSvcGlobal = services.NewEmailService()
 
-// PaymentInvoice generates an HTML view of the invoice.
+// PaymentInvoice generates an HTML view of the invoice, scoped to the
+// caller's organization (admin-authenticated). Previously this had no
+// auth and no org/zone filter, leaking full customer PII (name, phone,
+// account number, package/zone) across tenants to anyone who could guess
+// a payment ID. Emailing/SMS-ing the invoice to the actual customer is
+// still handled by PaymentInvoiceEmail/PaymentInvoiceSMS.
 func PaymentInvoice(c *fiber.Ctx) error {
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
 	var payment models.Payment
-	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").First(&payment, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Customer").Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs).First(&payment, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Payment not found.", "", fiber.StatusNotFound)
 	}
 
@@ -365,7 +383,7 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Invoice #INV-%%d</title>
+    <title>Invoice #INV-%d</title>
     <style>
         body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; margin: 0; padding: 20px; background-color: #f8fafc; }
         .invoice-box { max-width: 800px; margin: auto; padding: 40px; border: 1px solid #e2e8f0; font-size: 14px; line-height: 24px; border-radius: 12px; background: #fff; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05); }
@@ -468,6 +486,7 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
     </div>
 </body>
 </html>`,
+		payment.ID,
 		primaryColor,
 		primaryColor,
 		primaryColor,

@@ -54,7 +54,6 @@ func Register(app *fiber.App) {
 	v1.Get("/public/settings", handlers.SettingsPublic)
 	v1.Get("/public/packages", handlers.PackagePublic)
 	v1.Get("/public/captive-settings", handlers.CaptivePortalPublicSettings)
-	v1.Get("/payments/:id/invoice", handlers.PaymentInvoice)
 
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
 	v1.Post("/payments/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
@@ -67,9 +66,6 @@ func Register(app *fiber.App) {
 	v1.Post("/mpesa/callback", handlers.MpesaCallback)
 	v1.Post("/mpesa/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/mpesa/c2b/confirmation", handlers.MpesaC2BConfirmation)
-
-	// Payment status check
-	v1.Get("/payments/:id", handlers.PaymentShow)
 
 	// Voucher redemption (public captive portal flow)
 	v1.Post("/vouchers/redeem", handlers.VoucherRedeem)
@@ -158,6 +154,8 @@ func Register(app *fiber.App) {
 	// Payments
 	admin.Get("/payments", adminAuth, handlers.PaymentIndex)
 	admin.Post("/payments/manual", adminAuth, handlers.PaymentRecordManual)
+	admin.Get("/payments/:id", adminAuth, handlers.PaymentShow)
+	admin.Get("/payments/:id/invoice", adminAuth, handlers.PaymentInvoice)
 	admin.Post("/payments/:id/invoice/email", adminAuth, handlers.PaymentInvoiceEmail)
 	admin.Post("/payments/:id/invoice/sms", adminAuth, handlers.PaymentInvoiceSMS)
 

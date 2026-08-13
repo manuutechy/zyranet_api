@@ -49,6 +49,14 @@ var settingDefaults = map[string]string{
 	"sms_enable_active":      "yes",
 	"banner_image_url":       "",
 	"banner_enabled":         "yes",
+	// otp_login_enabled toggles whether the customer-facing portal offers
+	// phone+OTP login. Off by default: customers log in via the existing
+	// guest/MAC-based flow (CustomerAuthGuest) instead. The RequestOtp/
+	// VerifyOtp handlers and routes stay fully functional regardless of
+	// this setting — it only controls whether the frontend surfaces that
+	// flow (see SettingsPublic's "otpLoginEnabled") — so an operator can
+	// re-enable it at any time via SettingsUpdate without a deploy.
+	"otp_login_enabled": "no",
 }
 
 // platformOnlyKeys are Setting keys that now belong exclusively to the SA
@@ -100,6 +108,7 @@ func SettingsPublic(c *fiber.Ctx) error {
 		"mpesaPaybillNumber":  settings["mpesa_paybill_number"],
 		"mpesaPaybillAccount": settings["mpesa_paybill_account"],
 		"mpesaBankAccount":    settings["mpesa_bank_account"],
+		"otpLoginEnabled":     settings["otp_login_enabled"] == "yes",
 	}, "")
 }
 

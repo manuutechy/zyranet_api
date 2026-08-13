@@ -122,7 +122,6 @@ func main() {
 	handlers.InitVoucherService(voucherSvc)
 	handlers.InitZoneServices(mikrotikSvc, scriptSvc)
 	handlers.InitCustomerAuthSMS(smsSvc)
-	handlers.InitScriptService(scriptSvc)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{

@@ -270,23 +270,9 @@ func ZoneResolveAlert(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, alert, "Alert marked as resolved.")
 }
 
-// ZoneScript generates and downloads a .rsc script for the zone.
-func ZoneScript(c *fiber.Ctx) error {
-	claims := middleware.GetClaims(c)
-	var zone models.Zone
-	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
-		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
-	}
-
-	content, filename, err := scriptSvc.GenerateScript(zone.ID)
-	if err != nil {
-		return utils.ErrorResponse(c, err.Error(), "Script generation failed.", fiber.StatusBadRequest)
-	}
-
-	c.Set("Content-Type", "text/plain")
-	c.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	return c.SendString(content)
-}
+// Note: zone script generation is handled by handlers.MikroTikScriptGenerate
+// (mikrotik_script.go), routed at GET /zones/:id/script. It uses the same
+// organization-scoped lookup pattern as the rest of this file.
 
 // ZoneExecCommand executes a remote command on the zone's MikroTik router.
 func ZoneExecCommand(c *fiber.Ctx) error {

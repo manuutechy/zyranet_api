@@ -46,8 +46,71 @@ type RouterStatus struct {
 	Error            string `json:"error,omitempty"`
 }
 
+// validateRouterIP rejects zone.RouterIP values that point at private,
+// loopback, link-local, or cloud-metadata address ranges — an admin-settable
+// field that every router-facing code path (TestConnection, status polling,
+// hotspot/PPPoE pushes, exec-command, etc.) ultimately dials or sends an
+// HTTP request to. Without this check, a malicious/compromised org admin
+// could set RouterIP to something like 169.254.169.254 (cloud metadata) or
+// an internal service address and use the "test connection" / "push
+// config" endpoints as an SSRF proxy into the hosting network. Set
+// MIKROTIK_ALLOW_PRIVATE_IPS=true only for local/dev testing against a
+// router on a private LAN or a Docker/VM test rig.
+func validateRouterIP(rawIP string) error {
+	if config.Config.MikroTikAllowPrivateIPs {
+		return nil
+	}
+	host := rawIP
+	if h, _, err := net.SplitHostPort(rawIP); err == nil {
+		host = h
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// Not a resolvable hostname — try parsing directly as an IP.
+		if ip := net.ParseIP(host); ip != nil {
+			ips = []net.IP{ip}
+		} else {
+			return fmt.Errorf("router address %q could not be resolved", rawIP)
+		}
+	}
+	for _, ip := range ips {
+		if isDisallowedRouterIP(ip) {
+			return fmt.Errorf("router address %q resolves to a private/internal IP (%s) which is not allowed; set MIKROTIK_ALLOW_PRIVATE_IPS=true for local/dev testing", rawIP, ip.String())
+		}
+	}
+	return nil
+}
+
+func isDisallowedRouterIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	// Cloud metadata endpoint (AWS/GCP/Azure/DigitalOcean all use this).
+	if ip.Equal(net.IPv4(169, 254, 169, 254)) {
+		return true
+	}
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"fc00::/7",
+		"::1/128",
+	}
+	for _, cidr := range privateRanges {
+		_, block, err := net.ParseCIDR(cidr)
+		if err == nil && block.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestConnection tests connectivity to a zone's router.
 func (s *MikroTikService) TestConnection(zone *models.Zone) (map[string]interface{}, error) {
+	if err := validateRouterIP(zone.RouterIP); err != nil {
+		return map[string]interface{}{"connected": false, "error": err.Error()}, nil
+	}
+
 	if zone.ConnectionType == "api" {
 		client, err := s.dialAPI(zone)
 		if err != nil {
@@ -234,6 +297,10 @@ func (s *MikroTikService) GetActiveSessions(zone *models.Zone) ([]ActiveSession,
 // ---- API (go-routeros) implementations ----
 
 func (s *MikroTikService) dialAPI(zone *models.Zone) (*routeros.Client, error) {
+	if err := validateRouterIP(zone.RouterIP); err != nil {
+		return nil, err
+	}
+
 	port := zone.RouterPort
 	if port == 0 {
 		if zone.RouterUseSSL {
@@ -253,7 +320,11 @@ func (s *MikroTikService) dialAPI(zone *models.Zone) (*routeros.Client, error) {
 	probe.Close()
 
 	if zone.RouterUseSSL {
-		tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		// InsecureSkipVerify defaults to false (verify certs). MikroTik
+		// routers commonly run a self-signed cert though, so
+		// MIKROTIK_INSECURE_SKIP_VERIFY=true is available as an explicit
+		// opt-out for dev/self-signed setups rather than being unconditional.
+		tlsCfg := &tls.Config{InsecureSkipVerify: config.Config.MikroTikInsecureSkipVerify} //nolint:gosec
 		return routeros.DialTLS(addr, strVal(zone.RouterUsername), strVal(zone.RouterPassword), tlsCfg)
 	}
 	return routeros.Dial(addr, strVal(zone.RouterUsername), strVal(zone.RouterPassword))
@@ -532,12 +603,15 @@ func (s *MikroTikService) restClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: config.Config.MikroTikInsecureSkipVerify}, //nolint:gosec
 		},
 	}
 }
 
 func (s *MikroTikService) restGet(zone *models.Zone, path string) ([]map[string]interface{}, error) {
+	if err := validateRouterIP(zone.RouterIP); err != nil {
+		return nil, err
+	}
 	client := s.restClient()
 	req, _ := http.NewRequest(http.MethodGet, s.restBaseURL(zone)+path, nil)
 	req.SetBasicAuth(strVal(zone.RouterUsername), strVal(zone.RouterPassword))
@@ -563,6 +637,9 @@ func (s *MikroTikService) restGet(zone *models.Zone, path string) ([]map[string]
 }
 
 func (s *MikroTikService) restPost(zone *models.Zone, path string, body map[string]interface{}) error {
+	if err := validateRouterIP(zone.RouterIP); err != nil {
+		return err
+	}
 	client := s.restClient()
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPost, s.restBaseURL(zone)+path, strings.NewReader(string(b)))
@@ -577,6 +654,9 @@ func (s *MikroTikService) restPost(zone *models.Zone, path string, body map[stri
 }
 
 func (s *MikroTikService) restDelete(zone *models.Zone, path string) error {
+	if err := validateRouterIP(zone.RouterIP); err != nil {
+		return err
+	}
 	client := s.restClient()
 	req, _ := http.NewRequest(http.MethodDelete, s.restBaseURL(zone)+path, nil)
 	req.SetBasicAuth(strVal(zone.RouterUsername), strVal(zone.RouterPassword))

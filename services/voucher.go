@@ -10,6 +10,8 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // VoucherService handles voucher generation and redemption.
@@ -50,91 +52,128 @@ func (s *VoucherService) Generate(zoneID, packageID uint, vType string, usageLim
 }
 
 // Redeem processes a voucher code for a given phone number.
+//
+// The voucher usage update is done as a single atomic conditional UPDATE
+// (status/usage_count changed only if the row still matches the state we
+// read) inside a DB transaction, rather than the previous read-then-write.
+// Without that, two concurrent requests redeeming the same single-use
+// voucher could both read status="unused", both pass the check, and both
+// write a "success" — double-redeeming a voucher that should only ever be
+// usable once. The conditional UPDATE's RowsAffected tells us whether we
+// actually won the race; if not, the request fails cleanly instead of
+// silently granting a second redemption.
 func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 
-	var voucher models.Voucher
-	if err := config.DB.Where("code = ?", code).First(&voucher).Error; err != nil {
-		return nil, fmt.Errorf("voucher code not found")
-	}
-
-	if voucher.Status == "expired" || voucher.Status == "depleted" {
-		return nil, fmt.Errorf("voucher code is already expired or depleted")
-	}
-
-	if voucher.ExpiresAt != nil && time.Now().UTC().After(*voucher.ExpiresAt) {
-		config.DB.Model(&voucher).Update("status", "expired")
-		return nil, fmt.Errorf("voucher code has expired")
-	}
-
-	var pkg models.Package
-	if err := config.DB.First(&pkg, voucher.PackageID).Error; err != nil || pkg.Status != "active" {
-		return nil, fmt.Errorf("associated internet package is inactive or unavailable")
-	}
-
-	// Find or create customer
-	var customer models.Customer
-	err := config.DB.Where("phone = ? AND zone_id = ?", phone, voucher.ZoneID).First(&customer).Error
-	if err != nil {
-		// Create new guest customer
-		expiresAt := calculateVoucherExpiry(&pkg)
-		name := "Guest " + phone[len(phone)-4:]
-		customer = models.Customer{
-			Name:      name,
-			Phone:     phone,
-			ZoneID:    voucher.ZoneID,
-			PackageID: voucher.PackageID,
-			Type:      "hotspot",
-			Status:    "active",
-			ExpiresAt: expiresAt,
+	var result map[string]interface{}
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var voucher models.Voucher
+		// SELECT ... FOR UPDATE locks the row for the duration of the
+		// transaction, so a concurrent redemption of the same code blocks
+		// until this transaction commits/rolls back instead of racing it.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("code = ?", code).First(&voucher).Error; err != nil {
+			return fmt.Errorf("voucher code not found")
 		}
-		if err := config.DB.Create(&customer).Error; err != nil {
-			return nil, fmt.Errorf("failed to create customer: %w", err)
+
+		if voucher.Status == "expired" || voucher.Status == "depleted" {
+			return fmt.Errorf("voucher code is already expired or depleted")
 		}
-	} else {
-		expiresAt := calculateVoucherExpiry(&pkg)
-		config.DB.Model(&customer).Updates(map[string]interface{}{
-			"package_id": voucher.PackageID,
-			"status":     "active",
-			"expires_at": expiresAt,
-		})
-		customer.ExpiresAt = expiresAt
-	}
 
-	// Update voucher usage
-	newCount := voucher.UsageCount + 1
-	newStatus := "active"
-	limit := 1
-	if voucher.UsageLimit != nil {
-		limit = *voucher.UsageLimit
-	}
-	if newCount >= limit {
-		newStatus = "depleted"
-	}
+		if voucher.ExpiresAt != nil && time.Now().UTC().After(*voucher.ExpiresAt) {
+			tx.Model(&voucher).Update("status", "expired")
+			return fmt.Errorf("voucher code has expired")
+		}
 
-	config.DB.Model(&voucher).Updates(map[string]interface{}{
-		"usage_count": newCount,
-		"status":      newStatus,
-		"used_by":     customer.ID,
-		"expires_at":  customer.ExpiresAt,
+		var pkg models.Package
+		if err := tx.First(&pkg, voucher.PackageID).Error; err != nil || pkg.Status != "active" {
+			return fmt.Errorf("associated internet package is inactive or unavailable")
+		}
+
+		// Find or create customer
+		var customer models.Customer
+		err := tx.Where("phone = ? AND zone_id = ?", phone, voucher.ZoneID).First(&customer).Error
+		if err != nil {
+			// Create new guest customer
+			expiresAt := calculateVoucherExpiry(&pkg)
+			name := "Guest " + phone[len(phone)-4:]
+			customer = models.Customer{
+				Name:      name,
+				Phone:     phone,
+				ZoneID:    voucher.ZoneID,
+				PackageID: voucher.PackageID,
+				Type:      "hotspot",
+				Status:    "active",
+				ExpiresAt: expiresAt,
+			}
+			if err := tx.Create(&customer).Error; err != nil {
+				return fmt.Errorf("failed to create customer: %w", err)
+			}
+		} else {
+			expiresAt := calculateVoucherExpiry(&pkg)
+			tx.Model(&customer).Updates(map[string]interface{}{
+				"package_id": voucher.PackageID,
+				"status":     "active",
+				"expires_at": expiresAt,
+			})
+			customer.ExpiresAt = expiresAt
+		}
+
+		// Atomically update voucher usage, conditioned on the status we
+		// just read under the row lock still being current.
+		newCount := voucher.UsageCount + 1
+		newStatus := "active"
+		limit := 1
+		if voucher.UsageLimit != nil {
+			limit = *voucher.UsageLimit
+		}
+		if newCount >= limit {
+			newStatus = "depleted"
+		}
+
+		res := tx.Model(&models.Voucher{}).
+			Where("id = ? AND status = ?", voucher.ID, voucher.Status).
+			Updates(map[string]interface{}{
+				"usage_count": newCount,
+				"status":      newStatus,
+				"used_by":     customer.ID,
+				"expires_at":  customer.ExpiresAt,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("voucher was already redeemed")
+		}
+
+		voucher.UsageCount = newCount
+		voucher.Status = newStatus
+		result = map[string]interface{}{
+			"voucher":  voucher,
+			"customer": customer,
+			"package":  pkg,
+		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	redeemedVoucher := result["voucher"].(models.Voucher)
+	redeemedCustomer := result["customer"].(models.Customer)
+	redeemedPkg := result["package"].(models.Package)
 
 	// Send SMS
 	template := s.SMS.GetSetting("sms_template_voucher", "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!")
 	msg := utils.RenderTemplate(template, map[string]string{
-		"name":  customer.Name,
-		"price": fmt.Sprintf("%.0f", pkg.Price),
-		"code":  voucher.Code,
+		"name":  redeemedCustomer.Name,
+		"price": fmt.Sprintf("%.0f", redeemedPkg.Price),
+		"code":  redeemedVoucher.Code,
 	})
 	if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
 		go s.SMS.Send(phone, msg) //nolint:errcheck
 	}
 
-	return map[string]interface{}{
-		"voucher":  voucher,
-		"customer": customer,
-		"package":  pkg,
-	}, nil
+	return result, nil
 }
 
 // uniqueCode generates a unique 8-character uppercase alphanumeric code.
