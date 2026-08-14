@@ -671,6 +671,20 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		return "pending", fmt.Errorf("no checkout request ID found for payment %d", payment.ID)
 	}
 
+	// Give the customer a realistic window to actually see the STK prompt
+	// on their phone and enter their PIN before we ask Safaricom for a
+	// result. Querying within the first few seconds of the push doesn't
+	// reflect a real user decision yet — Safaricom's own STK Query API
+	// responds to a too-early query with ResultCode 2029 ("Failed due to
+	// an unresolved reason type"), which looks exactly like a terminal
+	// failure but isn't one. Without this guard, HotspotStatus's fast
+	// (800ms) polling loop was firing the very first reconciliation query
+	// ~1-3s after every push and permanently failing every real payment
+	// before the customer had a chance to respond.
+	if time.Since(payment.CreatedAt) < 12*time.Second {
+		return "pending", nil
+	}
+
 	// Throttling check: only query Safaricom at most once every 5 seconds per checkout ID
 	now := time.Now()
 	if val, ok := s.queryThrottles.Load(checkoutID); ok {
@@ -721,6 +735,16 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		if _, err := fmt.Sscanf(v, "%f", &parsed); err == nil {
 			rc = parsed
 		}
+	}
+
+	// ResultCode 2029 ("Failed due to an unresolved reason type") is what
+	// Safaricom returns when the query lands before the transaction has
+	// been fully resolved on their side — it is not a genuine terminal
+	// failure. Keep polling rather than declaring the payment failed; the
+	// frontend's own ~12-minute overall timeout is the backstop if a
+	// transaction is genuinely stuck.
+	if rc == 2029 {
+		return "pending", nil
 	}
 
 	if rc == 0 {
