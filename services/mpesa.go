@@ -737,14 +737,26 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		}
 	}
 
-	// ResultCode 2029 ("Failed due to an unresolved reason type") is what
-	// Safaricom returns when the query lands before the transaction has
-	// been fully resolved on their side — it is not a genuine terminal
-	// failure. Keep polling rather than declaring the payment failed; the
-	// frontend's own ~12-minute overall timeout is the backstop if a
-	// transaction is genuinely stuck.
+	// ResultCode 2029 ("Failed due to an unresolved reason type") can mean
+	// two different things depending on timing:
+	//   - Queried too soon after the push: Safaricom hasn't resolved the
+	//     transaction yet. Keep polling.
+	//   - Persists for tens of seconds: in practice this means the STK
+	//     prompt was never actually delivered to the customer's phone at
+	//     all (misconfigured shortcode/passkey, the shortcode isn't
+	//     enabled for Lipa Na M-Pesa Online, etc). Waiting the full
+	//     multi-minute timeout for something that will never resolve just
+	//     leaves the customer stuck watching a spinner — fail fast with an
+	//     honest message instead once we've given it a fair chance.
 	if rc == 2029 {
-		return "pending", nil
+		if time.Since(payment.CreatedAt) < 45*time.Second {
+			return "pending", nil
+		}
+		reason := "We couldn't reach M-Pesa for this payment — the prompt may not have reached your phone. Please check your signal and try again."
+		if err := s.ProcessPaymentFailure(payment, reason); err != nil {
+			return "pending", err
+		}
+		return "failed", nil
 	}
 
 	if rc == 0 {
