@@ -42,12 +42,16 @@ type Organization struct {
 	// override the portal's default copy/colors. Blank fields fall back to
 	// sensible defaults (Name, the platform default color, etc.) at read time
 	// rather than being duplicated here.
-	CaptivePortalTheme        string `gorm:"size:30;default:classic" json:"captive_portal_theme"` // classic | split
-	CaptivePortalCompanyName  string `gorm:"size:255" json:"captive_portal_company_name"`
-	CaptivePortalLogo         string `gorm:"size:255" json:"captive_portal_logo"`
-	CaptivePortalPrimaryColor string `gorm:"size:20" json:"captive_portal_primary_color"`
-	CaptivePortalTagline      string `gorm:"size:255" json:"captive_portal_tagline"`
-	CaptivePortalSupportPhone string `gorm:"size:20" json:"captive_portal_support_phone"`
+	CaptivePortalTheme         string `gorm:"size:30;default:classic" json:"captive_portal_theme"` // classic | split
+	CaptivePortalCompanyName   string `gorm:"size:255" json:"captive_portal_company_name"`
+	CaptivePortalLogo          string `gorm:"size:255" json:"captive_portal_logo"`
+	CaptivePortalPrimaryColor  string `gorm:"size:20" json:"captive_portal_primary_color"`
+	CaptivePortalTagline       string `gorm:"size:255" json:"captive_portal_tagline"`
+	CaptivePortalSupportPhone  string `gorm:"size:20" json:"captive_portal_support_phone"`
+	// CaptivePortalPackageLayout picks how the `customer` app renders its
+	// package/plan list — list | grid | stacked. This is an ISP-wide admin
+	// choice, not something the connecting customer can change themselves.
+	CaptivePortalPackageLayout string `gorm:"size:20;default:list" json:"captive_portal_package_layout"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

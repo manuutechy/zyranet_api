@@ -14,9 +14,22 @@ import (
 // to render — keep in sync with that app's theme registry.
 var availableCaptiveThemes = []string{"classic", "split"}
 
+// availablePackageLayouts are the package-list layouts the `customer` app
+// knows how to render — keep in sync with that app's usePlanLayout.js.
+var availablePackageLayouts = []string{"list", "grid", "stacked"}
+
 func isValidCaptiveTheme(theme string) bool {
 	for _, t := range availableCaptiveThemes {
 		if t == theme {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidPackageLayout(layout string) bool {
+	for _, l := range availablePackageLayouts {
+		if l == layout {
 			return true
 		}
 	}
@@ -52,6 +65,10 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 	if !isValidCaptiveTheme(theme) {
 		theme = "classic"
 	}
+	packageLayout := org.CaptivePortalPackageLayout
+	if !isValidPackageLayout(packageLayout) {
+		packageLayout = "list"
+	}
 
 	logoURL := org.CaptivePortalLogo
 	if logoURL != "" && logoURL[0] != 'h' { // not already an absolute http(s) URL
@@ -59,13 +76,14 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
-		"zone_id":       zone.ID,
-		"theme":         theme,
-		"company_name":  companyName,
-		"logo_url":      logoURL,
-		"primary_color": primaryColor,
-		"tagline":       org.CaptivePortalTagline,
-		"support_phone": org.CaptivePortalSupportPhone,
+		"zone_id":        zone.ID,
+		"theme":          theme,
+		"company_name":   companyName,
+		"logo_url":       logoURL,
+		"primary_color":  primaryColor,
+		"tagline":        org.CaptivePortalTagline,
+		"support_phone":  org.CaptivePortalSupportPhone,
+		"package_layout": packageLayout,
 	}, "")
 }
 
@@ -82,14 +100,16 @@ func CaptivePortalSettingsShow(c *fiber.Ctx) error {
 	config.DB.Where("organization_id = ?", claims.OrganizationID).Order("name ASC").Find(&zones)
 
 	return utils.SuccessResponse(c, fiber.Map{
-		"theme":         org.CaptivePortalTheme,
-		"company_name":  org.CaptivePortalCompanyName,
-		"logo":          org.CaptivePortalLogo,
-		"primary_color": org.CaptivePortalPrimaryColor,
-		"tagline":       org.CaptivePortalTagline,
-		"support_phone": org.CaptivePortalSupportPhone,
-		"zones":         zones,
-		"themes":        availableCaptiveThemes,
+		"theme":           org.CaptivePortalTheme,
+		"company_name":    org.CaptivePortalCompanyName,
+		"logo":            org.CaptivePortalLogo,
+		"primary_color":   org.CaptivePortalPrimaryColor,
+		"tagline":         org.CaptivePortalTagline,
+		"support_phone":   org.CaptivePortalSupportPhone,
+		"package_layout":  org.CaptivePortalPackageLayout,
+		"zones":           zones,
+		"themes":          availableCaptiveThemes,
+		"package_layouts": availablePackageLayouts,
 	}, "")
 }
 
@@ -102,12 +122,13 @@ func CaptivePortalSettingsUpdate(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		Theme        string `json:"theme"`
-		CompanyName  string `json:"company_name"`
-		Logo         string `json:"logo"`
-		PrimaryColor string `json:"primary_color"`
-		Tagline      string `json:"tagline"`
-		SupportPhone string `json:"support_phone"`
+		Theme         string `json:"theme"`
+		CompanyName   string `json:"company_name"`
+		Logo          string `json:"logo"`
+		PrimaryColor  string `json:"primary_color"`
+		Tagline       string `json:"tagline"`
+		SupportPhone  string `json:"support_phone"`
+		PackageLayout string `json:"package_layout"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
@@ -115,14 +136,21 @@ func CaptivePortalSettingsUpdate(c *fiber.Ctx) error {
 	if !isValidCaptiveTheme(body.Theme) {
 		return utils.ErrorResponse(c, fmt.Sprintf("theme must be one of: %v", availableCaptiveThemes), "", fiber.StatusUnprocessableEntity)
 	}
+	if body.PackageLayout == "" {
+		body.PackageLayout = "list"
+	}
+	if !isValidPackageLayout(body.PackageLayout) {
+		return utils.ErrorResponse(c, fmt.Sprintf("package_layout must be one of: %v", availablePackageLayouts), "", fiber.StatusUnprocessableEntity)
+	}
 
 	if err := config.DB.Model(&models.Organization{}).Where("id = ?", claims.OrganizationID).Updates(map[string]interface{}{
-		"captive_portal_theme":         body.Theme,
-		"captive_portal_company_name":  body.CompanyName,
-		"captive_portal_logo":          body.Logo,
-		"captive_portal_primary_color": body.PrimaryColor,
-		"captive_portal_tagline":       body.Tagline,
-		"captive_portal_support_phone": body.SupportPhone,
+		"captive_portal_theme":          body.Theme,
+		"captive_portal_company_name":   body.CompanyName,
+		"captive_portal_logo":           body.Logo,
+		"captive_portal_primary_color":  body.PrimaryColor,
+		"captive_portal_tagline":        body.Tagline,
+		"captive_portal_support_phone":  body.SupportPhone,
+		"captive_portal_package_layout": body.PackageLayout,
 	}).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
