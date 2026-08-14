@@ -35,10 +35,15 @@ func PackageIndex(c *fiber.Ctx) error {
 	return utils.PaginatedResponse(c, pkgs, total, page, perPage)
 }
 
-// PackagePublic returns active packages (no auth needed, for portal).
+// PackagePublic returns active packages (no auth needed, for portal). Does
+// NOT preload Zone — Zone carries router admin credentials
+// (router_username/router_password) and internal network config
+// (router_ip, hotspot_address, lan_ports), which must never reach an
+// unauthenticated endpoint. Callers needing zone context already have
+// zone_id on the package itself.
 func PackagePublic(c *fiber.Ctx) error {
 	var pkgs []models.Package
-	query := config.DB.Where("status = ?", "active").Preload("Zone")
+	query := config.DB.Where("status = ?", "active")
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
