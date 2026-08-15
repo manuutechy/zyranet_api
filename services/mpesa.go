@@ -190,13 +190,22 @@ func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read daraja auth response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("daraja auth returned status %d: %s", resp.StatusCode, string(body))
+	}
+
 	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to decode daraja auth response: %w", err)
 	}
 	token, ok := result["access_token"].(string)
 	if !ok || token == "" {
-		return "", fmt.Errorf("no access_token in response")
+		return "", fmt.Errorf("no access_token in daraja response: %s", string(body))
 	}
 
 	expiresIn := 3500 * time.Second // safe default, just under Daraja's ~1h lifetime
@@ -235,7 +244,12 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 
 	token, err := s.GetAccessToken(creds)
 	if err != nil {
-		return nil, err
+		if strings.ToLower(env) != "production" || config.Config.AppEnv == "local" {
+			log.Printf("[M-Pesa] GetAccessToken failed (%v) — falling back to mock STK Push", err)
+			token = "mock_token"
+		} else {
+			return nil, err
+		}
 	}
 
 	isLocalCallback := callbackURL == "" ||
@@ -244,7 +258,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		strings.Contains(callbackURL, "192.168.") ||
 		!strings.HasPrefix(callbackURL, "https://")
 
-	if strings.ToLower(env) != "production" && (token == "mock_token" || isLocalCallback) {
+	if token == "mock_token" || strings.ToLower(env) == "mock" || (strings.ToLower(env) != "production" && isLocalCallback) {
 		checkoutID := fmt.Sprintf("ws_CO_%d_%d", rand.Intn(999999)+100000, time.Now().Unix())
 		log.Printf("[M-Pesa] Mock STK Push: phone=%s amount=%.0f ref=%s", phone, amount, reference)
 		return &MpesaSTKResponse{
