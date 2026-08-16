@@ -482,9 +482,10 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 // ProcessPaymentSuccess handles database and network/side-effects for a successful STK payment.
 func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNumber, phone string) error {
 	res := config.DB.Model(&models.Payment{}).
-		Where("id = ? AND (status = ? OR (status = ? AND status_reason = ?))", payment.ID, "pending", "failed", "The transaction is still under processing").
+		Where("id = ? AND status != ?", payment.ID, "completed").
 		Updates(map[string]interface{}{
 			"status":               "completed",
+			"status_reason":        nil,
 			"mpesa_receipt_number": receiptNumber,
 		})
 	if res.RowsAffected == 0 {
@@ -759,7 +760,8 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 	if errMsg, ok := result["errorMessage"].(string); ok && (strings.Contains(strings.ToLower(errMsg), "process") || strings.Contains(strings.ToLower(errMsg), "progress")) {
 		return "pending", nil
 	}
-	if rd, ok := result["ResultDesc"].(string); ok && (strings.Contains(strings.ToLower(rd), "process") || strings.Contains(strings.ToLower(rd), "progress") || strings.Contains(strings.ToLower(rd), "pending")) {
+	resultDesc, _ := result["ResultDesc"].(string)
+	if resultDesc != "" && (strings.Contains(strings.ToLower(resultDesc), "process") || strings.Contains(strings.ToLower(resultDesc), "progress") || strings.Contains(strings.ToLower(resultDesc), "pending")) {
 		return "pending", nil
 	}
 
@@ -788,22 +790,14 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		}
 	}
 
-	// ResultCode 2029 ("Failed due to an unresolved reason type") can mean
-	// two different things depending on timing:
-	//   - Queried too soon after the push: Safaricom hasn't resolved the
-	//     transaction yet. Keep polling.
-	//   - Persists for tens of seconds: in practice this means the STK
-	//     prompt was never actually delivered to the customer's phone at
-	//     all (misconfigured shortcode/passkey, the shortcode isn't
-	//     enabled for Lipa Na M-Pesa Online, etc). Waiting the full
-	//     multi-minute timeout for something that will never resolve just
-	//     leaves the customer stuck watching a spinner — fail fast with an
-	//     honest message instead once we've given it a fair chance.
-	if rc == 2029 {
-		if time.Since(payment.CreatedAt) < 45*time.Second {
+	// ResultCode 2029 ("Failed due to an unresolved reason type" / "The transaction is still under processing")
+	// indicates Safaricom has not resolved the transaction yet (customer is still entering PIN or prompt in flight).
+	// We keep status as pending up to 150 seconds (2.5 minutes) to give the customer ample time to complete the prompt.
+	if rc == 2029 || (resultDesc != "" && (strings.Contains(strings.ToLower(resultDesc), "unresolved") || strings.Contains(strings.ToLower(resultDesc), "processing") || strings.Contains(strings.ToLower(resultDesc), "progress"))) {
+		if time.Since(payment.CreatedAt) < 150*time.Second {
 			return "pending", nil
 		}
-		reason := "We couldn't reach M-Pesa for this payment — the prompt may not have reached your phone. Please check your signal and try again."
+		reason := "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
 		if err := s.ProcessPaymentFailure(payment, reason); err != nil {
 			return "pending", err
 		}
@@ -834,7 +828,7 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		return "completed", nil
 	}
 
-	resultDesc, _ := result["ResultDesc"].(string)
+	resultDesc, _ = result["ResultDesc"].(string)
 	reason := friendlySTKFailureReason(rc, resultDesc)
 	err = s.ProcessPaymentFailure(payment, reason)
 	if err != nil {
