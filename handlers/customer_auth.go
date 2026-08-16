@@ -419,15 +419,28 @@ func buildCustomerProfile(c *models.Customer) fiber.Map {
 		"credit_balance": c.CreditBalance,
 		"expires_at":     c.ExpiresAt,
 	}
+
+	isActive := c.Status == "active"
+	if c.ExpiresAt != nil && c.ExpiresAt.Before(time.Now()) {
+		isActive = false
+		if c.Status == "active" {
+			c.Status = "expired"
+			config.DB.Model(c).Update("status", "expired")
+			m["status"] = "expired"
+		}
+	}
+
 	if c.Package != nil {
-		speed := fmt.Sprintf("%.1fMbps / %.1fMbps",
-			float64(c.Package.SpeedDownloadKbps)/1024,
-			float64(c.Package.SpeedUploadKbps)/1024)
-		m["active_subscription"] = fiber.Map{
-			"package_name": c.Package.Name,
-			"expires_at":   c.ExpiresAt,
-			"speed":        speed,
-			"status":       c.Status,
+		if isActive {
+			speed := fmt.Sprintf("%.1fMbps / %.1fMbps",
+				float64(c.Package.SpeedDownloadKbps)/1024,
+				float64(c.Package.SpeedUploadKbps)/1024)
+			m["active_subscription"] = fiber.Map{
+				"package_name": c.Package.Name,
+				"expires_at":   c.ExpiresAt,
+				"speed":        speed,
+				"status":       c.Status,
+			}
 		}
 		m["package"] = fiber.Map{
 			"id":                  c.Package.ID,
