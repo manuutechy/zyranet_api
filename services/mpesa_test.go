@@ -334,3 +334,47 @@ func TestHandleCallback_VoucherFlow_DuplicateDoesNotReuseVoucher(t *testing.T) {
 		t.Errorf("expected exactly 1 completed payment, got %d", completedCount)
 	}
 }
+
+func TestSanitizeAccountReference(t *testing.T) {
+	cases := map[string]string{
+		"Cust-12345":       "Cust12345",
+		"Vouch-9999":       "Vouch9999",
+		"SA-TEST":          "SATEST",
+		"VeryLongAccountName12345": "VeryLongAcco", // 12 chars limit
+		"":                 "ZyraNet",
+		"My Org #1":        "MyOrg1",
+	}
+	for in, want := range cases {
+		if got := sanitizeAccountReference(in); got != want {
+			t.Errorf("sanitizeAccountReference(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSanitizeTransactionDesc(t *testing.T) {
+	cases := map[string]string{
+		"Internet Payment for 10 Mbps Monthly": "InternetPayme", // 13 chars limit
+		"WiFi":          "WiFi",
+		"Test Payment":  "TestPayment",
+		"":              "Internet",
+	}
+	for in, want := range cases {
+		if got := sanitizeTransactionDesc(in); got != want {
+			t.Errorf("sanitizeTransactionDesc(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRegisterC2BURLs_Mock(t *testing.T) {
+	setupTestDB(t)
+	zoneID, _ := seedZone(t)
+	svc := newTestMpesaService()
+
+	resp, err := svc.RegisterC2BURLs(zoneID, "https://example.com/c2b/confirm", "https://example.com/c2b/valid", "Completed")
+	if err != nil {
+		t.Fatalf("RegisterC2BURLs failed: %v", err)
+	}
+	if resp.ResponseCode != "0" {
+		t.Errorf("expected ResponseCode '0', got %q", resp.ResponseCode)
+	}
+}

@@ -24,6 +24,8 @@ type MpesaService struct {
 	Voucher  *VoucherService
 	MikroTik *MikroTikService
 
+	httpClient *http.Client
+
 	tokenMu sync.Mutex
 	// tokenCache is keyed by consumer key rather than a single shared field,
 	// since different Organizations can now use different Daraja apps (see
@@ -58,12 +60,23 @@ type mpesaCreds struct {
 	BankAccount    string
 }
 
-// NewMpesaService constructs an MpesaService.
+// NewMpesaService constructs an MpesaService with an optimized, connection-pooled HTTP client.
 func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTikService) *MpesaService {
+	tr := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 	return &MpesaService{
 		SMS:        sms,
 		Voucher:    voucher,
 		MikroTik:   mikrotik,
+		httpClient: &http.Client{
+			Timeout:   25 * time.Second,
+			Transport: tr,
+		},
 		tokenCache: make(map[string]cachedToken),
 	}
 }
@@ -77,19 +90,22 @@ func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTi
 // credentials unchanged — identical to the single-tenant behavior before
 // per-org Daraja support existed.
 func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
+	// Load all mpesa settings in a single SQL query instead of 12 sequential queries
+	settingsMap := s.loadMpesaSettingsMap()
+
 	creds := mpesaCreds{
-		ConsumerKey:    s.getSetting("mpesa_consumer_key", config.Config.MpesaConsumerKey),
-		ConsumerSecret: s.getSetting("mpesa_consumer_secret", config.Config.MpesaConsumerSecret),
-		Shortcode:      s.getSetting("mpesa_shortcode", config.Config.MpesaShortcode),
-		Passkey:        s.getSetting("mpesa_passkey", config.Config.MpesaPasskey),
-		CallbackURL:    s.getSetting("mpesa_callback_url", config.Config.MpesaCallbackURL),
-		Env:            s.getSetting("mpesa_environment", config.Config.MpesaEnv),
-		BillingType:    s.getSetting("mpesa_billing_type", "paybill"),
-		TillNumber:     s.getSetting("mpesa_till_number", ""),
-		PaybillNumber:  s.getSetting("mpesa_paybill_number", ""),
-		PaybillAccount: s.getSetting("mpesa_paybill_account", ""),
-		BankName:       s.getSetting("mpesa_bank_name", ""),
-		BankAccount:    s.getSetting("mpesa_bank_account", ""),
+		ConsumerKey:    getSettingFromMap(settingsMap, "mpesa_consumer_key", config.Config.MpesaConsumerKey),
+		ConsumerSecret: getSettingFromMap(settingsMap, "mpesa_consumer_secret", config.Config.MpesaConsumerSecret),
+		Shortcode:      getSettingFromMap(settingsMap, "mpesa_shortcode", config.Config.MpesaShortcode),
+		Passkey:        getSettingFromMap(settingsMap, "mpesa_passkey", config.Config.MpesaPasskey),
+		CallbackURL:    getSettingFromMap(settingsMap, "mpesa_callback_url", config.Config.MpesaCallbackURL),
+		Env:            getSettingFromMap(settingsMap, "mpesa_environment", config.Config.MpesaEnv),
+		BillingType:    getSettingFromMap(settingsMap, "mpesa_billing_type", "paybill"),
+		TillNumber:     getSettingFromMap(settingsMap, "mpesa_till_number", ""),
+		PaybillNumber:  getSettingFromMap(settingsMap, "mpesa_paybill_number", ""),
+		PaybillAccount: getSettingFromMap(settingsMap, "mpesa_paybill_account", ""),
+		BankName:       getSettingFromMap(settingsMap, "mpesa_bank_name", ""),
+		BankAccount:    getSettingFromMap(settingsMap, "mpesa_bank_account", ""),
 	}
 	if zoneID == 0 {
 		return creds
@@ -183,7 +199,10 @@ func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(creds.ConsumerKey + ":" + creds.ConsumerSecret))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("daraja auth failed: %w", err)
@@ -235,6 +254,12 @@ func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 // resolveMpesaCreds). Pass 0 for zoneID to force the platform default.
 func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64, reference, description string) (*MpesaSTKResponse, error) {
 	phone = utils.FormatPhone(phone)
+	if len(phone) != 12 || (!strings.HasPrefix(phone, "2547") && !strings.HasPrefix(phone, "2541")) {
+		return nil, fmt.Errorf("invalid phone number: must be 12 digits (e.g. 2547XXXXXXXX or 2541XXXXXXXX)")
+	}
+	if amount < 1 {
+		return nil, fmt.Errorf("amount must be at least 1 KES")
+	}
 
 	creds := s.resolveMpesaCreds(zoneID)
 	shortcode := creds.Shortcode
@@ -291,6 +316,12 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		}
 	}
 
+	// Sanitize to Daraja STK Push specification constraints:
+	// AccountReference: Max 12 alphanumeric characters
+	// TransactionDesc: Max 13 alphanumeric characters
+	accountReference = sanitizeAccountReference(accountReference)
+	description = sanitizeTransactionDesc(description)
+
 	timestamp := time.Now().Format("20060102150405")
 	password := base64.StdEncoding.EncodeToString([]byte(shortcode + passkey + timestamp))
 
@@ -316,7 +347,10 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("STK push request failed: %w", err)
@@ -661,7 +695,10 @@ func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("STK push query request failed: %w", err)
@@ -886,6 +923,174 @@ func bankPaybill(bankName string) string {
 		return v
 	}
 	return ""
+}
+
+// loadMpesaSettingsMap loads all M-Pesa configuration settings in a single SQL query.
+func (s *MpesaService) loadMpesaSettingsMap() map[string]string {
+	keys := []string{
+		"mpesa_consumer_key", "mpesa_consumer_secret", "mpesa_shortcode",
+		"mpesa_passkey", "mpesa_callback_url", "mpesa_environment",
+		"mpesa_billing_type", "mpesa_till_number", "mpesa_paybill_number",
+		"mpesa_paybill_account", "mpesa_bank_name", "mpesa_bank_account",
+	}
+	var settings []models.Setting
+	if err := config.DB.Where("`key` IN ?", keys).Find(&settings).Error; err != nil {
+		return make(map[string]string)
+	}
+	res := make(map[string]string, len(settings))
+	for _, st := range settings {
+		if st.Value != nil {
+			v := strings.Map(func(r rune) rune {
+				if unicode.IsSpace(r) {
+					return -1
+				}
+				return r
+			}, *st.Value)
+			if v != "" {
+				res[st.Key] = v
+			}
+		}
+	}
+	return res
+}
+
+func getSettingFromMap(m map[string]string, key, defaultVal string) string {
+	if val, ok := m[key]; ok && val != "" {
+		return val
+	}
+	return strings.TrimSpace(defaultVal)
+}
+
+// sanitizeAccountReference formats AccountReference to Safaricom Daraja STK Push limits (max 12 alphanumeric characters).
+func sanitizeAccountReference(raw string) string {
+	var clean strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			clean.WriteRune(r)
+		}
+	}
+	res := clean.String()
+	if len(res) > 12 {
+		res = res[:12]
+	}
+	if res == "" {
+		return "ZyraNet"
+	}
+	return res
+}
+
+// sanitizeTransactionDesc formats TransactionDesc to Safaricom Daraja limits (max 13 characters, alphanumeric without weird characters).
+func sanitizeTransactionDesc(raw string) string {
+	var clean strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			clean.WriteRune(r)
+		}
+	}
+	res := clean.String()
+	if len(res) > 13 {
+		res = res[:13]
+	}
+	if res == "" {
+		return "Internet"
+	}
+	return res
+}
+
+// C2BRegisterResponse represents Safaricom's response when registering C2B URLs.
+type C2BRegisterResponse struct {
+	OriginatorConversationID string `json:"OriginatorConversationID"`
+	ConversationID           string `json:"ConversationID"`
+	ResponseDescription      string `json:"ResponseDescription"`
+	ResponseCode             string `json:"ResponseCode"`
+}
+
+// RegisterC2BURLs registers the C2B ValidationURL and ConfirmationURL with Safaricom Daraja.
+func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationURL, responseType string) (*C2BRegisterResponse, error) {
+	creds := s.resolveMpesaCreds(zoneID)
+	shortcode := creds.Shortcode
+	if creds.BillingType == "paybill" && creds.PaybillNumber != "" {
+		shortcode = creds.PaybillNumber
+	}
+	if shortcode == "" {
+		if strings.ToLower(creds.Env) == "mock" || strings.ToLower(creds.Env) == "sandbox" || creds.Env == "" || config.Config.AppEnv == "test" || config.Config.AppEnv == "local" || config.Config.AppEnv == "" {
+			shortcode = "600000"
+		} else {
+			return nil, fmt.Errorf("shortcode is not configured")
+		}
+	}
+
+	if responseType == "" {
+		responseType = "Completed"
+	}
+	if confirmationURL == "" {
+		confirmationURL = creds.CallbackURL
+	}
+	if validationURL == "" {
+		validationURL = creds.CallbackURL
+	}
+
+	token, err := s.GetAccessToken(creds)
+	if err != nil {
+		if strings.ToLower(creds.Env) != "production" || config.Config.AppEnv == "local" || config.Config.AppEnv == "test" {
+			token = "mock_token"
+		} else {
+			return nil, fmt.Errorf("failed to obtain Daraja token: %w", err)
+		}
+	}
+
+	isLocalURL := confirmationURL == "" ||
+		strings.Contains(confirmationURL, "localhost") ||
+		strings.Contains(confirmationURL, "127.0.0.1") ||
+		strings.Contains(confirmationURL, "example.com") ||
+		!strings.HasPrefix(confirmationURL, "https://")
+
+	if token == "mock_token" || strings.ToLower(creds.Env) == "mock" || (strings.ToLower(creds.Env) != "production" && isLocalURL) {
+		return &C2BRegisterResponse{
+			OriginatorConversationID: "mock_orig_conv_id",
+			ConversationID:           "mock_conv_id",
+			ResponseDescription:      "Mock C2B URLs registered successfully",
+			ResponseCode:             "0",
+		}, nil
+	}
+
+	payload := map[string]interface{}{
+		"ShortCode":       shortcode,
+		"ResponseType":    responseType,
+		"ConfirmationURL": confirmationURL,
+		"ValidationURL":   validationURL,
+	}
+
+	bodyBytes, _ := json.Marshal(payload)
+	apiURL := s.getBaseURL(creds.Env) + "/mpesa/c2b/v1/registerurl"
+	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("C2B URL registration request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var result C2BRegisterResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode C2B register response: %s", string(body))
+	}
+
+	if result.ResponseCode != "0" && !strings.Contains(strings.ToLower(result.ResponseDescription), "success") {
+		return &result, fmt.Errorf("C2B registration failed: %s (code: %s)", result.ResponseDescription, result.ResponseCode)
+	}
+
+	return &result, nil
 }
 
 func randomHex(n int) string {

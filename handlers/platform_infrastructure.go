@@ -77,6 +77,23 @@ func PlatformDarajaUpdate(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, filterSettings(loadAllSettings(), daraKeys), "Shared Daraja settings updated successfully.")
 }
 
+// PlatformDarajaRegisterC2B registers C2B Validation and Confirmation URLs with Safaricom Daraja for shared platform config.
+func PlatformDarajaRegisterC2B(c *fiber.Ctx) error {
+	var body struct {
+		ResponseType    string `json:"response_type"`
+		ConfirmationURL string `json:"confirmation_url"`
+		ValidationURL   string `json:"validation_url"`
+	}
+	_ = c.BodyParser(&body)
+
+	res, err := mpesaSvcGlobal.RegisterC2BURLs(0, body.ConfirmationURL, body.ValidationURL, body.ResponseType)
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "C2B URL registration failed.", fiber.StatusInternalServerError)
+	}
+
+	return utils.SuccessResponse(c, res, "Shared C2B URLs registered successfully with Safaricom Daraja.")
+}
+
 // PlatformSmsShow returns Zyra Net's Hostpinnacle SMS gateway credentials.
 func PlatformSmsShow(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, filterSettings(loadAllSettings(), smsKeys), "")

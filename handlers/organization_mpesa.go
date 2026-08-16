@@ -145,3 +145,30 @@ func OrganizationMpesaUpdate(c *fiber.Ctx) error {
 
 	return utils.SuccessResponse(c, fiber.Map{"mode": cfg.Mode}, "M-Pesa settings updated successfully.")
 }
+
+// OrganizationMpesaRegisterC2B registers C2B Validation and Confirmation URLs with Safaricom Daraja.
+func OrganizationMpesaRegisterC2B(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	if claims.Role != "super_admin" {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
+	}
+
+	var body struct {
+		ResponseType    string `json:"response_type"`
+		ConfirmationURL string `json:"confirmation_url"`
+		ValidationURL   string `json:"validation_url"`
+	}
+	_ = c.BodyParser(&body)
+
+	var zone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone).Error; err != nil {
+		return utils.ErrorResponse(c, "No zone configured for your organization yet.", "", fiber.StatusUnprocessableEntity)
+	}
+
+	res, err := mpesaSvcGlobal.RegisterC2BURLs(zone.ID, body.ConfirmationURL, body.ValidationURL, body.ResponseType)
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "C2B URL registration failed.", fiber.StatusInternalServerError)
+	}
+
+	return utils.SuccessResponse(c, res, "C2B URLs registered successfully with Safaricom Daraja.")
+}

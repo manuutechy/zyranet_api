@@ -113,11 +113,14 @@ func MpesaStkPush(c *fiber.Ctx) error {
 
 	var ref string
 	if body.CustomerID != nil {
-		ref = fmt.Sprintf("Cust-%d", *body.CustomerID)
+		ref = fmt.Sprintf("Cust%d", *body.CustomerID)
 	} else if voucherID != nil {
-		ref = fmt.Sprintf("Vouch-%d", *voucherID)
+		ref = fmt.Sprintf("Vouch%d", *voucherID)
 	}
-	description := "Internet Payment for " + pkg.Name
+	description := "WiFi"
+	if pkg.Name != "" {
+		description = pkg.Name
+	}
 
 	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(pkg.ZoneID, body.Phone, pkg.Price, ref, description)
 	if err != nil {
