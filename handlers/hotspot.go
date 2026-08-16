@@ -53,7 +53,7 @@ func HotspotPay(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "phone and plan_id are required.", "", fiber.StatusUnprocessableEntity)
 	}
 
-	phone := normalizePhone(body.Phone)
+	phone := utils.FormatPhone(body.Phone)
 
 	zonePtr, err := resolveHotspotZone(c, body.ZoneID)
 	if err != nil {
@@ -127,8 +127,11 @@ func HotspotPay(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create payment record.", fiber.StatusInternalServerError)
 	}
 
-	ref := fmt.Sprintf("Vouch-%d", voucher.ID)
-	description := "Internet Payment for " + pkg.Name
+	ref := fmt.Sprintf("Vouch%d", voucher.ID)
+	description := "WiFi"
+	if pkg.Name != "" {
+		description = pkg.Name
+	}
 
 	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(zone.ID, phone, pkg.Price, ref, description)
 	if err != nil {
