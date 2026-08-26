@@ -444,6 +444,35 @@ func CustomerProfile(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, profile, "")
 }
 
+// CustomerProfileUpdate allows a customer to update their display name.
+func CustomerProfileUpdate(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	if claims == nil {
+		return utils.ErrorResponse(c, "Unauthenticated.", "", fiber.StatusUnauthorized)
+	}
+
+	var body struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return utils.ErrorResponse(c, "Invalid request.", "", fiber.StatusBadRequest)
+	}
+
+	var customer models.Customer
+	if err := config.DB.First(&customer, claims.CustomerID).Error; err != nil {
+		return utils.ErrorResponse(c, "Customer profile not found.", "", fiber.StatusNotFound)
+	}
+
+	trimmedName := strings.TrimSpace(body.Name)
+	if trimmedName != "" {
+		customer.Name = trimmedName
+		config.DB.Model(&customer).Update("name", trimmedName)
+	}
+
+	return utils.SuccessResponse(c, buildCustomerProfile(&customer), "Profile updated successfully.")
+}
+
 // CustomerReconnect whitelists the customer's MAC address on the zone's router.
 func CustomerReconnect(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)

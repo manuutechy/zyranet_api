@@ -84,6 +84,7 @@ func Register(app *fiber.App) {
 	// ---- CUSTOMER JWT ROUTES ----
 	customerAuth := middleware.CustomerAuth()
 	v1.Get("/customer/profile", customerAuth, handlers.CustomerProfile)
+	v1.Put("/customer/profile", customerAuth, handlers.CustomerProfileUpdate)
 	v1.Get("/customer/payments", customerAuth, handlers.CustomerAuthPayments)
 	v1.Post("/customer/vouchers/redeem", customerAuth, handlers.VoucherRedeemAuthenticated)
 	v1.Post("/customer/reconnect", customerAuth, handlers.CustomerReconnect)

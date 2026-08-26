@@ -665,7 +665,26 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			custUpdates["phone"] = phone
 		}
 		if strings.HasPrefix(customer.Name, "Guest") || strings.HasPrefix(customer.Name, "Customer_") || customer.Name == "" {
-			if phone != "" {
+			var pastC2B models.UnmatchedC2BPayment
+			cleanPhone := utils.FormatPhone(phone)
+			phoneSuffix := cleanPhone
+			if len(phoneSuffix) >= 9 {
+				phoneSuffix = phoneSuffix[len(phoneSuffix)-9:]
+			}
+			if err := config.DB.Where("(phone LIKE ? OR bill_ref_number LIKE ?) AND first_name != ''", "%"+phoneSuffix, "%"+phoneSuffix).Order("id DESC").First(&pastC2B).Error; err == nil {
+				nameParts := []string{}
+				if pastC2B.FirstName != "" {
+					nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(pastC2B.FirstName))))
+				}
+				if pastC2B.LastName != "" {
+					nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(pastC2B.LastName))))
+				}
+				fullName := strings.Join(nameParts, " ")
+				if fullName != "" {
+					customer.Name = fullName
+					custUpdates["name"] = fullName
+				}
+			} else if phone != "" {
 				formatted := utils.FormatPhone(phone)
 				if len(formatted) == 12 && strings.HasPrefix(formatted, "254") {
 					customer.Name = "0" + formatted[3:]
