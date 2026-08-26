@@ -25,26 +25,27 @@ func NewSmsService() *SmsService { return &SmsService{} }
 // outgoing SMS, from either the platform-wide defaults or a tenant's own
 // configured Hostpinnacle account.
 type smsCreds struct {
-	BaseURL  string
-	APIKey   string
-	Username string
-	SenderID string
+	Provider      string
+	BaseURL       string
+	APIKey        string
+	Username      string
+	SenderID      string
+	BrevoAPIKey   string
+	BrevoSenderID string
 }
 
-// resolveSmsCreds returns the Hostpinnacle credentials to use for a send
+// resolveSmsCreds returns the SMS credentials to use for a send
 // tied to organizationID, mirroring resolveMpesaCreds in services/mpesa.go.
-// If that Organization has configured its own Hostpinnacle account
-// (OrganizationSmsConfig.Mode == "own"), those credentials are used; any
-// field left blank on the org's config still falls back to the
-// platform-wide default for that one field. An organizationID of 0 (e.g.
-// platform-staff test sends), or an org with no config row (the default),
-// uses the platform-wide credentials unchanged.
 func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
+	provider := strings.ToLower(s.GetSetting("sms_provider", "brevo"))
 	creds := smsCreds{
-		BaseURL:  s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL),
-		APIKey:   s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey),
-		Username: s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername),
-		SenderID: s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID),
+		Provider:      provider,
+		BaseURL:       s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL),
+		APIKey:        s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey),
+		Username:      s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername),
+		SenderID:      s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID),
+		BrevoAPIKey:   s.GetSetting("brevo_api_key", ""),
+		BrevoSenderID: s.GetSetting("brevo_sender_id", "ZyraNet"),
 	}
 	if organizationID == 0 {
 		return creds
@@ -87,11 +88,7 @@ func (s *SmsService) SendForZone(zoneID uint, phone, message string) (*models.Sm
 	return s.Send(organizationID, phone, message)
 }
 
-// Send sends an SMS via HostPinnacle (using organizationID to resolve
-// whether that Organization has its own Hostpinnacle account configured or
-// should use the platform-wide default — see resolveSmsCreds) and saves a
-// log record. Pass 0 for organizationID to force the platform default
-// (e.g. platform-staff test sends).
+// Send sends an SMS via Brevo or HostPinnacle and saves a log record.
 func (s *SmsService) Send(organizationID uint, phone, message string) (*models.SmsLog, error) {
 	phone = utils.FormatPhone(phone) // E.g. 254712345678
 
@@ -99,91 +96,129 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 	providerResponse := ""
 
 	creds := s.resolveSmsCreds(organizationID)
-	apiURL := creds.BaseURL
-	apiKey := creds.APIKey
-	userID := creds.Username
-	sender := creds.SenderID
 
-	// Mock mode if required credentials are missing
-	if apiKey == "" || userID == "" {
-		status = "sent"
-		mock := map[string]string{"status": "mock_success", "reason": "No credentials configured for Hostpinnacle"}
-		b, _ := json.Marshal(mock)
-		providerResponse = string(b)
-		log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
-	} else {
-		// Per HostPinnacle API documentation:
-		//   - Method: POST
-		//   - Format: multipart/form-data
-		//   - Headers: "apikey" contains the API Key
-		//   - Success Response: JSON {"status":"success", ...} under HTTP 200
-		//   - Error Response: JSON {"status":"error", "reason": "...", ...}
-		
-		var body bytes.Buffer
-		writer := multipart.NewWriter(&body)
-		_ = writer.WriteField("userid", userID)
-		_ = writer.WriteField("mobile", phone)
-		_ = writer.WriteField("msg", message)
-		_ = writer.WriteField("senderid", sender)
-		_ = writer.WriteField("sendMethod", "quick")
-		_ = writer.WriteField("msgType", "text")
-		_ = writer.WriteField("output", "json")
-		_ = writer.WriteField("duplicatecheck", "true")
-		_ = writer.Close()
+	if creds.Provider == "brevo" || (creds.BrevoAPIKey != "" && creds.APIKey == "") {
+		if creds.BrevoAPIKey == "" {
+			status = "sent"
+			mock := map[string]string{"status": "mock_success", "reason": "No Brevo API key configured"}
+			b, _ := json.Marshal(mock)
+			providerResponse = string(b)
+			log.Printf("[SMS] Brevo Mock: to=%s msg=%s", phone, message)
+		} else {
+			recipient := phone
+			if !strings.HasPrefix(recipient, "+") {
+				recipient = "+" + recipient
+			}
+			sender := creds.BrevoSenderID
+			if sender == "" {
+				sender = "ZyraNet"
+			}
+			if len(sender) > 11 {
+				sender = sender[:11]
+			}
 
-		req, err := http.NewRequest(http.MethodPost, apiURL, &body)
-		if err == nil {
-			req.Header.Set("Content-Type", writer.FormDataContentType())
-			req.Header.Set("Accept", "application/json")
-			req.Header.Set("apikey", apiKey) // API key goes in the header
-			req.Close = true
-
-			client := &http.Client{}
-			resp, err := client.Do(req)
+			payload := map[string]interface{}{
+				"sender":    sender,
+				"recipient": recipient,
+				"content":   message,
+				"type":      "transactional",
+			}
+			payloadBytes, _ := json.Marshal(payload)
+			req, err := http.NewRequest(http.MethodPost, "https://api.brevo.com/v3/transactionalSMS/sms", bytes.NewBuffer(payloadBytes))
 			if err == nil {
-				defer resp.Body.Close()
-				respBytes, _ := io.ReadAll(resp.Body)
-				providerResponse = string(respBytes)
+				req.Header.Set("api-key", creds.BrevoAPIKey)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json")
 
-				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
-					// Parse response to check for status=success
-					var hpResp struct {
-						Status     string `json:"status"`
-						Reason     string `json:"reason"`
-						StatusCode string `json:"statusCode"`
-					}
-					// Handle JSON response
-					if len(respBytes) > 0 {
-						var parsed map[string]interface{}
-						if errUnmarshal := json.Unmarshal(respBytes, &parsed); errUnmarshal == nil {
-							if statusVal, ok := parsed["status"].(string); ok {
-								hpResp.Status = statusVal
-							}
-							if reasonVal, ok := parsed["reason"].(string); ok {
-								hpResp.Reason = reasonVal
-							}
-							if codeVal, ok := parsed["statusCode"].(string); ok {
-								hpResp.StatusCode = codeVal
-							}
-						}
-					}
-					
-					// HostPinnacle returns "success" status for successful SMS delivery
-					if hpResp.Status == "success" || resp.StatusCode == http.StatusNoContent {
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err == nil {
+					defer resp.Body.Close()
+					respBytes, _ := io.ReadAll(resp.Body)
+					providerResponse = string(respBytes)
+					if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
 						status = "sent"
 					} else {
-						log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
+						log.Printf("[SMS] Brevo HTTP error status=%d: %s", resp.StatusCode, providerResponse)
 					}
 				} else {
-					log.Printf("[SMS] Hostpinnacle HTTP error status=%d: %s", resp.StatusCode, providerResponse)
+					providerResponse = err.Error()
+					log.Printf("[SMS] Brevo request error: %v", err)
 				}
 			} else {
 				providerResponse = err.Error()
-				log.Printf("[SMS] Hostpinnacle HTTP error: %v", err)
 			}
+		}
+	} else {
+		apiURL := creds.BaseURL
+		apiKey := creds.APIKey
+		userID := creds.Username
+		sender := creds.SenderID
+
+		// Mock mode if required credentials are missing
+		if apiKey == "" || userID == "" {
+			status = "sent"
+			mock := map[string]string{"status": "mock_success", "reason": "No credentials configured for Hostpinnacle"}
+			b, _ := json.Marshal(mock)
+			providerResponse = string(b)
+			log.Printf("[SMS] Hostpinnacle Mock: to=%s msg=%s", phone, message)
 		} else {
-			providerResponse = err.Error()
-			log.Printf("[SMS] Request creation error: %v", err)
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			_ = writer.WriteField("userid", userID)
+			_ = writer.WriteField("mobile", phone)
+			_ = writer.WriteField("msg", message)
+			_ = writer.WriteField("senderid", sender)
+			_ = writer.WriteField("sendMethod", "quick")
+			_ = writer.WriteField("msgType", "text")
+			_ = writer.WriteField("output", "json")
+			_ = writer.WriteField("duplicatecheck", "true")
+			_ = writer.Close()
+
+			req, err := http.NewRequest(http.MethodPost, apiURL, &body)
+			if err == nil {
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+				req.Header.Set("Accept", "application/json")
+				req.Header.Set("apikey", apiKey)
+				req.Close = true
+
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err == nil {
+					defer resp.Body.Close()
+					respBytes, _ := io.ReadAll(resp.Body)
+					providerResponse = string(respBytes)
+
+					if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+						var hpResp struct {
+							Status     string `json:"status"`
+							Reason     string `json:"reason"`
+							StatusCode string `json:"statusCode"`
+						}
+						if len(respBytes) > 0 {
+							var parsed map[string]interface{}
+							if errUnmarshal := json.Unmarshal(respBytes, &parsed); errUnmarshal == nil {
+								if statusVal, ok := parsed["status"].(string); ok {
+									hpResp.Status = statusVal
+								}
+							}
+						}
+						if hpResp.Status == "success" || resp.StatusCode == http.StatusNoContent {
+							status = "sent"
+						} else {
+							log.Printf("[SMS] Hostpinnacle error status=%d: %s", resp.StatusCode, providerResponse)
+						}
+					} else {
+						log.Printf("[SMS] Hostpinnacle HTTP error status=%d: %s", resp.StatusCode, providerResponse)
+					}
+				} else {
+					providerResponse = err.Error()
+					log.Printf("[SMS] Hostpinnacle HTTP error: %v", err)
+				}
+			} else {
+				providerResponse = err.Error()
+				log.Printf("[SMS] Request creation error: %v", err)
+			}
 		}
 	}
 

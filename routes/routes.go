@@ -224,6 +224,7 @@ func Register(app *fiber.App) {
 	platform.Get("/organizations", platformAuth, handlers.OrganizationIndex)
 	platform.Post("/organizations", platformAuth, handlers.OrganizationStore)
 	platform.Get("/organizations/:id", platformAuth, handlers.OrganizationShow)
+	platform.Put("/organizations/:id", platformAuth, handlers.OrganizationUpdate)
 	platform.Patch("/organizations/:id", platformAuth, handlers.OrganizationUpdate)
 	platform.Get("/organizations/:id/users", platformAuth, handlers.OrganizationUsers)
 	platform.Post("/organizations/:id/users/:userId/reset-password", platformAuth, handlers.OrganizationResetUserPassword)
