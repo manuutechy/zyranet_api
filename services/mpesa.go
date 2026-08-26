@@ -299,18 +299,23 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	if partyB == "" {
 		partyB = shortcode
 	}
-	accountReference := creds.PaybillAccount
-	if accountReference == "" {
-		accountReference = reference
+	// For Paybill STK prompt, display customer phone (e.g. 0758335592) as AccountReference
+	accountReference := reference
+	if phone != "" {
+		cleanPhone := utils.FormatPhone(phone)
+		if len(cleanPhone) == 12 && strings.HasPrefix(cleanPhone, "254") {
+			accountReference = "0" + cleanPhone[3:]
+		} else {
+			accountReference = cleanPhone
+		}
+	}
+	if creds.PaybillAccount != "" && creds.PaybillAccount != "ZYR_" {
+		accountReference = creds.PaybillAccount
 	}
 
-	if creds.BillingType == "till" {
+	if creds.BillingType == "till" && creds.TillNumber != "" && creds.TillNumber != shortcode {
 		transactionType = "CustomerBuyGoodsOnline"
 		partyB = creds.TillNumber
-		if partyB == "" {
-			partyB = shortcode
-		}
-		accountReference = reference
 	} else if creds.BillingType == "bank" {
 		partyB = bankPaybill(creds.BankName)
 		accountReference = creds.BankAccount
