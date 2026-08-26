@@ -684,14 +684,6 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 					customer.Name = fullName
 					custUpdates["name"] = fullName
 				}
-			} else if phone != "" {
-				formatted := utils.FormatPhone(phone)
-				if len(formatted) == 12 && strings.HasPrefix(formatted, "254") {
-					customer.Name = "0" + formatted[3:]
-				} else {
-					customer.Name = phone
-				}
-				custUpdates["name"] = customer.Name
 			}
 		}
 
