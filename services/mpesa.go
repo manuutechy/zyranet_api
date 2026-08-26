@@ -652,13 +652,31 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	// 3. Update customer subscription status & expiry
 	if customer != nil {
 		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
-		config.DB.Model(customer).Updates(map[string]interface{}{
+		custUpdates := map[string]interface{}{
 			"status":      "active",
 			"package_id":  pkg.ID,
 			"zone_id":     pkg.ZoneID,
 			"mac_address": payment.MacAddress,
 			"expires_at":  expiresAt,
-		})
+		}
+
+		if phone != "" && (customer.Phone == "" || strings.HasPrefix(customer.Phone, "GUEST")) {
+			customer.Phone = phone
+			custUpdates["phone"] = phone
+		}
+		if strings.HasPrefix(customer.Name, "Guest") || strings.HasPrefix(customer.Name, "Customer_") || customer.Name == "" {
+			if phone != "" {
+				formatted := utils.FormatPhone(phone)
+				if len(formatted) == 12 && strings.HasPrefix(formatted, "254") {
+					customer.Name = "0" + formatted[3:]
+				} else {
+					customer.Name = phone
+				}
+				custUpdates["name"] = customer.Name
+			}
+		}
+
+		config.DB.Model(customer).Updates(custUpdates)
 
 		templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
 		msg := utils.RenderTemplate(templateActive, map[string]string{

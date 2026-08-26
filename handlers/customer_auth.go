@@ -511,9 +511,23 @@ func CustomerAuthPayments(c *fiber.Ctx) error {
 }
 
 func buildCustomerProfile(c *models.Customer) fiber.Map {
+	displayName := c.Name
+	if strings.HasPrefix(displayName, "Guest_") || strings.HasPrefix(displayName, "Customer_") || strings.HasPrefix(displayName, "Guest ") {
+		if c.Phone != "" && !strings.HasPrefix(c.Phone, "GUEST") {
+			formatted := utils.FormatPhone(c.Phone)
+			if len(formatted) == 12 && strings.HasPrefix(formatted, "254") {
+				displayName = "0" + formatted[3:]
+			} else {
+				displayName = c.Phone
+			}
+		} else {
+			displayName = "Guest User"
+		}
+	}
+
 	m := fiber.Map{
 		"id":             c.ID,
-		"name":           c.Name,
+		"name":           displayName,
 		"phone":          c.Phone,
 		"type":           c.Type,
 		"status":         c.Status,
