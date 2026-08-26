@@ -27,6 +27,7 @@ func InitMpesaService(mpesa *services.MpesaService, sms *services.SmsService) {
 func MpesaStkPush(c *fiber.Ctx) error {
 	var body struct {
 		Phone      string `json:"phone"`
+		Name       string `json:"name"`
 		PackageID  uint   `json:"package_id"`
 		CustomerID *uint  `json:"customer_id"`
 		VoucherID  *uint  `json:"voucher_id"`
@@ -61,21 +62,6 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		cid := cc.CustomerID
 		body.CustomerID = &cid
 	} else if body.CustomerID != nil {
-		// No session — the "existing subscriber renews without a JWT"
-		// case. We used to require the supplied phone to match the
-		// account's registered phone here, but that check can never pass
-		// for guest accounts (CustomerAuthGuest gives them a synthetic
-		// placeholder Phone like "GUEST10001", not a real number — so no
-		// guest could ever top up via STK push) and in practice customers
-		// often pay from a phone that isn't the one on their account (a
-		// family member's or shared phone). We now accept the supplied
-		// customer_id as-is, without a phone-match check. Worst case an
-		// attacker who guesses/enumerates a customer_id "gifts" that
-		// account a package renewal by paying for it themselves — no fund
-		// theft, no PII exposure — a materially smaller risk than the
-		// callback-forgery/IDOR issues guarded against elsewhere (see
-		// mpesaCallbackAuthorized). We still confirm the ID refers to a
-		// real customer.
 		var owner models.Customer
 		if err := config.DB.First(&owner, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
@@ -90,6 +76,11 @@ func MpesaStkPush(c *fiber.Ctx) error {
 				body.CustomerID = &dev.CustomerID
 			}
 		}
+	}
+
+	if body.CustomerID != nil && strings.TrimSpace(body.Name) != "" {
+		trimmedName := strings.TrimSpace(body.Name)
+		config.DB.Model(&models.Customer{}).Where("id = ?", *body.CustomerID).Update("name", trimmedName)
 	}
 
 	var voucherID *uint = body.VoucherID
