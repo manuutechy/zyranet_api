@@ -81,6 +81,11 @@ func Register(app *fiber.App) {
 	v1.Get("/hotspot/session", handlers.HotspotSession)
 	v1.Post("/hotspot/logout", handlers.HotspotLogout)
 
+	// Public MikroTik Router Endpoints (for /tool fetch 1-line auto-provision & heartbeat)
+	v1.Get("/public/zones/setup/:id", handlers.PublicZoneSetupScript)
+	v1.Get("/public/zones/login-page/:id", handlers.PublicZoneLoginPage)
+	v1.Get("/public/zones/heartbeat/:id", handlers.PublicZoneHeartbeat)
+
 	// ---- CUSTOMER JWT ROUTES ----
 	customerAuth := middleware.CustomerAuth()
 	v1.Get("/customer/profile", customerAuth, handlers.CustomerProfile)

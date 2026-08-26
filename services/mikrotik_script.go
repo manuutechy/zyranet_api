@@ -84,20 +84,34 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString("/ip dhcp-server add name=hs-dhcp-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet disabled=no lease-time=1h\n")
 	sb.WriteString(fmt.Sprintf("/ip dhcp-server network add address=%s gateway=%s dns-server=8.8.8.8,8.8.4.4 comment=\"Zyra Net Hotspot Network\"\n\n", networkCIDR, gatewayIP))
 
-	sb.WriteString("# --- Hotspot Server Setup ---\n")
-	sb.WriteString(fmt.Sprintf("/ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie split-user-domain=no dns-name=login.zyranet.lan\n", gatewayIP))
-	sb.WriteString("/ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=5m keepalive-timeout=2m disabled=no\n\n")
+	sb.WriteString("# --- Hotspot Server Setup (Overload-Protected) ---\n")
+	sb.WriteString(fmt.Sprintf("/ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan\n", gatewayIP))
+	sb.WriteString("/ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no\n\n")
 
-	// Allow the cloud captive portal through the walled garden so a client
-	// can reach it before authenticating. The router's own login.html (see
-	// the "Download Login Page" button in the admin panel — it must be
-	// uploaded separately via WinBox's Files pane, since RouterOS hotspot
-	// login pages aren't provisionable via .rsc script) redirects there.
-	sb.WriteString("# --- Walled Garden: allow the cloud captive portal ---\n")
-	sb.WriteString("/ip hotspot walled-garden add dst-host=captive.zyranet.co.ke action=allow comment=\"Zyra Net Captive Portal\"\n\n")
+	// Allow the cloud captive portal & API through the walled garden so a client
+	// can reach it before authenticating.
+	sb.WriteString("# --- Walled Garden: allow cloud captive portal and API ---\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=captive.zyranet.co.ke action=allow comment=\"Zyra Net Captive Portal\"\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=api.zyranet.co.ke action=allow comment=\"Zyra Net API Gateway\"\n\n")
 
-	// Hotspot Profiles
-	sb.WriteString("# --- Hotspot User Profiles ---\n")
+	// Auto-fetch login.html directly to the router's /hotspot directory so manual file upload is not needed
+	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html ---\n")
+	sb.WriteString(fmt.Sprintf("/tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https\n\n", zone.ID))
+
+	// Scheduled heartbeat to report router online health every 1 minute
+	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
+	sb.WriteString(fmt.Sprintf("/system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d\\\" mode=https keep-result=no\" comment=\"Zyra Net Cloud Telemetry\"\n", zone.ID))
+	sb.WriteString("/system scheduler add name=zyranet-heartbeat-sched interval=1m on-event=zyranet-heartbeat comment=\"Zyra Net Cloud Telemetry Scheduler\"\n\n")
+
+	// Automated Ghost Device Garbage Collector & Memory Protection
+	sb.WriteString("# --- Automated Garbage Collection & Memory Overload Protection ---\n")
+	sb.WriteString("/system script add name=zyranet-gc source=\"/ip hotspot host remove [find unauthorized=yes idle-time>5m]; /ip hotspot cookie remove [find expires-in<0s]\" comment=\"Zyra Net Ghost Device GC\"\n")
+	sb.WriteString("/system scheduler add name=zyranet-gc-sched interval=5m on-event=zyranet-gc comment=\"Zyra Net GC Scheduler\"\n\n")
+	sb.WriteString("/system script add name=zyranet-memprotect source=\":if ([/system resource get cpu-load] > 85) do={ /ip dns cache flush; /ip hotspot host remove [find unauthorized=yes] }\" comment=\"Zyra Net CPU & Memory Overload Guard\"\n")
+	sb.WriteString("/system scheduler add name=zyranet-memprotect-sched interval=2m on-event=zyranet-memprotect comment=\"Zyra Net Overload Scheduler\"\n\n")
+
+	// Hotspot Profiles (Strict shared-users=1 to prevent tethering/reselling)
+	sb.WriteString("# --- Hotspot User Profiles (Anti-Tethering & Speed Queues) ---\n")
 	for _, pkg := range packages {
 		if pkg.Type != "hotspot" {
 			continue
@@ -109,7 +123,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 			timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
 		}
 		sb.WriteString(fmt.Sprintf(
-			"/ip hotspot user profile\nadd name=%s rate-limit=%s session-timeout=%s idle-timeout=5m keepalive-timeout=2m\n\n",
+			"/ip hotspot user profile\nadd name=%s rate-limit=%s session-timeout=%s idle-timeout=3m keepalive-timeout=1m shared-users=1\n\n",
 			profileName, rateLimit, timeout,
 		))
 	}

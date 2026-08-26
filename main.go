@@ -198,6 +198,11 @@ func main() {
 		})
 	})
 
+	// Start Automated Network & Session Overload Watchdog
+	watchdog := services.NewWatchdogService(services.NewMikroTikService())
+	watchdog.Start()
+	defer watchdog.Stop()
+
 	// Start server
 	port := ":" + config.Config.AppPort
 	log.Printf("[zyranet-api] Starting on %s", port)
