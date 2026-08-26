@@ -835,14 +835,7 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 
 	log.Printf("[M-Pesa] Query result for %s: %+v", checkoutID, result)
 
-	if errCode, ok := result["errorCode"].(string); ok && (errCode == "500.001.1001" || errCode == "404.002.02" || strings.Contains(strings.ToLower(errCode), "process")) {
-		return "pending", nil
-	}
-	if errMsg, ok := result["errorMessage"].(string); ok && (strings.Contains(strings.ToLower(errMsg), "process") || strings.Contains(strings.ToLower(errMsg), "progress")) {
-		return "pending", nil
-	}
-	resultDesc, _ := result["ResultDesc"].(string)
-	if resultDesc != "" && (strings.Contains(strings.ToLower(resultDesc), "process") || strings.Contains(strings.ToLower(resultDesc), "progress") || strings.Contains(strings.ToLower(resultDesc), "pending")) {
+	if errCode, ok := result["errorCode"].(string); ok && (errCode == "500.001.1001" || errCode == "404.002.02") {
 		return "pending", nil
 	}
 
@@ -871,19 +864,7 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		}
 	}
 
-	// ResultCode 2029 ("Failed due to an unresolved reason type" / "The transaction is still under processing")
-	// indicates Safaricom has not resolved the transaction yet (customer is still entering PIN or prompt in flight).
-	// We keep status as pending up to 150 seconds (2.5 minutes) to give the customer ample time to complete the prompt.
-	if rc == 2029 || (resultDesc != "" && (strings.Contains(strings.ToLower(resultDesc), "unresolved") || strings.Contains(strings.ToLower(resultDesc), "processing") || strings.Contains(strings.ToLower(resultDesc), "progress"))) {
-		if time.Since(payment.CreatedAt) < 150*time.Second {
-			return "pending", nil
-		}
-		reason := "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
-		if err := s.ProcessPaymentFailure(payment, reason); err != nil {
-			return "pending", err
-		}
-		return "failed", nil
-	}
+	resultDesc, _ := result["ResultDesc"].(string)
 
 	if rc == 0 {
 		receiptNumber := fmt.Sprintf("QRY_%s", checkoutID)
@@ -907,6 +888,20 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 			return "pending", err
 		}
 		return "completed", nil
+	}
+
+	// ResultCode 4999 ("The transaction is still under processing") or 2029
+	// indicates Safaricom has not resolved the transaction yet (customer is still entering PIN or prompt in flight).
+	// We keep status as pending up to 150 seconds (2.5 minutes) to give the customer ample time to complete the prompt.
+	if rc == 4999 || rc == 2029 || (resultDesc != "" && (strings.Contains(strings.ToLower(resultDesc), "unresolved") || strings.Contains(strings.ToLower(resultDesc), "under processing") || strings.Contains(strings.ToLower(resultDesc), "in progress"))) {
+		if time.Since(payment.CreatedAt) < 150*time.Second {
+			return "pending", nil
+		}
+		reason := "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
+		if err := s.ProcessPaymentFailure(payment, reason); err != nil {
+			return "pending", err
+		}
+		return "failed", nil
 	}
 
 	resultDesc, _ = result["ResultDesc"].(string)
