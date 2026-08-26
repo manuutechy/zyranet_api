@@ -1137,7 +1137,7 @@ func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationU
 	}
 
 	bodyBytes, _ := json.Marshal(payload)
-	apiURL := s.getBaseURL(creds.Env) + "/mpesa/c2b/v1/registerurl"
+	apiURL := s.getBaseURL(creds.Env) + "/mpesa/c2b/v2/registerurl"
 	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return nil, err
