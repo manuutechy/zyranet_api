@@ -301,6 +301,37 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		}
 	}
 
+	// If customer still not found, auto-link to latest guest customer or create fresh customer
+	if !foundCustomer && cleanPhone != "" {
+		var guestCustomer models.Customer
+		if err := config.DB.Where("phone LIKE 'GUEST%'").Order("id DESC").First(&guestCustomer).Error; err == nil {
+			customer = guestCustomer
+			customer.Phone = cleanPhone
+			customer.Name = payerName
+			customer.AccountNumber = "ZYR#" + cleanPhone
+			config.DB.Model(&customer).Updates(map[string]interface{}{
+				"phone":          cleanPhone,
+				"name":           payerName,
+				"account_number": "ZYR#" + cleanPhone,
+			})
+			foundCustomer = true
+		} else {
+			newCustomer := models.Customer{
+				Name:          payerName,
+				Phone:         cleanPhone,
+				AccountNumber: "ZYR#" + cleanPhone,
+				ZoneID:        1,
+				Type:          "hotspot",
+				Status:        "active",
+				CreditBalance: 0,
+			}
+			if err := config.DB.Create(&newCustomer).Error; err == nil {
+				customer = newCustomer
+				foundCustomer = true
+			}
+		}
+	}
+
 	transIDStr := body.TransID
 
 	if !foundCustomer {
