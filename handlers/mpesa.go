@@ -80,6 +80,16 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		if err := config.DB.First(&owner, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
+	} else if body.CustomerID == nil {
+		var existingCustomer models.Customer
+		if err := config.DB.Where("phone = ?", body.Phone).First(&existingCustomer).Error; err == nil {
+			body.CustomerID = &existingCustomer.ID
+		} else if body.Mac != "" {
+			var dev models.CustomerDevice
+			if err := config.DB.Where("mac_address = ?", body.Mac).First(&dev).Error; err == nil {
+				body.CustomerID = &dev.CustomerID
+			}
+		}
 	}
 
 	var voucherID *uint = body.VoucherID
@@ -316,6 +326,13 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 	zoneID := customer.ZoneID
 	pkgID := customer.PackageID
 	packageID := &pkgID
+
+	// Update customer name from M-Pesa C2B if customer currently has a generic/placeholder name
+	payerName := strings.TrimSpace(body.FirstName + " " + body.LastName)
+	if payerName != "" && (customer.Name == "" || strings.HasPrefix(customer.Name, "Customer_") || strings.HasPrefix(customer.Name, "Customer ") || strings.HasPrefix(customer.Name, "Guest_") || strings.HasPrefix(customer.Name, "DemoCustomer_")) {
+		customer.Name = payerName
+		config.DB.Model(&customer).Update("name", payerName)
+	}
 
 	{
 		customer.CreditBalance += body.TransAmount

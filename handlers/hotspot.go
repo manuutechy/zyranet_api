@@ -108,9 +108,20 @@ func HotspotPay(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, err.Error(), "Failed to prepare voucher.", fiber.StatusInternalServerError)
 	}
 
+	var customerID *uint
+	var existingCustomer models.Customer
+	if err := config.DB.Where("phone = ?", phone).First(&existingCustomer).Error; err == nil {
+		customerID = &existingCustomer.ID
+	} else if body.Mac != "" {
+		var dev models.CustomerDevice
+		if err := config.DB.Where("mac_address = ?", body.Mac).First(&dev).Error; err == nil {
+			customerID = &dev.CustomerID
+		}
+	}
+
 	// Create pending payment record
 	payment := models.Payment{
-		CustomerID: nil,
+		CustomerID: customerID,
 		VoucherID:  &voucher.ID,
 		ZoneID:     zone.ID,
 		PackageID:  &pkg.ID,

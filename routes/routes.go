@@ -45,6 +45,8 @@ func Register(app *fiber.App) {
 	v1.Post("/auth/login", payLimiter(10, time.Minute), handlers.Login)
 
 	// Customer portal auth
+	v1.Get("/customer/auth/device", handlers.CustomerAuthByDevice)
+	v1.Post("/customer/auth/device", handlers.CustomerAuthByDevice)
 	v1.Post("/customer/auth/otp", payLimiter(3, time.Minute), handlers.RequestOtp)
 	v1.Post("/customer/auth/verify", payLimiter(10, time.Minute), handlers.VerifyOtp)
 	v1.Post("/customer/auth/guest", handlers.CustomerAuthGuest)

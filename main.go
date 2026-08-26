@@ -43,6 +43,7 @@ func main() {
 		&models.Zone{},
 		&models.Package{},
 		&models.Customer{},
+		&models.CustomerDevice{},
 		&models.Ticket{},
 		&models.Payment{},
 		&models.Session{},

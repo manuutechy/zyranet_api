@@ -307,6 +307,9 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	if creds.BillingType == "till" {
 		transactionType = "CustomerBuyGoodsOnline"
 		partyB = creds.TillNumber
+		if partyB == "" {
+			partyB = shortcode
+		}
 		accountReference = reference
 	} else if creds.BillingType == "bank" {
 		partyB = bankPaybill(creds.BankName)
@@ -568,7 +571,105 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		}
 	}
 
-	if voucher != nil {
+	var customer *models.Customer
+
+	// 1. Resolve or create customer account
+	if payment.CustomerID != nil {
+		var c models.Customer
+		if err := config.DB.First(&c, *payment.CustomerID).Error; err == nil {
+			customer = &c
+		}
+	}
+
+	if customer == nil && phone != "" {
+		var c models.Customer
+		if err := config.DB.Where("phone = ?", phone).First(&c).Error; err == nil {
+			customer = &c
+			payment.CustomerID = &c.ID
+			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", c.ID)
+		}
+	}
+
+	if customer == nil && payment.MacAddress != "" {
+		var dev models.CustomerDevice
+		if err := config.DB.Preload("Customer").Where("mac_address = ?", payment.MacAddress).First(&dev).Error; err == nil && dev.Customer != nil {
+			customer = dev.Customer
+			payment.CustomerID = &customer.ID
+			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", customer.ID)
+		}
+	}
+
+	// Auto-register customer if not found
+	if customer == nil {
+		cleanPhone := phone
+		if cleanPhone == "" {
+			cleanPhone = payment.Phone
+		}
+		displayName := "Customer " + cleanPhone[max(0, len(cleanPhone)-4):]
+		pppoeUser := "user_" + cleanPhone[max(0, len(cleanPhone)-6):]
+		newCust := models.Customer{
+			Name:          displayName,
+			Phone:         cleanPhone,
+			ZoneID:        payment.ZoneID,
+			PackageID:     pkg.ID,
+			Type:          "hotspot",
+			Status:        "active",
+			PPPoEUsername: &pppoeUser,
+		}
+		if payment.MacAddress != "" {
+			newCust.MacAddress = &payment.MacAddress
+		}
+		if err := config.DB.Create(&newCust).Error; err == nil {
+			customer = &newCust
+			payment.CustomerID = &newCust.ID
+			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", newCust.ID)
+		}
+	}
+
+	// 2. Link Customer Device
+	if customer != nil && payment.MacAddress != "" {
+		customer.MacAddress = &payment.MacAddress
+		var dev models.CustomerDevice
+		if err := config.DB.Where("customer_id = ? AND mac_address = ?", customer.ID, payment.MacAddress).First(&dev).Error; err != nil {
+			dev = models.CustomerDevice{
+				CustomerID: customer.ID,
+				MacAddress: payment.MacAddress,
+				LastSeenAt: time.Now(),
+			}
+			if payment.IpAddress != "" {
+				dev.IPAddress = &payment.IpAddress
+			}
+			config.DB.Create(&dev)
+		} else {
+			dev.LastSeenAt = time.Now()
+			if payment.IpAddress != "" {
+				dev.IPAddress = &payment.IpAddress
+			}
+			config.DB.Save(&dev)
+		}
+	}
+
+	// 3. Update customer subscription status & expiry
+	if customer != nil {
+		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
+		config.DB.Model(customer).Updates(map[string]interface{}{
+			"status":      "active",
+			"package_id":  pkg.ID,
+			"zone_id":     pkg.ZoneID,
+			"mac_address": payment.MacAddress,
+			"expires_at":  expiresAt,
+		})
+
+		templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
+		msg := utils.RenderTemplate(templateActive, map[string]string{
+			"name":    customer.Name,
+			"package": pkg.Name,
+			"expiry":  expiresAt.Format("2006-01-02 15:04"),
+		})
+		if s.SMS.GetSetting("sms_enable_active", "yes") != "no" {
+			go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
+		}
+	} else if voucher != nil {
 		template := s.SMS.GetSetting("sms_template_voucher", "Hi {name}, payment of KES {price} received. Your voucher code is {code}. Enjoy browsing!")
 		msg := utils.RenderTemplate(template, map[string]string{
 			"name":  "Guest",
@@ -577,26 +678,6 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		})
 		if s.SMS.GetSetting("sms_enable_voucher", "yes") != "no" {
 			go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
-		}
-	} else if payment.CustomerID != nil {
-		var customer models.Customer
-		if err := config.DB.First(&customer, *payment.CustomerID).Error; err == nil {
-			expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
-			config.DB.Model(&customer).Updates(map[string]interface{}{
-				"status":     "active",
-				"package_id": pkg.ID,
-				"zone_id":    pkg.ZoneID,
-				"expires_at": expiresAt,
-			})
-			templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
-			msg := utils.RenderTemplate(templateActive, map[string]string{
-				"name":    customer.Name,
-				"package": pkg.Name,
-				"expiry":  expiresAt.Format("2006-01-02 15:04"),
-			})
-			if s.SMS.GetSetting("sms_enable_active", "yes") != "no" {
-				go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
-			}
 		}
 	}
 

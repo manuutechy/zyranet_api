@@ -204,11 +204,34 @@ func VerifyOtp(c *fiber.Ctx) error {
 	config.DB.Save(&customer)
 
 	// Whitelist the MAC address on the MikroTik router if MAC is provided
-	if body.Mac != "" && mikrotikSvc != nil {
-		log.Printf("[OTP Verify] Whitelisting MAC %s for customer %s (%s)", body.Mac, customer.Name, customer.Phone)
-		err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)
-		if err != nil {
-			log.Printf("[OTP Verify] WhitelistMAC failed for %s: %v", body.Mac, err)
+	if body.Mac != "" {
+		var dev models.CustomerDevice
+		if err := config.DB.Where("customer_id = ? AND mac_address = ?", customer.ID, body.Mac).First(&dev).Error; err != nil {
+			dev = models.CustomerDevice{
+				CustomerID: customer.ID,
+				MacAddress: body.Mac,
+				LastSeenAt: time.Now(),
+			}
+			if body.IP != "" {
+				dev.IPAddress = &body.IP
+			}
+			config.DB.Create(&dev)
+		} else {
+			dev.LastSeenAt = time.Now()
+			if body.IP != "" {
+				dev.IPAddress = &body.IP
+			}
+			config.DB.Save(&dev)
+		}
+		customer.MacAddress = &body.Mac
+		config.DB.Save(&customer)
+
+		if mikrotikSvc != nil {
+			log.Printf("[OTP Verify] Whitelisting MAC %s for customer %s (%s)", body.Mac, customer.Name, customer.Phone)
+			err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)
+			if err != nil {
+				log.Printf("[OTP Verify] WhitelistMAC failed for %s: %v", body.Mac, err)
+			}
 		}
 	}
 
@@ -223,6 +246,84 @@ func VerifyOtp(c *fiber.Ctx) error {
 		"token":    token,
 		"customer": buildCustomerProfile(&customer),
 	}, "Verification successful.")
+}
+
+// CustomerAuthByDevice authenticates or resolves a customer using their MAC address.
+// This allows returning customers to be recognized automatically without OTP.
+func CustomerAuthByDevice(c *fiber.Ctx) error {
+	mac := c.Query("mac")
+	ip := c.Query("ip")
+	if mac == "" {
+		var body struct {
+			Mac string `json:"mac"`
+			IP  string `json:"ip"`
+		}
+		if err := c.BodyParser(&body); err == nil {
+			mac = body.Mac
+			if body.IP != "" {
+				ip = body.IP
+			}
+		}
+	}
+
+	mac = strings.TrimSpace(mac)
+	if mac == "" {
+		return utils.ErrorResponse(c, "MAC address is required.", "", fiber.StatusBadRequest)
+	}
+
+	// 1. Try finding linked customer device
+	var device models.CustomerDevice
+	var customer models.Customer
+	found := false
+
+	if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").Where("mac_address = ?", mac).Order("last_seen_at DESC").First(&device).Error; err == nil && device.Customer != nil {
+		customer = *device.Customer
+		found = true
+		// Update last seen
+		device.LastSeenAt = time.Now()
+		if ip != "" {
+			device.IPAddress = &ip
+		}
+		config.DB.Save(&device)
+	}
+
+	// 2. Fallback to Customer.MacAddress directly
+	if !found {
+		if err := config.DB.Preload("Package").Preload("Zone").Where("mac_address = ?", mac).Order("created_at DESC").First(&customer).Error; err == nil {
+			found = true
+			// Auto-create CustomerDevice record for consistency
+			dev := models.CustomerDevice{
+				CustomerID: customer.ID,
+				MacAddress: mac,
+				LastSeenAt: time.Now(),
+			}
+			if ip != "" {
+				dev.IPAddress = &ip
+			}
+			config.DB.Create(&dev)
+		}
+	}
+
+	if !found {
+		return utils.SuccessResponse(c, fiber.Map{
+			"found":         false,
+			"authenticated": false,
+		}, "Device not recognized.")
+	}
+
+	token, err := middleware.GenerateCustomerToken(customer.ID)
+	if err != nil {
+		return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
+	}
+
+	middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+
+	return utils.SuccessResponse(c, fiber.Map{
+		"found":         true,
+		"authenticated": true,
+		"token":         token,
+		"customer":      buildCustomerProfile(&customer),
+	}, "Device recognized.")
 }
 
 // CustomerAuthGuest authenticates the customer as a guest. If this device's
