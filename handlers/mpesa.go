@@ -267,6 +267,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		BillRefNumber     string  `json:"BillRefNumber"`
 		MSISDN            string  `json:"MSISDN"`
 		FirstName         string  `json:"FirstName"`
+		MiddleName        string  `json:"MiddleName"`
 		LastName          string  `json:"LastName"`
 	}
 	if err := c.BodyParser(&body); err != nil {
@@ -274,43 +275,52 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Received"})
 	}
 
-	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s", body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN)
+	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s", 
+		body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN, body.FirstName, body.MiddleName, body.LastName)
 
-	phone := body.MSISDN
-	if len(phone) > 9 && !strings.HasPrefix(phone, "+") {
-		phone = "+" + phone
+	cleanPhone := utils.FormatPhone(body.MSISDN)
+	phoneSuffix := cleanPhone
+	if len(phoneSuffix) >= 9 {
+		phoneSuffix = phoneSuffix[len(phoneSuffix)-9:]
 	}
+
+	// Format Title Case Name from C2B payload
+	nameParts := []string{}
+	if body.FirstName != "" {
+		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.FirstName))))
+	}
+	if body.MiddleName != "" {
+		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.MiddleName))))
+	}
+	if body.LastName != "" {
+		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.LastName))))
+	}
+	payerName := strings.Join(nameParts, " ")
 
 	var customer models.Customer
 	foundCustomer := false
 	if body.BillRefNumber != "" {
-		if err := config.DB.Where("account_number = ? OR pppoe_username = ? OR phone = ?", body.BillRefNumber, body.BillRefNumber, body.BillRefNumber).First(&customer).Error; err == nil {
+		if err := config.DB.Where("account_number = ? OR pppoe_username = ? OR phone LIKE ?", body.BillRefNumber, body.BillRefNumber, "%"+body.BillRefNumber).First(&customer).Error; err == nil {
 			foundCustomer = true
 		}
 	}
-	if !foundCustomer && phone != "" {
-		if err := config.DB.Where("phone = ?", phone).First(&customer).Error; err == nil {
+	if !foundCustomer && phoneSuffix != "" {
+		if err := config.DB.Where("phone LIKE ?", "%"+phoneSuffix).First(&customer).Error; err == nil {
 			foundCustomer = true
 		}
 	}
 
 	transIDStr := body.TransID
 
-	// A C2B payment that can't be matched to a customer (e.g. a mistyped
-	// account reference) can't be safely attributed to any zone — Zyra
-	// Net's shared paybill can receive payments for many different ISPs,
-	// so guessing wrong here would misattribute one tenant's revenue to
-	// another. Queue it for a platform staff member to manually resolve
-	// instead (see handlers/platform_c2b.go).
 	if !foundCustomer {
 		unmatched := models.UnmatchedC2BPayment{
 			TransID:           transIDStr,
-			Phone:             phone,
+			Phone:             cleanPhone,
 			Amount:            body.TransAmount,
 			BillRefNumber:     body.BillRefNumber,
 			BusinessShortCode: body.BusinessShortCode,
 			FirstName:         body.FirstName,
-			LastName:          body.LastName,
+			LastName:          strings.TrimSpace(body.MiddleName + " " + body.LastName),
 			Status:            "pending",
 		}
 		if err := config.DB.Create(&unmatched).Error; err != nil {
@@ -327,9 +337,8 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 	pkgID := customer.PackageID
 	packageID := &pkgID
 
-	// Update customer name from M-Pesa C2B if customer currently has a generic/placeholder name
-	payerName := strings.TrimSpace(body.FirstName + " " + body.LastName)
-	if payerName != "" && (customer.Name == "" || strings.HasPrefix(customer.Name, "Customer_") || strings.HasPrefix(customer.Name, "Customer ") || strings.HasPrefix(customer.Name, "Guest_") || strings.HasPrefix(customer.Name, "DemoCustomer_")) {
+	// Always update customer name from official M-Pesa C2B legal names
+	if payerName != "" {
 		customer.Name = payerName
 		config.DB.Model(&customer).Update("name", payerName)
 	}
@@ -381,7 +390,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		CustomerID:         customerID,
 		ZoneID:             zoneID,
 		PackageID:          packageID,
-		Phone:              phone,
+		Phone:              cleanPhone,
 		Amount:             body.TransAmount,
 		Currency:           "KES",
 		Method:             "mpesa_c2b",
