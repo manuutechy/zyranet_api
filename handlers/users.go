@@ -58,6 +58,21 @@ func UserStore(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 
+	if body.Name == "" || body.Email == "" || body.Password == "" {
+		return utils.ErrorResponse(c, "Name, email, and password are required.", "Validation failed.", fiber.StatusBadRequest)
+	}
+
+	// Check for existing account with the same email (including soft-deleted)
+	var existingUser models.User
+	if err := config.DB.Unscoped().Where("email = ?", body.Email).First(&existingUser).Error; err == nil {
+		if existingUser.DeletedAt.Valid {
+			// Permanently purge previous soft-deleted record so the email can be re-registered
+			config.DB.Unscoped().Delete(&existingUser)
+		} else {
+			return utils.ErrorResponse(c, "An account with this email address already exists.", "Email already in use.", fiber.StatusConflict)
+		}
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return utils.ErrorResponse(c, "Password hashing failed.", "", fiber.StatusInternalServerError)
@@ -65,6 +80,24 @@ func UserStore(c *fiber.Ctx) error {
 
 	if body.Status == "" {
 		body.Status = "active"
+	}
+	if body.Role == "" {
+		body.Role = "field_agent"
+	}
+
+	orgID := claims.OrganizationID
+	if orgID == 0 {
+		var adminUser models.User
+		if err := config.DB.First(&adminUser, claims.UserID).Error; err == nil && adminUser.OrganizationID != 0 {
+			orgID = adminUser.OrganizationID
+		} else {
+			var defaultOrg models.Organization
+			if err := config.DB.Where("slug = ?", "default").First(&defaultOrg).Error; err == nil {
+				orgID = defaultOrg.ID
+			} else {
+				orgID = 1
+			}
+		}
 	}
 
 	user := models.User{
@@ -74,7 +107,7 @@ func UserStore(c *fiber.Ctx) error {
 		Phone:          body.Phone,
 		Role:           body.Role,
 		ZoneID:         body.ZoneID,
-		OrganizationID: claims.OrganizationID,
+		OrganizationID: orgID,
 		Status:         body.Status,
 	}
 
@@ -112,6 +145,17 @@ func UserUpdate(c *fiber.Ctx) error {
 	var body map[string]interface{}
 	c.BodyParser(&body)
 	delete(body, "organization_id") // never allow reassigning a user's tenant via this endpoint
+
+	if newEmail, ok := body["email"].(string); ok && newEmail != "" && newEmail != user.Email {
+		var existing models.User
+		if err := config.DB.Unscoped().Where("email = ? AND id != ?", newEmail, user.ID).First(&existing).Error; err == nil {
+			if existing.DeletedAt.Valid {
+				config.DB.Unscoped().Delete(&existing)
+			} else {
+				return utils.ErrorResponse(c, "An account with this email address already exists.", "Email already in use.", fiber.StatusConflict)
+			}
+		}
+	}
 
 	if pw, ok := body["password"].(string); ok && pw != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
