@@ -75,15 +75,29 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 		logoURL = c.BaseURL() + "/" + logoURL
 	}
 
+	// Check if this zone has an active Free Tier plan configured
+	var freePkg models.Package
+	var freeTierData interface{} = nil
+	if err := config.DB.Where("zone_id = ? AND status = ? AND (is_free_tier = ? OR price = 0)", zone.ID, "active", true).First(&freePkg).Error; err == nil {
+		freeTierData = fiber.Map{
+			"id":                  freePkg.ID,
+			"name":                freePkg.Name,
+			"time_limit_minutes":  freePkg.TimeLimitMinutes,
+			"speed_download_kbps": freePkg.SpeedDownloadKbps,
+			"cooldown_hours":      freePkg.FreeTierCooldownHours,
+		}
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
-		"zone_id":        zone.ID,
-		"theme":          theme,
-		"company_name":   companyName,
-		"logo_url":       logoURL,
-		"primary_color":  primaryColor,
-		"tagline":        org.CaptivePortalTagline,
-		"support_phone":  org.CaptivePortalSupportPhone,
-		"package_layout": packageLayout,
+		"zone_id":           zone.ID,
+		"theme":             theme,
+		"company_name":      companyName,
+		"logo_url":          logoURL,
+		"primary_color":     primaryColor,
+		"tagline":           org.CaptivePortalTagline,
+		"support_phone":     org.CaptivePortalSupportPhone,
+		"package_layout":    packageLayout,
+		"free_tier_package": freeTierData,
 	}, "")
 }
 

@@ -15,13 +15,15 @@ type Package struct {
 	Type               string         `gorm:"size:20;not null" json:"type"` // hotspot | pppoe
 	Category           string         `gorm:"size:20;default:single" json:"category"` // single | multi
 	DeviceLimit        int            `gorm:"default:1" json:"device_limit"`
-	Price              float64        `gorm:"type:decimal(10,2);not null" json:"price"`
-	TimeLimitMinutes   *int           `json:"time_limit_minutes"`
-	DataLimitMB        *int           `json:"data_limit_mb"`
-	SpeedUploadKbps    int            `gorm:"not null" json:"speed_upload_kbps"`
-	SpeedDownloadKbps  int            `gorm:"not null" json:"speed_download_kbps"`
-	BillingCycle       string         `gorm:"size:20;not null" json:"billing_cycle"` // hourly|daily|weekly|monthly
-	Status             string         `gorm:"size:20;default:active" json:"status"`
+	Price                  float64        `gorm:"type:decimal(10,2);not null" json:"price"`
+	IsFreeTier             bool           `gorm:"default:false" json:"is_free_tier"`
+	FreeTierCooldownHours  int            `gorm:"default:24" json:"free_tier_cooldown_hours"`
+	TimeLimitMinutes       *int           `json:"time_limit_minutes"`
+	DataLimitMB            *int           `json:"data_limit_mb"`
+	SpeedUploadKbps        int            `gorm:"not null" json:"speed_upload_kbps"`
+	SpeedDownloadKbps      int            `gorm:"not null" json:"speed_download_kbps"`
+	BillingCycle           string         `gorm:"size:20;not null" json:"billing_cycle"` // hourly|daily|weekly|monthly
+	Status                 string         `gorm:"size:20;default:active" json:"status"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`

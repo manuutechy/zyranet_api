@@ -51,11 +51,13 @@ func Register(app *fiber.App) {
 	v1.Post("/customer/auth/verify", payLimiter(10, time.Minute), handlers.VerifyOtp)
 	v1.Post("/customer/auth/guest", handlers.CustomerAuthGuest)
 	v1.Post("/customer/auth/logout", handlers.CustomerLogout)
+	v1.Post("/customer/free-tier/claim", handlers.CustomerClaimFreeTier)
 
 	// Public settings & packages
 	v1.Get("/public/settings", handlers.SettingsPublic)
 	v1.Get("/public/packages", handlers.PackagePublic)
 	v1.Get("/public/captive-settings", handlers.CaptivePortalPublicSettings)
+	v1.Post("/public/free-tier/claim", handlers.CustomerClaimFreeTier)
 
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
 	v1.Post("/payments/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)

@@ -827,3 +827,127 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 		"message":        "Package purchased successfully using credit balance.",
 	}, "Purchase successful.")
 }
+
+// CustomerClaimFreeTier enables a guest to claim a free trial / free tier internet session.
+func CustomerClaimFreeTier(c *fiber.Ctx) error {
+	var body struct {
+		ZoneID    uint   `json:"zone_id"`
+		PackageID uint   `json:"package_id"`
+		Mac       string `json:"mac"`
+		Phone     string `json:"phone"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+
+	// 1. Find target package (either explicit free tier package or the zone's active free tier)
+	var pkg models.Package
+	query := config.DB.Preload("Zone").Where("status = ?", "active")
+	if body.PackageID > 0 {
+		query = query.Where("id = ?", body.PackageID)
+	} else if body.ZoneID > 0 {
+		query = query.Where("zone_id = ? AND (is_free_tier = ? OR price = 0)", body.ZoneID, true)
+	} else {
+		query = query.Where("is_free_tier = ? OR price = 0", true)
+	}
+
+	if err := query.First(&pkg).Error; err != nil {
+		return utils.ErrorResponse(c, "No free tier plan is currently available in this zone.", "", fiber.StatusNotFound)
+	}
+
+	cooldownHours := pkg.FreeTierCooldownHours
+	if cooldownHours <= 0 {
+		cooldownHours = 24
+	}
+	cooldownCutoff := time.Now().Add(-time.Duration(cooldownHours) * time.Hour)
+
+	// 2. Anti-abuse check: verify if MAC or Phone already claimed within cooldown period
+	if body.Mac != "" {
+		var recentClaimCount int64
+		config.DB.Model(&models.Customer{}).
+			Where("mac_address = ? AND package_id = ? AND updated_at > ?", body.Mac, pkg.ID, cooldownCutoff).
+			Count(&recentClaimCount)
+		if recentClaimCount > 0 {
+			return utils.ErrorResponse(c, fmt.Sprintf("You have already used your free trial. You can claim again after %d hours or purchase a package.", cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
+		}
+	}
+
+	if body.Phone != "" {
+		var recentClaimCount int64
+		config.DB.Model(&models.Customer{}).
+			Where("phone = ? AND package_id = ? AND updated_at > ?", body.Phone, pkg.ID, cooldownCutoff).
+			Count(&recentClaimCount)
+		if recentClaimCount > 0 {
+			return utils.ErrorResponse(c, fmt.Sprintf("Phone %s has already claimed the free trial. Please wait %d hours or select a plan.", body.Phone, cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
+		}
+	}
+
+	// 3. Determine trial duration
+	duration := 30 * time.Minute
+	if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+		duration = time.Duration(*pkg.TimeLimitMinutes) * time.Minute
+	}
+	expiresAt := time.Now().Add(duration)
+
+	// 4. Create or update customer record
+	var customer models.Customer
+	found := false
+	if body.Mac != "" {
+		if err := config.DB.Where("mac_address = ? AND zone_id = ?", body.Mac, pkg.ZoneID).First(&customer).Error; err == nil {
+			found = true
+		}
+	}
+
+	if !found {
+		var count int64
+		config.DB.Unscoped().Model(&models.Customer{}).Where("account_number LIKE ?", "ZYR#FREE#%").Count(&count)
+		accNum := fmt.Sprintf("ZYR#FREE#%d", 10001+count)
+		phone := body.Phone
+		if phone == "" {
+			phone = fmt.Sprintf("FREE%d", 10001+count)
+		}
+
+		customer = models.Customer{
+			Name:          fmt.Sprintf("Free_User_%d", 10001+count),
+			Phone:         phone,
+			ZoneID:        pkg.ZoneID,
+			PackageID:     pkg.ID,
+			Type:          "hotspot",
+			Status:        "active",
+			AccountNumber: accNum,
+			ExpiresAt:     &expiresAt,
+		}
+		if body.Mac != "" {
+			customer.MacAddress = &body.Mac
+		}
+		if err := config.DB.Create(&customer).Error; err != nil {
+			return utils.ErrorResponse(c, "Failed to provision free tier account.", err.Error(), fiber.StatusInternalServerError)
+		}
+	} else {
+		customer.PackageID = pkg.ID
+		customer.Status = "active"
+		customer.ExpiresAt = &expiresAt
+		config.DB.Save(&customer)
+	}
+
+	// 5. Instantly whitelist on MikroTik Router
+	if pkg.Zone != nil && body.Mac != "" && mikrotikSvcGlobal != nil {
+		go func(z models.Zone, m string, p models.Package) {
+			_ = mikrotikSvcGlobal.WhitelistMAC(&z, m, &p)
+		}(*pkg.Zone, body.Mac, pkg)
+	}
+
+	// 6. Generate Customer JWT Auth Token
+	token, _ := middleware.GenerateCustomerToken(customer.ID)
+	middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+
+	return utils.SuccessResponse(c, fiber.Map{
+		"token":          token,
+		"customer":       buildCustomerProfile(&customer),
+		"expires_at":     expiresAt,
+		"duration_mins":  int(duration.Minutes()),
+		"package_name":   pkg.Name,
+		"message":        fmt.Sprintf("Free trial of %d minutes activated! Enjoy your browsing.", int(duration.Minutes())),
+	}, "Free trial activated successfully.")
+}
+
