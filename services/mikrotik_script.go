@@ -88,11 +88,16 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(fmt.Sprintf("/ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan\n", gatewayIP))
 	sb.WriteString("/ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no\n\n")
 
-	// Allow the cloud captive portal & API through the walled garden so a client
-	// can reach it before authenticating.
-	sb.WriteString("# --- Walled Garden: allow cloud captive portal and API ---\n")
-	sb.WriteString("/ip hotspot walled-garden add dst-host=captive.zyranet.co.ke action=allow comment=\"Zyra Net Captive Portal\"\n")
-	sb.WriteString("/ip hotspot walled-garden add dst-host=api.zyranet.co.ke action=allow comment=\"Zyra Net API Gateway\"\n\n")
+	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden
+	sb.WriteString("# --- Walled Garden: allow cloud captive portal, API, M-Pesa, and assets ---\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=*zyranet.co.ke action=allow comment=\"Zyra Net Cloud\"\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=*safaricom.co.ke action=allow comment=\"Safaricom Daraja\"\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=*googleapis.com action=allow comment=\"Google Fonts\"\n")
+	sb.WriteString("/ip hotspot walled-garden add dst-host=*gstatic.com action=allow comment=\"Google Static\"\n\n")
+
+	// WAN NAT Masquerade
+	sb.WriteString("# --- Firewall NAT (Internet Access Masquerade) ---\n")
+	sb.WriteString("/ip firewall nat add chain=srcnat action=masquerade comment=\"Zyra Net Internet Access NAT\"\n\n")
 
 	// Auto-fetch login.html directly to the router's /hotspot directory so manual file upload is not needed
 	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html ---\n")
@@ -142,8 +147,9 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	}
 	sb.WriteString("\n")
 
-	// PPPoE Profiles
-	sb.WriteString("# --- PPPoE Profiles ---\n")
+	// PPPoE Pool & Profiles
+	sb.WriteString("# --- PPPoE Remote IP Pool & Profiles ---\n")
+	sb.WriteString("/ip pool add name=pool-pppoe-zyranet ranges=10.10.0.2-10.10.3.254\n")
 	for _, pkg := range packages {
 		if pkg.Type != "pppoe" {
 			continue
@@ -151,7 +157,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		profileName := sanitizeProfileName(pkg.Name)
 		rateLimit := fmt.Sprintf("%dk/%dk", pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
 		sb.WriteString(fmt.Sprintf(
-			"/ppp profile\nadd name=%s rate-limit=%s local-address=10.0.0.1 dns-server=8.8.8.8,8.8.4.4\n\n",
+			"/ppp profile\nadd name=%s rate-limit=%s local-address=10.10.0.1 remote-address=pool-pppoe-zyranet dns-server=8.8.8.8,8.8.4.4\n\n",
 			profileName, rateLimit,
 		))
 	}

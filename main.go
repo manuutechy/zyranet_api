@@ -120,7 +120,7 @@ func main() {
 	mpesaSvc := services.NewMpesaService(smsSvc, voucherSvc, mikrotikSvc)
 
 	// Inject services into handlers
-	handlers.InitMpesaService(mpesaSvc, smsSvc)
+	handlers.InitMpesaService(mpesaSvc, smsSvc, mikrotikSvc)
 	handlers.InitVoucherService(voucherSvc)
 	handlers.InitZoneServices(mikrotikSvc, scriptSvc)
 	handlers.InitCustomerAuthSMS(smsSvc)

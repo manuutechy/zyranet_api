@@ -501,19 +501,105 @@ func (s *MikroTikService) pushPppoeSecretsAPI(zone *models.Zone, customers []mod
 	return count, nil
 }
 
-func (s *MikroTikService) disconnectClientAPI(zone *models.Zone, mac string) error {
+func (s *MikroTikService) disconnectClientAPI(zone *models.Zone, identifier string) error {
 	client, err := s.dialAPI(zone)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	reply, err := client.Run("/ip/hotspot/active/print", "?mac-address="+mac)
-	if err != nil {
-		return err
+	// 1. Disconnect from Hotspot active by MAC or username
+	if reply, err := client.Run("/ip/hotspot/active/print", "?mac-address="+identifier); err == nil && len(reply.Re) > 0 {
+		for _, row := range reply.Re {
+			client.Run("/ip/hotspot/active/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+		}
+	} else if reply, err := client.Run("/ip/hotspot/active/print", "?user="+identifier); err == nil && len(reply.Re) > 0 {
+		for _, row := range reply.Re {
+			client.Run("/ip/hotspot/active/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+		}
 	}
-	for _, row := range reply.Re {
-		client.Run("/ip/hotspot/active/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+
+	// 2. Clear Hotspot cookies so client does not auto-reauthenticate
+	if reply, err := client.Run("/ip/hotspot/cookie/print", "?mac-address="+identifier); err == nil && len(reply.Re) > 0 {
+		for _, row := range reply.Re {
+			client.Run("/ip/hotspot/cookie/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+		}
+	} else if reply, err := client.Run("/ip/hotspot/cookie/print", "?user="+identifier); err == nil && len(reply.Re) > 0 {
+		for _, row := range reply.Re {
+			client.Run("/ip/hotspot/cookie/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+		}
+	}
+
+	// 3. Disconnect active PPPoE session
+	if reply, err := client.Run("/ppp/active/print", "?name="+identifier); err == nil && len(reply.Re) > 0 {
+		for _, row := range reply.Re {
+			client.Run("/ppp/active/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+		}
+	}
+
+	return nil
+}
+
+// DecommissionPPPoECustomer disables the customer's secret and terminates any live PPPoE tunnel.
+func (s *MikroTikService) DecommissionPPPoECustomer(zone *models.Zone, username string) error {
+	if config.Config.AppEnv == "local" || username == "" {
+		return nil
+	}
+	if zone.ConnectionType == "api" {
+		client, err := s.dialAPI(zone)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		// Disable secret
+		if reply, err := client.Run("/ppp/secret/print", "?name="+username); err == nil {
+			for _, row := range reply.Re {
+				client.Run("/ppp/secret/set", "=.id="+row.Map[".id"], "=disabled=yes") //nolint:errcheck
+			}
+		}
+		// Kill active session
+		if reply, err := client.Run("/ppp/active/print", "?name="+username); err == nil {
+			for _, row := range reply.Re {
+				client.Run("/ppp/active/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// ReactivateCustomer re-enables a customer's PPPoE secret or Hotspot access upon payment.
+func (s *MikroTikService) ReactivateCustomer(zone *models.Zone, customer *models.Customer) error {
+	if config.Config.AppEnv == "local" || customer == nil {
+		return nil
+	}
+	if customer.Type == "pppoe" {
+		username := strVal(customer.PPPoEUsername)
+		if username == "" {
+			username = strings.ReplaceAll(strings.ToLower(customer.Name), " ", ".")
+		}
+		if zone.ConnectionType == "api" {
+			client, err := s.dialAPI(zone)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			if reply, err := client.Run("/ppp/secret/print", "?name="+username); err == nil && len(reply.Re) > 0 {
+				for _, row := range reply.Re {
+					client.Run("/ppp/secret/set", "=.id="+row.Map[".id"], "=disabled=no") //nolint:errcheck
+				}
+			} else {
+				// Create secret if missing
+				s.pushPppoeSecretsAPI(zone, []models.Customer{*customer})
+			}
+			return nil
+		}
+	} else if customer.Type == "hotspot" && customer.MacAddress != nil && *customer.MacAddress != "" {
+		if customer.Package != nil {
+			return s.WhitelistMAC(zone, *customer.MacAddress, customer.Package)
+		}
 	}
 	return nil
 }
@@ -565,6 +651,13 @@ func (s *MikroTikService) ensureHotspotProfileAPI(client *routeros.Client, pkg *
 			"=idle-timeout=5m",
 			"=keepalive-timeout=2m",
 		)
+	} else {
+		// Update existing profile rate-limit & timeout so package speed edits take effect immediately
+		client.Run("/ip/hotspot/user/profile/set", //nolint:errcheck
+			"=.id="+reply.Re[0].Map[".id"],
+			"=rate-limit="+rateLimit,
+			"=session-timeout="+limitStr,
+		)
 	}
 }
 
@@ -576,7 +669,15 @@ func (s *MikroTikService) ensurePppProfileAPI(client *routeros.Client, pkg *mode
 			"=name="+profileName,
 			"=rate-limit="+rateLimit,
 			"=local-address=10.0.0.1",
+			"=remote-address=pool-pppoe-zyranet",
 			"=dns-server=8.8.8.8,8.8.4.4",
+		)
+	} else {
+		// Update existing profile rate-limit
+		client.Run("/ppp/profile/set", //nolint:errcheck
+			"=.id="+reply.Re[0].Map[".id"],
+			"=rate-limit="+rateLimit,
+			"=remote-address=pool-pppoe-zyranet",
 		)
 	}
 }

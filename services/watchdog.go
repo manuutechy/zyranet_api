@@ -76,13 +76,34 @@ func (w *WatchdogService) runOverloadProtectionSweep() {
 				"ended_at": &now,
 			})
 
-		// If customer has a MAC and Zone has router IP configured, kick the session from MikroTik
-		if cust.MacAddress != nil && *cust.MacAddress != "" && cust.Zone != nil && cust.Zone.RouterIP != "" {
-			mac := *cust.MacAddress
-			zoneCopy := *cust.Zone
-			go func(z models.Zone, m string) {
-				_ = w.mikrotikSvc.DisconnectClient(&z, m)
-			}(zoneCopy, mac)
+		// If PPPoE subscriber, disable secret on MikroTik and terminate active tunnel
+		if cust.Type == "pppoe" && cust.Zone != nil && cust.Zone.RouterIP != "" {
+			username := ""
+			if cust.PPPoEUsername != nil && *cust.PPPoEUsername != "" {
+				username = *cust.PPPoEUsername
+			} else {
+				username = cust.AccountNumber
+			}
+			if username != "" {
+				zoneCopy := *cust.Zone
+				go func(z models.Zone, u string) {
+					_ = w.mikrotikSvc.DecommissionPPPoECustomer(&z, u)
+				}(zoneCopy, username)
+			}
+		} else if cust.Zone != nil && cust.Zone.RouterIP != "" {
+			// If Hotspot user, kick active session by MAC or Phone/Account
+			target := ""
+			if cust.MacAddress != nil && *cust.MacAddress != "" {
+				target = *cust.MacAddress
+			} else if cust.Phone != "" {
+				target = cust.Phone
+			}
+			if target != "" {
+				zoneCopy := *cust.Zone
+				go func(z models.Zone, t string) {
+					_ = w.mikrotikSvc.DisconnectClient(&z, t)
+				}(zoneCopy, target)
+			}
 		}
 	}
 }

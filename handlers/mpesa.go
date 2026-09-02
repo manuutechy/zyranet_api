@@ -16,11 +16,13 @@ import (
 
 var mpesaSvcGlobal *services.MpesaService
 var smsSvcGlobal *services.SmsService
+var mikrotikSvcGlobal *services.MikroTikService
 
-// InitMpesaService injects M-Pesa and SMS services.
-func InitMpesaService(mpesa *services.MpesaService, sms *services.SmsService) {
+// InitMpesaService injects M-Pesa, SMS, and MikroTik services.
+func InitMpesaService(mpesa *services.MpesaService, sms *services.SmsService, mikrotik *services.MikroTikService) {
 	mpesaSvcGlobal = mpesa
 	smsSvcGlobal = sms
+	mikrotikSvcGlobal = mikrotik
 }
 
 // MpesaStkPush initiates an M-Pesa STK Push payment.
@@ -400,6 +402,15 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 				"expires_at":     newExpiry,
 				"status":         "active",
 			})
+
+			// Instant MikroTik Auto-Reconnect Push (unblocks PPPoE secret or Hotspot MAC)
+			if mikrotikSvcGlobal != nil && customer.ZoneID > 0 {
+				var zone models.Zone
+				if err := config.DB.First(&zone, customer.ZoneID).Error; err == nil {
+					customer.Package = &pkg
+					go mikrotikSvcGlobal.ReactivateCustomer(&zone, &customer)
+				}
+			}
 		}
 
 		if smsSvcGlobal != nil && customer.Phone != "" {
