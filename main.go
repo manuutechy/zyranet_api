@@ -203,6 +203,11 @@ func main() {
 	watchdog.Start()
 	defer watchdog.Stop()
 
+	// Start Automated Subscriber Expiry SMS Reminders
+	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())
+	expiryReminder.Start()
+	defer expiryReminder.Stop()
+
 	// Start server
 	port := ":" + config.Config.AppPort
 	log.Printf("[zyranet-api] Starting on %s", port)

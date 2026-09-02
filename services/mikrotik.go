@@ -846,6 +846,77 @@ func (s *MikroTikService) ensurePppProfileREST(zone *models.Zone, pkg *models.Pa
 	}
 }
 
+// InterfaceTraffic holds live RX/TX speed and packet throughput.
+type InterfaceTraffic struct {
+	Interface string  `json:"interface"`
+	RxBps     int64   `json:"rx_bps"`
+	TxBps     int64   `json:"tx_bps"`
+	RxMbps    float64 `json:"rx_mbps"`
+	TxMbps    float64 `json:"tx_mbps"`
+	RxPackets int64   `json:"rx_packets"`
+	TxPackets int64   `json:"tx_packets"`
+	Timestamp string  `json:"timestamp"`
+}
+
+// GetInterfaceTraffic retrieves real-time bandwidth traffic for the router's main interface.
+func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (*InterfaceTraffic, error) {
+	if iface == "" {
+		iface = "ether1"
+	}
+
+	if config.Config.AppEnv == "local" {
+		now := time.Now()
+		// Realistic simulated oscillating traffic curve for dev/demo
+		baseRx := 28.5 + float64(now.Second()%30)*0.85
+		baseTx := 11.2 + float64((now.Second()+15)%25)*0.45
+		return &InterfaceTraffic{
+			Interface: iface,
+			RxBps:     int64(baseRx * 1000 * 1000),
+			TxBps:     int64(baseTx * 1000 * 1000),
+			RxMbps:    baseRx,
+			TxMbps:    baseTx,
+			RxPackets: int64(baseRx * 125),
+			TxPackets: int64(baseTx * 85),
+			Timestamp: now.UTC().Format(time.RFC3339),
+		}, nil
+	}
+
+	if zone.ConnectionType == "api" {
+		client, err := s.dialAPI(zone)
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+
+		res, err := client.Run("/interface/monitor-traffic", fmt.Sprintf("=interface=%s", iface), "=once=")
+		if err != nil {
+			return nil, err
+		}
+		if len(res.Re) > 0 {
+			m := res.Re[0].Map
+			rxBps := parseInt64(m["rx-bits-per-second"])
+			txBps := parseInt64(m["tx-bits-per-second"])
+			rxPps := parseInt64(m["rx-packets-per-second"])
+			txPps := parseInt64(m["tx-packets-per-second"])
+			return &InterfaceTraffic{
+				Interface: iface,
+				RxBps:     rxBps,
+				TxBps:     txBps,
+				RxMbps:    float64(rxBps) / 1000000.0,
+				TxMbps:    float64(txBps) / 1000000.0,
+				RxPackets: rxPps,
+				TxPackets: txPps,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			}, nil
+		}
+	}
+
+	return &InterfaceTraffic{
+		Interface: iface,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
 // ---- Helpers ----
 
 func offlineStatus(errMsg string) *RouterStatus {

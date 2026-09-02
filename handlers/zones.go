@@ -308,6 +308,25 @@ func ZoneExecCommand(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, output, "Command executed successfully.")
 }
 
+// GetZoneTraffic streams live interface traffic data for a zone router.
+func GetZoneTraffic(c *fiber.Ctx) error {
+	zone, err := findZoneOrFail(c)
+	if err != nil {
+		return err
+	}
+	if !canAccessZone(c, zone) {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
+	}
+
+	iface := c.Query("interface", "ether1")
+	traffic, err := mikrotikSvc.GetInterfaceTraffic(zone, iface)
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Failed to read interface traffic.", fiber.StatusInternalServerError)
+	}
+
+	return utils.SuccessResponse(c, traffic, "Live interface traffic data.")
+}
+
 // helpers
 
 func findZoneOrFail(c *fiber.Ctx) (*models.Zone, error) {
