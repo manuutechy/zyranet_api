@@ -183,6 +183,7 @@ func Register(app *fiber.App) {
 	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
 	admin.Get("/settings/mpesa", adminAuth, handlers.OrganizationMpesaShow)
 	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
+	admin.Post("/settings/mpesa/test", adminAuth, handlers.OrganizationMpesaTest)
 	admin.Post("/settings/mpesa/register-c2b", adminAuth, handlers.OrganizationMpesaRegisterC2B)
 	admin.Get("/settings/sms", adminAuth, handlers.OrganizationSmsShow)
 	admin.Post("/settings/sms", adminAuth, handlers.OrganizationSmsUpdate)

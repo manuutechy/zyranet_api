@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"fmt"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
@@ -171,4 +173,30 @@ func OrganizationMpesaRegisterC2B(c *fiber.Ctx) error {
 	}
 
 	return utils.SuccessResponse(c, res, "C2B URLs registered successfully with Safaricom Daraja.")
+}
+
+// OrganizationMpesaTest tests OAuth authentication against Safaricom Daraja.
+func OrganizationMpesaTest(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	if claims.Role != "super_admin" {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
+	}
+
+	var zone models.Zone
+	var zoneID uint = 0
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone).Error; err == nil {
+		zoneID = zone.ID
+	}
+
+	creds := mpesaSvcGlobal.ResolveMpesaCreds(zoneID)
+	token, err := mpesaSvcGlobal.GetAccessToken(creds)
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Daraja Auth Test Failed", fiber.StatusBadRequest)
+	}
+
+	return utils.SuccessResponse(c, fiber.Map{
+		"status":      "connected",
+		"environment": creds.Env,
+		"token_valid": token != "",
+	}, fmt.Sprintf("Daraja OAuth authentication successful on %s environment.", creds.Env))
 }

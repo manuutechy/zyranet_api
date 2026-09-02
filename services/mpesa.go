@@ -89,7 +89,7 @@ func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTi
 // 0, or an org with no config row (the default), uses the platform-wide
 // credentials unchanged — identical to the single-tenant behavior before
 // per-org Daraja support existed.
-func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
+func (s *MpesaService) ResolveMpesaCreds(zoneID uint) mpesaCreds {
 	// Load all mpesa settings in a single SQL query instead of 12 sequential queries
 	settingsMap := s.loadMpesaSettingsMap()
 
@@ -177,8 +177,8 @@ func (s *MpesaService) getBaseURL(env string) string {
 
 // GetAccessToken fetches the OAuth token from Daraja for the given
 // credentials, caching it in-memory (keyed by consumer key) for its
-// reported lifetime (Daraja tokens are valid ~1 hour) so we don't make a
-// round trip to Safaricom on every STK push.
+// GetAccessToken fetches the OAuth token from Daraja for the given
+// credentials, caching it in-memory with automatic retry and transient 503 recovery.
 func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 	if creds.ConsumerKey == "" || creds.ConsumerKey == "mock_consumer_key" {
 		return "mock_token", nil
@@ -192,60 +192,102 @@ func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 	s.tokenMu.Unlock()
 
 	apiURL := s.getBaseURL(creds.Env) + "/oauth/v1/generate?grant_type=client_credentials"
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
-	if err != nil {
-		return "", err
-	}
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(creds.ConsumerKey + ":" + creds.ConsumerSecret))
-	req.Header.Set("Authorization", "Basic "+basicAuth)
 
 	client := s.httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("daraja auth failed: %w", err)
-	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read daraja auth response: %w", err)
-	}
+	var lastErr error
+	var lastStatus int
+	var lastBody string
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("daraja auth returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("failed to decode daraja auth response: %w", err)
-	}
-	token, ok := result["access_token"].(string)
-	if !ok || token == "" {
-		return "", fmt.Errorf("no access_token in daraja response: %s", string(body))
-	}
-
-	expiresIn := 3500 * time.Second // safe default, just under Daraja's ~1h lifetime
-	if raw, ok := result["expires_in"]; ok {
-		switch v := raw.(type) {
-		case string:
-			if secs, err := time.ParseDuration(v + "s"); err == nil {
-				expiresIn = secs - 60*time.Second
-			}
-		case float64:
-			expiresIn = time.Duration(v)*time.Second - 60*time.Second
+	// Safaricom Daraja proxy/upstream gateways frequently encounter transient 502/503 errors.
+	// Perform up to 3 rapid retry attempts with backoff before failing.
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+		if err != nil {
+			return "", err
 		}
-	}
-	if expiresIn <= 0 {
-		expiresIn = 60 * time.Second
+		req.Header.Set("Authorization", "Basic "+basicAuth)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(300*attempt) * time.Millisecond)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(300*attempt) * time.Millisecond)
+			continue
+		}
+
+		lastStatus = resp.StatusCode
+		lastBody = strings.TrimSpace(string(body))
+
+		if resp.StatusCode == http.StatusOK {
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return "", fmt.Errorf("failed to decode daraja auth response: %w", err)
+			}
+			token, ok := result["access_token"].(string)
+			if !ok || token == "" {
+				return "", fmt.Errorf("no access_token in daraja response: %s", string(body))
+			}
+
+			expiresIn := 3500 * time.Second // safe default (~1h)
+			if raw, ok := result["expires_in"]; ok {
+				switch v := raw.(type) {
+				case string:
+					if secs, err := time.ParseDuration(v + "s"); err == nil {
+						expiresIn = secs - 60*time.Second
+					}
+				case float64:
+					expiresIn = time.Duration(v)*time.Second - 60*time.Second
+				}
+			}
+			if expiresIn <= 0 {
+				expiresIn = 60 * time.Second
+			}
+
+			s.tokenMu.Lock()
+			s.tokenCache[creds.ConsumerKey] = cachedToken{token: token, expiry: time.Now().Add(expiresIn)}
+			s.tokenMu.Unlock()
+			return token, nil
+		}
+
+		// If transient upstream error (502/503/504), wait briefly and retry
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout {
+			log.Printf("[Daraja Auth] Attempt %d: Safaricom returned %d (%s). Retrying...", attempt, resp.StatusCode, lastBody)
+			time.Sleep(time.Duration(500*attempt) * time.Millisecond)
+			continue
+		}
+
+		// For 400/401 auth errors, retry will not help; break early
+		break
 	}
 
-	s.tokenMu.Lock()
-	s.tokenCache[creds.ConsumerKey] = cachedToken{token: token, expiry: time.Now().Add(expiresIn)}
-	s.tokenMu.Unlock()
-	return token, nil
+	// In local development mode, fallback to mock token if Safaricom gateway is unreachable
+	if config.Config.AppEnv == "local" {
+		log.Printf("[Daraja Auth] APP_ENV=local fallback: using mock access token (upstream was %d: %s)", lastStatus, lastBody)
+		return "mock_token_local_dev", nil
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("daraja auth network connection failed: %w", lastErr)
+	}
+
+	if lastStatus == http.StatusServiceUnavailable || strings.Contains(lastBody, "no healthy upstream") {
+		return "", fmt.Errorf("Safaricom Daraja M-Pesa is temporarily unreachable (503: no healthy upstream on %s). Verify if Daraja Environment in Settings matches your credentials (Sandbox vs Production) or retry shortly", creds.Env)
+	}
+
+	return "", fmt.Errorf("daraja auth failed (status %d on %s): %s", lastStatus, creds.Env, lastBody)
 }
 
 // InitiateSTKPush sends a payment prompt to the customer's phone, using
@@ -261,7 +303,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		return nil, fmt.Errorf("amount must be at least 1 KES")
 	}
 
-	creds := s.resolveMpesaCreds(zoneID)
+	creds := s.ResolveMpesaCreds(zoneID)
 	shortcode := creds.Shortcode
 	passkey := creds.Passkey
 	callbackURL := creds.CallbackURL
@@ -774,7 +816,7 @@ func (s *MpesaService) ProcessPaymentFailure(payment *models.Payment, reason str
 // transaction, using zoneID to resolve the same tenant credentials that
 // initiated the push (see resolveMpesaCreds).
 func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string) (map[string]interface{}, error) {
-	creds := s.resolveMpesaCreds(zoneID)
+	creds := s.ResolveMpesaCreds(zoneID)
 	shortcode := creds.Shortcode
 	passkey := creds.Passkey
 	env := creds.Env
@@ -1111,7 +1153,7 @@ type C2BRegisterResponse struct {
 
 // RegisterC2BURLs registers the C2B ValidationURL and ConfirmationURL with Safaricom Daraja.
 func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationURL, responseType string) (*C2BRegisterResponse, error) {
-	creds := s.resolveMpesaCreds(zoneID)
+	creds := s.ResolveMpesaCreds(zoneID)
 	shortcode := creds.Shortcode
 	if creds.BillingType == "paybill" && creds.PaybillNumber != "" {
 		shortcode = creds.PaybillNumber
