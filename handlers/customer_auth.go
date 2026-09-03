@@ -196,11 +196,13 @@ func VerifyOtp(c *fiber.Ctx) error {
 		}
 	}
 
-	// Force activation on successful OTP verification so they can access the internet immediately
-	// Give them 24 hours of demo/trial access
-	expiry := time.Now().Add(24 * time.Hour)
-	customer.Status = "active"
-	customer.ExpiresAt = &expiry
+	// Only mark active if customer has a valid unexpired subscription
+	if customer.ExpiresAt != nil && customer.ExpiresAt.After(time.Now()) {
+		customer.Status = "active"
+	} else {
+		customer.Status = "expired"
+		customer.ExpiresAt = nil
+	}
 	config.DB.Save(&customer)
 
 	// Whitelist the MAC address on the MikroTik router if MAC is provided
@@ -387,17 +389,13 @@ func CustomerAuthGuest(c *fiber.Ctx) error {
 		ZoneID:        zone.ID,
 		PackageID:     pkg.ID,
 		Type:          "hotspot",
-		Status:        "active", // Guest gets direct active access or active status
+		Status:        "expired", // Unpaid guests start as expired until they purchase a plan or claim free trial
 		AccountNumber: guestAcc,
 		PPPoEUsername: &pppoeUser,
 	}
 	if body.Mac != "" {
 		customer.MacAddress = &body.Mac
 	}
-
-	// Give a 1 hour duration or let it use the package billing cycle
-	expiry := time.Now().Add(time.Hour)
-	customer.ExpiresAt = &expiry
 
 	if err := config.DB.Create(&customer).Error; err != nil {
 		return utils.ErrorResponse(c, "Failed to create guest user", err.Error(), fiber.StatusInternalServerError)
