@@ -88,6 +88,11 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 		}
 	}
 
+	paybillNumber := "7289306"
+	if mpesaSvcGlobal != nil {
+		paybillNumber = mpesaSvcGlobal.GetPaybillNumber(zone.ID)
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"zone_id":           zone.ID,
 		"theme":             theme,
@@ -97,6 +102,7 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 		"tagline":           org.CaptivePortalTagline,
 		"support_phone":     org.CaptivePortalSupportPhone,
 		"package_layout":    packageLayout,
+		"paybill_number":    paybillNumber,
 		"free_tier_package": freeTierData,
 	}, "")
 }

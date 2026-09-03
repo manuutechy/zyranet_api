@@ -167,6 +167,18 @@ type MpesaSTKResponse struct {
 	IsMock              bool   `json:"is_mock"`
 }
 
+// GetPaybillNumber returns the resolved Paybill / ShortCode for a zone or system default.
+func (s *MpesaService) GetPaybillNumber(zoneID uint) string {
+	creds := s.ResolveMpesaCreds(zoneID)
+	if creds.PaybillNumber != "" {
+		return creds.PaybillNumber
+	}
+	if creds.Shortcode != "" {
+		return creds.Shortcode
+	}
+	return "7289306"
+}
+
 // getBaseURL returns the Daraja API base URL for the given environment.
 func (s *MpesaService) getBaseURL(env string) string {
 	if strings.ToLower(env) == "production" {

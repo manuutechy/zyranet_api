@@ -380,7 +380,14 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		})
 
 		var pkg models.Package
-		if err := config.DB.First(&pkg, customer.PackageID).Error; err == nil && customer.CreditBalance >= pkg.Price {
+		// 1. Try to find a package in this zone matching the exact transaction amount (e.g. KES 5)
+		if err := config.DB.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, body.TransAmount).First(&pkg).Error; err != nil {
+			// 2. Otherwise try matching against customer's assigned PackageID
+			config.DB.First(&pkg, customer.PackageID)
+		}
+
+		if pkg.ID > 0 && customer.CreditBalance >= pkg.Price {
+			customer.PackageID = pkg.ID
 			customer.CreditBalance -= pkg.Price
 			durationMinutes := 30 * 24 * 60
 			if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
@@ -398,6 +405,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 				newExpiry = customer.ExpiresAt.Add(time.Duration(durationMinutes) * time.Minute)
 			}
 			config.DB.Model(&customer).Updates(map[string]interface{}{
+				"package_id":     pkg.ID,
 				"credit_balance": customer.CreditBalance,
 				"expires_at":     newExpiry,
 				"status":         "active",
