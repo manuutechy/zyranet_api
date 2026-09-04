@@ -855,6 +855,11 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "No free tier plan is currently available in this zone.", "", fiber.StatusNotFound)
 	}
 
+	// Verify scheduled availability window (e.g. specific hours or days)
+	if available, reason := IsFreeTierAvailableNow(&pkg); !available {
+		return utils.ErrorResponse(c, reason, "Outside Scheduled Hours", fiber.StatusForbidden)
+	}
+
 	cooldownHours := pkg.FreeTierCooldownHours
 	if cooldownHours <= 0 {
 		cooldownHours = 24

@@ -1,12 +1,71 @@
 package handlers
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
 )
+
+// IsFreeTierAvailableNow checks whether a package with scheduled free tier hours is currently open.
+func IsFreeTierAvailableNow(pkg *models.Package) (bool, string) {
+	if !pkg.IsFreeTier && pkg.Price > 0 {
+		return false, "Not a free tier package."
+	}
+
+	loc, err := time.LoadLocation("Africa/Nairobi")
+	if err != nil {
+		loc = time.FixedZone("EAT", 3*3600)
+	}
+	now := time.Now().In(loc)
+
+	// Check day of week
+	weekday := now.Weekday() // 0 = Sunday, 6 = Saturday
+	if pkg.FreeTierDays == "weekdays" && (weekday == time.Saturday || weekday == time.Sunday) {
+		return false, "Free trial is only available on weekdays (Monday to Friday)."
+	}
+	if pkg.FreeTierDays == "weekends" && (weekday != time.Saturday && weekday != time.Sunday) {
+		return false, "Free trial is only available on weekends (Saturday & Sunday)."
+	}
+
+	// Check time of day window (HH:MM in 24-hour format)
+	if pkg.FreeTierStartTime != nil && *pkg.FreeTierStartTime != "" &&
+		pkg.FreeTierEndTime != nil && *pkg.FreeTierEndTime != "" {
+
+		startParts := strings.Split(strings.TrimSpace(*pkg.FreeTierStartTime), ":")
+		endParts := strings.Split(strings.TrimSpace(*pkg.FreeTierEndTime), ":")
+		if len(startParts) >= 2 && len(endParts) >= 2 {
+			startHour, _ := strconv.Atoi(startParts[0])
+			startMin, _ := strconv.Atoi(startParts[1])
+			endHour, _ := strconv.Atoi(endParts[0])
+			endMin, _ := strconv.Atoi(endParts[1])
+
+			currentMinuteOfDay := now.Hour()*60 + now.Minute()
+			startMinuteOfDay := startHour*60 + startMin
+			endMinuteOfDay := endHour*60 + endMin
+
+			if startMinuteOfDay <= endMinuteOfDay {
+				// E.g. 14:00 to 18:00
+				if currentMinuteOfDay < startMinuteOfDay || currentMinuteOfDay > endMinuteOfDay {
+					return false, fmt.Sprintf("Free trial is only available between %s and %s (EAT).", *pkg.FreeTierStartTime, *pkg.FreeTierEndTime)
+				}
+			} else {
+				// Overnight range e.g. 22:00 to 06:00
+				if currentMinuteOfDay < startMinuteOfDay && currentMinuteOfDay > endMinuteOfDay {
+					return false, fmt.Sprintf("Free trial is only available between %s and %s (EAT).", *pkg.FreeTierStartTime, *pkg.FreeTierEndTime)
+				}
+			}
+		}
+	}
+
+	return true, ""
+}
 
 // PackageIndex lists all packages (paginated with filters).
 func PackageIndex(c *fiber.Ctx) error {
@@ -48,7 +107,28 @@ func PackagePublic(c *fiber.Ctx) error {
 		query = query.Where("zone_id = ?", z)
 	}
 	query.Order("price ASC").Find(&pkgs)
-	return utils.SuccessResponse(c, pkgs, "")
+
+	type PublicPackageItem struct {
+		models.Package
+		IsAvailableNow bool   `json:"is_available_now"`
+		ScheduleReason string `json:"schedule_reason,omitempty"`
+	}
+
+	res := make([]PublicPackageItem, len(pkgs))
+	for i, p := range pkgs {
+		avail := true
+		reason := ""
+		if p.IsFreeTier || p.Price == 0 {
+			avail, reason = IsFreeTierAvailableNow(&p)
+		}
+		res[i] = PublicPackageItem{
+			Package:        p,
+			IsAvailableNow: avail,
+			ScheduleReason: reason,
+		}
+	}
+
+	return utils.SuccessResponse(c, res, "")
 }
 
 // PackageStore creates a new package.

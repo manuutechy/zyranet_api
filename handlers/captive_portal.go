@@ -79,12 +79,18 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 	var freePkg models.Package
 	var freeTierData interface{} = nil
 	if err := config.DB.Where("zone_id = ? AND status = ? AND (is_free_tier = ? OR price = 0)", zone.ID, "active", true).First(&freePkg).Error; err == nil {
+		available, scheduleReason := IsFreeTierAvailableNow(&freePkg)
 		freeTierData = fiber.Map{
 			"id":                  freePkg.ID,
 			"name":                freePkg.Name,
 			"time_limit_minutes":  freePkg.TimeLimitMinutes,
 			"speed_download_kbps": freePkg.SpeedDownloadKbps,
 			"cooldown_hours":      freePkg.FreeTierCooldownHours,
+			"start_time":          freePkg.FreeTierStartTime,
+			"end_time":            freePkg.FreeTierEndTime,
+			"days":                freePkg.FreeTierDays,
+			"is_available_now":    available,
+			"schedule_reason":     scheduleReason,
 		}
 	}
 

@@ -18,6 +18,9 @@ type Package struct {
 	Price                  float64        `gorm:"type:decimal(10,2);not null" json:"price"`
 	IsFreeTier             bool           `gorm:"default:false" json:"is_free_tier"`
 	FreeTierCooldownHours  int            `gorm:"default:24" json:"free_tier_cooldown_hours"`
+	FreeTierStartTime      *string        `gorm:"size:10" json:"free_tier_start_time"` // e.g. "14:00" in 24h format
+	FreeTierEndTime        *string        `gorm:"size:10" json:"free_tier_end_time"`   // e.g. "18:00" in 24h format
+	FreeTierDays           string         `gorm:"size:20;default:all" json:"free_tier_days"` // all | weekdays | weekends
 	TimeLimitMinutes       *int           `json:"time_limit_minutes"`
 	DataLimitMB            *int           `json:"data_limit_mb"`
 	SpeedUploadKbps        int            `gorm:"not null" json:"speed_upload_kbps"`
