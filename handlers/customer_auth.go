@@ -556,6 +556,8 @@ func buildCustomerProfile(c *models.Customer) fiber.Map {
 		"id":             c.ID,
 		"name":           displayName,
 		"phone":          c.Phone,
+		"account_number": c.AccountNumber,
+		"mac_address":    c.MacAddress,
 		"type":           c.Type,
 		"status":         c.Status,
 		"credit_balance": c.CreditBalance,

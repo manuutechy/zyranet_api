@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -511,3 +512,226 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 		settings["support_phone"],
 	)
 }
+
+// PaymentVerifyCode allows a customer or portal user to self-verify an M-Pesa transaction code
+// (e.g. from an STK push or direct Paybill payment) and instantly activate their internet session.
+func PaymentVerifyCode(c *fiber.Ctx) error {
+	var body struct {
+		Code string `json:"code"`
+		Mac  string `json:"mac"`
+		IP   string `json:"ip"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+
+	code := strings.ToUpper(strings.TrimSpace(body.Code))
+	if code == "" || len(code) < 6 {
+		return utils.ErrorResponse(c, "Please enter a valid M-Pesa transaction code.", "", fiber.StatusUnprocessableEntity)
+	}
+
+	// 1. Check completed or pending Payment records
+	var payment models.Payment
+	if err := config.DB.Preload("Package").Preload("Zone").Preload("Customer").
+		Where("UPPER(mpesa_receipt_number) = ? OR UPPER(mpesa_transaction_id) = ?", code, code).
+		Order("id DESC").
+		First(&payment).Error; err == nil {
+
+		if payment.Status == "completed" {
+			// Link MAC / device if provided and not yet associated
+			if body.Mac != "" && payment.Customer != nil {
+				payment.Customer.MacAddress = &body.Mac
+				config.DB.Model(payment.Customer).Update("mac_address", body.Mac)
+				if mikrotikSvcGlobal != nil && payment.Zone != nil && payment.Package != nil {
+					go mikrotikSvcGlobal.WhitelistMAC(payment.Zone, body.Mac, payment.Package)
+				}
+			}
+			return utils.SuccessResponse(c, payment, "Payment verified successfully.")
+		}
+
+		if payment.Status == "pending" {
+			return c.Status(fiber.StatusOK).JSON(fiber.Map{
+				"success": false,
+				"pending": true,
+				"message": "Payment is still processing with Safaricom. Give it a minute and try again.",
+			})
+		}
+
+		if payment.Status == "failed" {
+			reason := "Payment was not completed."
+			if payment.StatusReason != nil && *payment.StatusReason != "" {
+				reason = *payment.StatusReason
+			}
+			return utils.ErrorResponse(c, reason, "Payment failed.", fiber.StatusBadRequest)
+		}
+	}
+
+	// 2. Check UnmatchedC2BPayment (Paybill confirmation received, waiting to be claimed)
+	var unmatched models.UnmatchedC2BPayment
+	if err := config.DB.Where("UPPER(trans_id) = ?", code).First(&unmatched).Error; err == nil {
+		if unmatched.Status == "resolved" {
+			if unmatched.ResolvedPaymentID != nil {
+				var resPayment models.Payment
+				if err := config.DB.Preload("Package").Preload("Zone").First(&resPayment, *unmatched.ResolvedPaymentID).Error; err == nil {
+					return utils.SuccessResponse(c, resPayment, "Payment already verified.")
+				}
+			}
+			return utils.SuccessResponse(c, fiber.Map{"code": code}, "Payment already verified.")
+		}
+
+		// Pending unmatched payment! Reconcile immediately with the customer claiming it.
+		claims := middleware.OptionalCustomerClaims(c)
+		var customer models.Customer
+		foundCust := false
+
+		if claims != nil && claims.CustomerID > 0 {
+			if err := config.DB.First(&customer, claims.CustomerID).Error; err == nil {
+				foundCust = true
+			}
+		}
+
+		if !foundCust && body.Mac != "" {
+			if err := config.DB.Where("mac_address = ?", body.Mac).Order("id DESC").First(&customer).Error; err == nil {
+				foundCust = true
+			}
+		}
+
+		if !foundCust && unmatched.Phone != "" {
+			phoneSuffix := unmatched.Phone
+			if len(phoneSuffix) >= 9 {
+				phoneSuffix = phoneSuffix[len(phoneSuffix)-9:]
+			}
+			if err := config.DB.Where("phone LIKE ?", "%"+phoneSuffix).First(&customer).Error; err == nil {
+				foundCust = true
+			}
+		}
+
+		// Fallback: create fresh customer or link to latest guest
+		if !foundCust {
+			var guest models.Customer
+			if err := config.DB.Where("phone LIKE 'GUEST%'").Order("id DESC").First(&guest).Error; err == nil {
+				customer = guest
+				foundCust = true
+			} else {
+				customer = models.Customer{
+					Name:          "Customer " + code,
+					Phone:         unmatched.Phone,
+					ZoneID:        1,
+					Type:          "hotspot",
+					Status:        "active",
+					CreditBalance: 0,
+				}
+				if body.Mac != "" {
+					customer.MacAddress = &body.Mac
+				}
+				config.DB.Create(&customer)
+				foundCust = true
+			}
+		}
+
+		if body.Mac != "" {
+			customer.MacAddress = &body.Mac
+		}
+
+		// Credit customer balance
+		customer.CreditBalance += unmatched.Amount
+		config.DB.Model(&customer).Updates(map[string]interface{}{
+			"credit_balance": customer.CreditBalance,
+			"mac_address":    customer.MacAddress,
+		})
+
+		noteStr := fmt.Sprintf("M-Pesa C2B Paybill %s (Self-claimed via code verification)", unmatched.TransID)
+		config.DB.Create(&models.CreditLog{
+			CustomerID: customer.ID,
+			Amount:     unmatched.Amount,
+			Type:       "credit",
+			Note:       &noteStr,
+		})
+
+		// Auto-match package by exact amount in customer's zone
+		var pkg models.Package
+		if err := config.DB.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, unmatched.Amount).First(&pkg).Error; err != nil {
+			config.DB.First(&pkg, customer.PackageID)
+		}
+
+		var packageIDPtr *uint
+		if pkg.ID > 0 && customer.CreditBalance >= pkg.Price {
+			packageIDPtr = &pkg.ID
+			customer.PackageID = pkg.ID
+			customer.CreditBalance -= pkg.Price
+
+			durationMinutes := 30 * 24 * 60
+			if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+				durationMinutes = *pkg.TimeLimitMinutes
+			} else if pkg.BillingCycle == "hourly" {
+				durationMinutes = 60
+			} else if pkg.BillingCycle == "daily" {
+				durationMinutes = 24 * 60
+			} else if pkg.BillingCycle == "weekly" {
+				durationMinutes = 7 * 24 * 60
+			}
+
+			newExpiry := time.Now().Add(time.Duration(durationMinutes) * time.Minute)
+			if customer.ExpiresAt != nil && customer.ExpiresAt.After(time.Now()) {
+				newExpiry = customer.ExpiresAt.Add(time.Duration(durationMinutes) * time.Minute)
+			}
+
+			config.DB.Model(&customer).Updates(map[string]interface{}{
+				"package_id":     pkg.ID,
+				"credit_balance": customer.CreditBalance,
+				"expires_at":     newExpiry,
+				"status":         "active",
+			})
+
+			// Reactivate on MikroTik router
+			if mikrotikSvcGlobal != nil && customer.ZoneID > 0 {
+				var zone models.Zone
+				if err := config.DB.First(&zone, customer.ZoneID).Error; err == nil {
+					customer.Package = &pkg
+					go mikrotikSvcGlobal.ReactivateCustomer(&zone, &customer)
+				}
+			}
+		}
+
+		transIDStr := unmatched.TransID
+		custIDPtr := &customer.ID
+		newPayment := models.Payment{
+			CustomerID:         custIDPtr,
+			ZoneID:             customer.ZoneID,
+			PackageID:          packageIDPtr,
+			Phone:              unmatched.Phone,
+			Amount:             unmatched.Amount,
+			Currency:           "KES",
+			Method:             "mpesa_c2b",
+			Status:             "completed",
+			MpesaReceiptNumber: &transIDStr,
+			MpesaTransactionID: &transIDStr,
+		}
+		if body.Mac != "" {
+			newPayment.MacAddress = body.Mac
+		}
+		if body.IP != "" {
+			newPayment.IpAddress = body.IP
+		}
+		config.DB.Create(&newPayment)
+
+		now := time.Now()
+		config.DB.Model(&unmatched).Updates(map[string]interface{}{
+			"status":               "resolved",
+			"resolved_zone_id":     customer.ZoneID,
+			"resolved_customer_id": custIDPtr,
+			"resolved_payment_id":  newPayment.ID,
+			"resolved_at":          now,
+		})
+
+		return utils.SuccessResponse(c, newPayment, "Payment verified and service activated!")
+	}
+
+	// 3. Not found in records
+	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+		"success": false,
+		"pending": true,
+		"message": "We could not find an M-Pesa payment matching that code yet. If you just sent it, please give it a moment and try again.",
+	})
+}
+

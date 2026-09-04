@@ -62,12 +62,14 @@ func Register(app *fiber.App) {
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
 	v1.Post("/payments/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
 	v1.Post("/payments/callback", handlers.MpesaCallback)
+	v1.Post("/payments/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/c2b/confirmation", handlers.MpesaC2BConfirmation)
 
 	// Backwards-compatible aliases
 	v1.Post("/mpesa/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
 	v1.Post("/mpesa/callback", handlers.MpesaCallback)
+	v1.Post("/mpesa/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/mpesa/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/mpesa/c2b/confirmation", handlers.MpesaC2BConfirmation)
 
