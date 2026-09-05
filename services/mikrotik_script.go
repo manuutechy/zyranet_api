@@ -328,7 +328,7 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	// Ensure hotspot profile authentication methods
 	sb.WriteString("# --- Hotspot Authentication Methods ---\n")
 	sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot profile set [find default=yes] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n\n")
+	sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n\n")
 
 	// Ensure package profiles & auto-connect users
 	sb.WriteString("# --- Hotspot Package Profiles & Auto-Connect Users ---\n")
@@ -408,8 +408,13 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	// Active paid customers: bypass captive portal in IP-Binding + add to hotspot users
 	sb.WriteString("# --- Active Paid Subscriptions (Instant IP-Binding Bypass & Users) ---\n")
 	for mac, profileName := range activeBinds {
-		sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot ip-binding find mac-address=\"%s\"]] = 0) do={ /ip hotspot ip-binding add mac-address=\"%s\" type=bypassed comment=\"ZyraNet Paid Active\" } else={ /ip hotspot ip-binding set [find mac-address=\"%s\"] type=bypassed comment=\"ZyraNet Paid Active\" }\n", mac, mac, mac))
-		sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Active\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Active\" }\n", mac, mac, mac, profileName, mac, mac, profileName))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding add mac-address=\"%s\" type=bypassed comment=\"ZyraNet Paid Active\" } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot host remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", mac))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"\" profile=\"%s\" comment=\"ZyraNet Paid Active\" } on-error={}\n", mac, profileName))
 	}
 	sb.WriteString("\n")
 
