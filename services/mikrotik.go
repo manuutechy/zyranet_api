@@ -107,17 +107,31 @@ func isDisallowedRouterIP(ip net.IP) bool {
 
 // TestConnection tests connectivity to a zone's router.
 func (s *MikroTikService) TestConnection(zone *models.Zone) (map[string]interface{}, error) {
+	// First, check if router is reporting via outbound cloud telemetry heartbeat
+	var freshZone models.Zone
+	if dbErr := config.DB.First(&freshZone, zone.ID).Error; dbErr == nil {
+		if freshZone.LastSeenAt != nil && time.Since(*freshZone.LastSeenAt) < 3*time.Minute {
+			return map[string]interface{}{
+				"connected": true,
+				"success":   true,
+				"message":   "Router connected and reporting live telemetry via cloud heartbeat.",
+				"latency":   "Cloud Heartbeat Active",
+				"error":     nil,
+			}, nil
+		}
+	}
+
 	if err := validateRouterIP(zone.RouterIP); err != nil {
-		return map[string]interface{}{"connected": false, "error": err.Error()}, nil
+		return map[string]interface{}{"connected": false, "success": false, "message": err.Error(), "error": err.Error()}, nil
 	}
 
 	if zone.ConnectionType == "api" {
 		client, err := s.dialAPI(zone)
 		if err != nil {
-			return map[string]interface{}{"connected": false, "error": err.Error()}, nil
+			return map[string]interface{}{"connected": false, "success": false, "message": err.Error(), "error": err.Error()}, nil
 		}
 		client.Close()
-		return map[string]interface{}{"connected": true, "error": nil}, nil
+		return map[string]interface{}{"connected": true, "success": true, "message": "Direct RouterOS API connection successful.", "latency": "Direct API", "error": nil}, nil
 	}
 
 	// REST
@@ -127,13 +141,13 @@ func (s *MikroTikService) TestConnection(zone *models.Zone) (map[string]interfac
 	req.SetBasicAuth(strVal(zone.RouterUsername), strVal(zone.RouterPassword))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return map[string]interface{}{"connected": false, "error": err.Error()}, nil
+		return map[string]interface{}{"connected": false, "success": false, "message": err.Error(), "error": err.Error()}, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return map[string]interface{}{"connected": true, "error": nil}, nil
+		return map[string]interface{}{"connected": true, "success": true, "message": "Direct RouterOS REST connection successful.", "latency": "Direct REST", "error": nil}, nil
 	}
-	return map[string]interface{}{"connected": false, "error": fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	return map[string]interface{}{"connected": false, "success": false, "message": fmt.Sprintf("HTTP %d", resp.StatusCode), "error": fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
 }
 
 // GetStatus retrieves live router health statistics.
