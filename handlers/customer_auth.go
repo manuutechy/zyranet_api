@@ -881,13 +881,30 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 	// 2. Anti-abuse & Active Session check
 	var existingCustomer models.Customer
 	hasExisting := false
-	if body.Mac != "" {
-		if err := config.DB.Where("mac_address = ? AND package_id = ?", body.Mac, pkg.ID).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
+
+	cleanMac := strings.ToLower(strings.TrimSpace(body.Mac))
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
+
+	if cleanMac != "" {
+		if err := config.DB.Where(
+			"(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND (zone_id = ? OR account_number LIKE 'ZYR#FREE#%')",
+			cleanMac, cleanMac, pkg.ZoneID,
+		).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
 			hasExisting = true
 		}
 	}
+
+	// If no MAC match, check if customer is authenticated via session token / cookie
+	if !hasExisting {
+		if claims := middleware.OptionalCustomerClaims(c); claims != nil && claims.CustomerID > 0 {
+			if err := config.DB.First(&existingCustomer, claims.CustomerID).Error; err == nil {
+				hasExisting = true
+			}
+		}
+	}
+
 	if !hasExisting && body.Phone != "" {
-		if err := config.DB.Where("phone = ? AND package_id = ?", body.Phone, pkg.ID).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
+		if err := config.DB.Where("phone = ? AND (zone_id = ? OR account_number LIKE 'ZYR#FREE#%')", body.Phone, pkg.ZoneID).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
 			hasExisting = true
 		}
 	}
@@ -895,10 +912,10 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 	if hasExisting && !bypassCooldown {
 		// If the existing session is still valid (ExpiresAt in the future), resume seamlessly!
 		if existingCustomer.ExpiresAt != nil && existingCustomer.ExpiresAt.After(time.Now()) {
-			if pkg.Zone != nil && mikrotikSvcGlobal != nil && body.Mac != "" {
+			if pkg.Zone != nil && mikrotikSvcGlobal != nil && cleanMac != "" {
 				go func(z models.Zone, m string, p models.Package) {
 					_ = mikrotikSvcGlobal.WhitelistMAC(&z, m, &p)
-				}(*pkg.Zone, body.Mac, pkg)
+				}(*pkg.Zone, cleanMac, pkg)
 			}
 			token, _ := middleware.GenerateCustomerToken(existingCustomer.ID)
 			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
@@ -919,7 +936,9 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 		}
 
 		// Cooldown check for already-expired sessions
-		if existingCustomer.UpdatedAt.After(cooldownCutoff) {
+		if existingCustomer.CreatedAt.After(cooldownCutoff) ||
+			existingCustomer.UpdatedAt.After(cooldownCutoff) ||
+			(existingCustomer.ExpiresAt != nil && existingCustomer.ExpiresAt.After(cooldownCutoff)) {
 			return utils.ErrorResponse(c, fmt.Sprintf("You have already used your free trial. You can claim again after %d hours or purchase a package.", cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
 		}
 	}

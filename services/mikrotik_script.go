@@ -107,9 +107,9 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 
 	sb.WriteString("# --- Hotspot Server Setup (Overload-Protected & Instant Direct-IP Redirection) ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /ip dns static remove [find name=\"login.zyranet.lan\"] } on-error={}\n"))
-	sb.WriteString(fmt.Sprintf(":do { /ip dns static add name=login.zyranet.lan address=%s comment=\"Zyra Net Local Hotspot Gateway\" } on-error={}\n", gatewayIP))
-	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-pap,http-chap,mac,cookie,mac-cookie split-user-domain=no dns-name=\"\" } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-pap,http-chap,mac,cookie,mac-cookie split-user-domain=no dns-name=\"\" }\n", gatewayIP, gatewayIP))
-	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n\n")
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-pap,http-chap split-user-domain=no dns-name=\"\" } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-pap,http-chap split-user-domain=no dns-name=\"\" }\n", gatewayIP, gatewayIP))
+	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n")
+	sb.WriteString(":do { /ip hotspot cookie remove [find] } on-error={}\n\n")
 
 	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden (HTTP & HTTPS)
 	// NOTE: Do NOT whitelist *gstatic.com or connectivity probes wildcard, as Android/iOS CNA detection depends on intercepting those HTTP probes!
@@ -188,7 +188,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 			sharedUsers = 500 * pkg.DeviceLimit
 		}
 		sb.WriteString(fmt.Sprintf(
-			":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d }\n",
+			":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no }\n",
 			profileName, profileName, rateLimit, timeout, sharedUsers, profileName, rateLimit, timeout, sharedUsers,
 		))
 		sb.WriteString(fmt.Sprintf(
@@ -198,9 +198,9 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	}
 	sb.WriteString("\n")
 
-	// Free Tier Instant Auto-Connect User & Profile (with 20Mbps Burst)
+	// Free Tier Instant Auto-Connect User & Profile (with 20Mbps Burst, no MAC cookie bypass)
 	sb.WriteString("# --- Free Tier Auto-Connect User & Profile (20Mbps Burst) ---\n")
-	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 }\n")
+	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no }\n")
 	sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
 
 	// Hotspot Users (from vouchers)
