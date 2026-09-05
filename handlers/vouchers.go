@@ -147,8 +147,9 @@ func VoucherRedeem(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
 	}
 	if body.Phone == "" {
-		body.Phone = utils.FormatPhone("0113297270") // fallback
+		return utils.ErrorResponse(c, "Phone number is required.", "", fiber.StatusUnprocessableEntity)
 	}
+	body.Phone = utils.FormatPhone(body.Phone)
 
 	result, err := voucherSvcGlobal.Redeem(body.Code, body.Phone)
 	if err != nil {

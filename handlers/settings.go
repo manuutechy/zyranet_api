@@ -20,7 +20,7 @@ var settingDefaults = map[string]string{
 	"company_name":           "Zyra Net ISP",
 	"logo":                   "",
 	"primary_color":          "#f97316",
-	"support_phone":          "0113297270",
+	"support_phone":          "",
 	"support_whatsapp":       "",
 	"mpesa_environment":      "sandbox",
 	"mpesa_consumer_key":     "",
