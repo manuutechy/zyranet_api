@@ -90,7 +90,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(fmt.Sprintf(":do { /ip dhcp-server network add address=%s gateway=%s dns-server=8.8.8.8,8.8.4.4 comment=\"Zyra Net Hotspot Network\" } on-error={}\n\n", networkCIDR, gatewayIP))
 
 	sb.WriteString("# --- Hotspot Server Setup (Overload-Protected) ---\n")
-	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan }\n", gatewayIP, gatewayIP))
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie split-user-domain=no dns-name=login.zyranet.lan } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-chap,cookie,mac-cookie split-user-domain=no dns-name=login.zyranet.lan }\n", gatewayIP, gatewayIP))
 	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n\n")
 
 	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden
@@ -203,6 +203,9 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 			username, username, password, profileName, c.ID, username, password, profileName, c.ID,
 		))
 	}
+
+	sb.WriteString("\n# --- Trigger Cloud Heartbeat Immediately ---\n")
+	sb.WriteString(":do { /system script run zyranet-heartbeat } on-error={}\n")
 
 	filename := fmt.Sprintf("zone-%s-%s.rsc",
 		strings.ReplaceAll(strings.ToLower(zone.Name), " ", "-"),
