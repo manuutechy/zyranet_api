@@ -114,7 +114,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	// Scheduled heartbeat to report router online health every 1 minute
 	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-heartbeat\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d\\\" mode=https keep-result=no\" comment=\"Zyra Net Cloud Telemetry\" } on-error={}\n", zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\":local cpu [/system resource get cpu-load]; :local fmem [/system resource get free-memory]; :local tmem [/system resource get total-memory]; :local upt [/system resource get uptime]; :local brd [/system resource get board-name]; :local ver [/system resource get version]; :local clients [:len [/ip hotspot active find]]; :local url (\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?cpu=\\\" . $cpu . \\\"&freemem=\\\" . $fmem . \\\"&totalmem=\\\" . $tmem . \\\"&uptime=\\\" . $upt . \\\"&board=\\\" . $brd . \\\"&version=\\\" . $ver . \\\"&clients=\\\" . $clients); :do { /tool fetch url=$url mode=https keep-result=no } on-error={}\" comment=\"Zyra Net Cloud Telemetry\" } on-error={}\n", zone.ID))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-heartbeat-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-heartbeat-sched interval=1m on-event=zyranet-heartbeat comment=\"Zyra Net Cloud Telemetry Scheduler\" } on-error={}\n\n")
 

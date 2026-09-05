@@ -146,11 +146,51 @@ func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
 		status, err = s.getStatusREST(zone)
 	}
 
-	// Local dev zones don't have a real reachable MikroTik behind them —
-	// same APP_ENV=local convenience used elsewhere (e.g. HotspotSession)
-	// so the admin dashboard reflects a healthy fleet without real hardware.
-	if status != nil && !status.Online && config.Config.AppEnv == "local" {
-		return s.mockOnlineStatus(zone), nil
+	// If direct dial failed (normal for routers behind NAT/CGNAT or private IPs),
+	// check if the router is actively reporting via cloud telemetry heartbeat
+	if status != nil && !status.Online {
+		var freshZone models.Zone
+		if dbErr := config.DB.First(&freshZone, zone.ID).Error; dbErr == nil {
+			if freshZone.LastSeenAt != nil && time.Since(*freshZone.LastSeenAt) < 3*time.Minute {
+				var latestStat models.ZoneStat
+				config.DB.Where("zone_id = ?", zone.ID).Order("recorded_at DESC").First(&latestStat)
+
+				var activeCount int64
+				config.DB.Model(&models.Session{}).Where("zone_id = ? AND ended_at IS NULL", zone.ID).Count(&activeCount)
+				if latestStat.ConnectedClients > int(activeCount) {
+					activeCount = int64(latestStat.ConnectedClients)
+				}
+
+				cpuLoad := latestStat.CPULoad
+				memUsed := latestStat.MemoryUsedMB
+				memTotal := latestStat.MemoryTotalMB
+				if memTotal == 0 {
+					memTotal = 128
+				}
+
+				boardName := freshZone.RouterName
+				if boardName == "" || boardName == "Default Router" {
+					boardName = "MikroTik RB951Ui"
+				}
+
+				return &RouterStatus{
+					Online:           true,
+					Uptime:           "Online (Cloud Telemetry)",
+					CPULoad:          cpuLoad,
+					MemoryUsedMB:     memUsed,
+					MemoryTotalMB:    memTotal,
+					ConnectedClients: int(activeCount),
+					BoardName:        boardName,
+					RouterOSVersion:  "RouterOS (Cloud Managed)",
+					LastSeenAt:       freshZone.LastSeenAt.UTC().Format(time.RFC3339),
+				}, nil
+			}
+		}
+
+		// Local dev zones don't have a real reachable MikroTik behind them
+		if config.Config.AppEnv == "local" {
+			return s.mockOnlineStatus(zone), nil
+		}
 	}
 	return status, err
 }

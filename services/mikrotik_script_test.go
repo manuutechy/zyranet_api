@@ -3,6 +3,7 @@ package services
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zyranet/zyranet-api/models"
 )
@@ -61,5 +62,51 @@ func TestGenerateScript_IdempotencyAndBridgePortRemoval(t *testing.T) {
 		if !strings.Contains(script, snippet) {
 			t.Errorf("script missing expected snippet:\n%s\nFull script:\n%s", snippet, script)
 		}
+	}
+}
+
+func TestGetStatus_HeartbeatTelemetryFallback(t *testing.T) {
+	db := setupTestDB(t)
+
+	now := time.Now()
+	zone := models.Zone{
+		Name:           "Telemetry Zone",
+		Location:       "Nairobi",
+		RouterName:     "RB951Ui-2HnD",
+		RouterIP:       "10.100.0.1",
+		LastSeenAt:     &now,
+		LastStatus:     "online",
+		ConnectionType: "api",
+	}
+	if err := db.Create(&zone).Error; err != nil {
+		t.Fatalf("failed to create zone: %v", err)
+	}
+
+	stat := models.ZoneStat{
+		ZoneID:           zone.ID,
+		CPULoad:          14,
+		MemoryUsedMB:     45,
+		MemoryTotalMB:    128,
+		ConnectedClients: 3,
+		RecordedAt:       now,
+	}
+	db.Create(&stat)
+
+	svc := NewMikroTikService()
+	status, err := svc.GetStatus(&zone)
+	if err != nil {
+		t.Fatalf("GetStatus unexpected error: %v", err)
+	}
+	if status == nil || !status.Online {
+		t.Fatalf("expected status.Online to be true from heartbeat telemetry, got: %+v", status)
+	}
+	if status.CPULoad != 14 {
+		t.Errorf("expected CPULoad 14, got %d", status.CPULoad)
+	}
+	if status.ConnectedClients != 3 {
+		t.Errorf("expected ConnectedClients 3, got %d", status.ConnectedClients)
+	}
+	if status.BoardName != "RB951Ui-2HnD" {
+		t.Errorf("expected BoardName RB951Ui-2HnD, got %s", status.BoardName)
 	}
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -84,10 +85,46 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
-	config.DB.Model(&zone).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"last_seen_at": &now,
 		"last_status":  "online",
-	})
+	}
+
+	// Update router IP if it was unconfigured or a private placeholder (learn real public IP)
+	clientIP := c.IP()
+	if clientIP != "" && clientIP != "127.0.0.1" && (zone.RouterIP == "" || zone.RouterIP == "10.100.0.1" || strings.HasPrefix(zone.RouterIP, "10.") || strings.HasPrefix(zone.RouterIP, "192.168.")) {
+		updates["router_ip"] = clientIP
+	}
+
+	board := strings.TrimSpace(c.Query("board"))
+	if board != "" && (zone.RouterName == "" || zone.RouterName == "Default Router") {
+		updates["router_name"] = board
+	}
+
+	config.DB.Model(&zone).Updates(updates)
+
+	// Ingest live telemetry metrics if sent in query string
+	cpuLoad := c.QueryInt("cpu", -1)
+	totalMemBytes := c.QueryInt("totalmem", 0)
+	freeMemBytes := c.QueryInt("freemem", 0)
+	clients := c.QueryInt("clients", 0)
+
+	if cpuLoad >= 0 || totalMemBytes > 0 || clients > 0 {
+		memTotalMB := totalMemBytes / (1024 * 1024)
+		memUsedMB := (totalMemBytes - freeMemBytes) / (1024 * 1024)
+		if cpuLoad < 0 {
+			cpuLoad = 0
+		}
+		stat := models.ZoneStat{
+			ZoneID:           zone.ID,
+			CPULoad:          cpuLoad,
+			MemoryUsedMB:     memUsedMB,
+			MemoryTotalMB:    memTotalMB,
+			ConnectedClients: clients,
+			RecordedAt:       now,
+		}
+		config.DB.Create(&stat)
+	}
 
 	return utils.SuccessResponse(c, fiber.Map{
 		"status":    "ok",
