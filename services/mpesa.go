@@ -321,6 +321,15 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	callbackURL := creds.CallbackURL
 	env := creds.Env
 
+	// Ensure callback URL carries secret token if configured so Safaricom webhooks are never rejected
+	if config.Config.MpesaCallbackSecret != "" && !strings.Contains(callbackURL, "token=") {
+		sep := "?"
+		if strings.Contains(callbackURL, "?") {
+			sep = "&"
+		}
+		callbackURL = fmt.Sprintf("%s%stoken=%s", callbackURL, sep, config.Config.MpesaCallbackSecret)
+	}
+
 	token, err := s.GetAccessToken(creds)
 	if err != nil {
 		if strings.ToLower(env) != "production" || config.Config.AppEnv == "local" {
@@ -411,7 +420,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 
 	client := s.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -867,7 +876,7 @@ func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string)
 
 	client := s.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 6 * time.Second}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -902,14 +911,14 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 	// (800ms) polling loop was firing the very first reconciliation query
 	// ~1-3s after every push and permanently failing every real payment
 	// before the customer had a chance to respond.
-	if time.Since(payment.CreatedAt) < 12*time.Second {
+	if time.Since(payment.CreatedAt) < 3*time.Second {
 		return "pending", nil
 	}
 
-	// Throttling check: only query Safaricom at most once every 5 seconds per checkout ID
+	// Throttling check: only query Safaricom at most once every 2 seconds per checkout ID
 	now := time.Now()
 	if val, ok := s.queryThrottles.Load(checkoutID); ok {
-		if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) < 5*time.Second {
+		if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) < 2*time.Second {
 			return payment.Status, nil
 		}
 	}
