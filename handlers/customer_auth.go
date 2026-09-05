@@ -494,6 +494,13 @@ func CustomerReconnect(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "No active subscription found or Zone not configured.", "", fiber.StatusBadRequest)
 	}
 
+	// Strictly enforce wall-clock expiry (e.g. bought at 7am for 1h, expires at 8am sharp)
+	if customer.ExpiresAt != nil && customer.ExpiresAt.Before(time.Now()) {
+		customer.Status = "expired"
+		config.DB.Model(&customer).Update("status", "expired")
+		return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", customer.ExpiresAt.Local().Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
+	}
+
 	// Whitelist MAC address on the zone's router (best-effort push)
 	if mikrotikSvc != nil {
 		err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)

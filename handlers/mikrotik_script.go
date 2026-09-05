@@ -125,3 +125,32 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 		"timestamp": now.Unix(),
 	}, "Heartbeat acknowledged.")
 }
+
+// PublicZoneSync generates dynamic RouterOS commands to drop expired customer sessions
+func PublicZoneSync(c *fiber.Ctx) error {
+	var zone models.Zone
+	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
+		return c.SendString("# Zone not found\n")
+	}
+
+	now := time.Now()
+	var expiredCustomers []models.Customer
+	config.DB.Where("zone_id = ? AND expires_at IS NOT NULL AND expires_at < ? AND status = ?", zone.ID, now, "active").Find(&expiredCustomers)
+
+	var sb strings.Builder
+	sb.WriteString("# Zyra Net Auto-Sync & Session Decommissioner\n")
+
+	for _, cust := range expiredCustomers {
+		config.DB.Model(&cust).Update("status", "expired")
+		if cust.MacAddress != nil && *cust.MacAddress != "" {
+			mac := strings.ToUpper(strings.TrimSpace(*cust.MacAddress))
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot host remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+		}
+	}
+
+	c.Set("Content-Type", "text/plain; charset=utf-8")
+	return c.SendString(sb.String())
+}
+
