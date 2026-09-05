@@ -65,32 +65,33 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		ipPoolRange = fmt.Sprintf("%s.%s.%s.10-%s.%s.%s.254", ipOctets[0], ipOctets[1], ipOctets[2], ipOctets[0], ipOctets[1], ipOctets[2])
 	}
 
-	sb.WriteString("# --- Bridge & LAN Ports Configuration ---\n")
-	sb.WriteString(":if ([:len [/interface bridge find name=\"bridge-hotspot\"]] = 0) do={ /interface bridge add name=bridge-hotspot comment=\"Zyra Net Hotspot Bridge\" disabled=no }\n")
+	sb.WriteString("# --- Bridge & LAN Interface Setup ---\n")
+	sb.WriteString(":local br \"bridge\";\n")
+	sb.WriteString(":if ([:len [/interface bridge find name=\"bridge\"]] = 0) do={\n")
+	sb.WriteString("  :set br \"bridge-hotspot\";\n")
+	sb.WriteString("  :if ([:len [/interface bridge find name=\"bridge-hotspot\"]] = 0) do={ /interface bridge add name=bridge-hotspot comment=\"Zyra Net Hotspot Bridge\" disabled=no }\n")
 	portsList := strings.Split(lanPorts, ",")
 	for _, port := range portsList {
 		port = strings.TrimSpace(port)
 		if port != "" {
-			// Safely remove port from any existing bridge (e.g. factory default bridge) before attaching to bridge-hotspot
-			sb.WriteString(fmt.Sprintf(":do { /interface bridge port remove [find interface=\"%s\"] } on-error={}\n", port))
-			sb.WriteString(fmt.Sprintf(":do { /interface bridge port add bridge=bridge-hotspot interface=\"%s\" } on-error={}\n", port))
+			sb.WriteString(fmt.Sprintf("  :do { /interface bridge port add bridge=bridge-hotspot interface=%s } on-error={}\n", port))
 		}
 	}
-	sb.WriteString("\n")
+	sb.WriteString("}\n\n")
 
 	sb.WriteString("# --- IP Address & Gateway Configuration ---\n")
 	sb.WriteString(":do { /ip address remove [find comment=\"Zyra Net Hotspot Gateway\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /ip address add address=%s interface=bridge-hotspot comment=\"Zyra Net Hotspot Gateway\" } on-error={}\n\n", hotspotAddr))
+	sb.WriteString(fmt.Sprintf(":do { /ip address add address=%s interface=$br comment=\"Zyra Net Hotspot Gateway\" } on-error={}\n\n", hotspotAddr))
 
 	sb.WriteString("# --- IP Pool & DHCP Server Configuration ---\n")
 	sb.WriteString(fmt.Sprintf(":if ([:len [/ip pool find name=\"hs-pool-zyranet\"]] = 0) do={ /ip pool add name=hs-pool-zyranet ranges=%s } else={ /ip pool set [find name=\"hs-pool-zyranet\"] ranges=%s }\n", ipPoolRange, ipPoolRange))
-	sb.WriteString(":if ([:len [/ip dhcp-server find name=\"hs-dhcp-zyranet\"]] = 0) do={ /ip dhcp-server add name=hs-dhcp-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet disabled=no lease-time=1h } else={ /ip dhcp-server set [find name=\"hs-dhcp-zyranet\"] interface=bridge-hotspot address-pool=hs-pool-zyranet disabled=no lease-time=1h }\n")
+	sb.WriteString(":if ([:len [/ip dhcp-server find name=\"hs-dhcp-zyranet\"]] = 0) do={ /ip dhcp-server add name=hs-dhcp-zyranet interface=$br address-pool=hs-pool-zyranet disabled=no lease-time=1h } else={ /ip dhcp-server set [find name=\"hs-dhcp-zyranet\"] interface=$br address-pool=hs-pool-zyranet disabled=no lease-time=1h }\n")
 	sb.WriteString(":do { /ip dhcp-server network remove [find comment=\"Zyra Net Hotspot Network\"] } on-error={}\n")
 	sb.WriteString(fmt.Sprintf(":do { /ip dhcp-server network add address=%s gateway=%s dns-server=8.8.8.8,8.8.4.4 comment=\"Zyra Net Hotspot Network\" } on-error={}\n\n", networkCIDR, gatewayIP))
 
 	sb.WriteString("# --- Hotspot Server Setup (Overload-Protected) ---\n")
 	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-chap,cookie,mac-cookie mac-cookie-timeout=1d split-user-domain=no dns-name=login.zyranet.lan }\n", gatewayIP, gatewayIP))
-	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=bridge-hotspot address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n\n")
+	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n\n")
 
 	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden
 	sb.WriteString("# --- Walled Garden: allow cloud captive portal, API, M-Pesa, and assets ---\n")
@@ -180,7 +181,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 
 	// PPPoE Server Setup
 	sb.WriteString("# --- PPPoE Server Setup ---\n")
-	sb.WriteString(":if ([:len [/interface pppoe-server server find service-name=\"pppoe-zyranet\"]] = 0) do={ /interface pppoe-server server add service-name=pppoe-zyranet interface=bridge-hotspot default-profile=default authentication=pap,chap disabled=no }\n\n")
+	sb.WriteString(":if ([:len [/interface pppoe-server server find service-name=\"pppoe-zyranet\"]] = 0) do={ /interface pppoe-server server add service-name=pppoe-zyranet interface=$br default-profile=default authentication=pap,chap disabled=no }\n\n")
 
 	// PPPoE Secrets
 	sb.WriteString("# --- PPPoE Secrets ---\n")

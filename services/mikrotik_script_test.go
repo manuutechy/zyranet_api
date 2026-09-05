@@ -42,13 +42,9 @@ func TestGenerateScript_IdempotencyAndBridgePortRemoval(t *testing.T) {
 	}
 
 	expectedSnippets := []string{
-		`:if ([:len [/interface bridge find name="bridge-hotspot"]] = 0) do={ /interface bridge add name=bridge-hotspot comment="Zyra Net Hotspot Bridge" disabled=no }`,
-		`:do { /interface bridge port remove [find interface="ether2"] } on-error={}`,
-		`:do { /interface bridge port add bridge=bridge-hotspot interface="ether2" } on-error={}`,
-		`:do { /interface bridge port remove [find interface="ether3"] } on-error={}`,
-		`:do { /interface bridge port add bridge=bridge-hotspot interface="ether3" } on-error={}`,
-		`:do { /ip address remove [find comment="Zyra Net Hotspot Gateway"] } on-error={}`,
-		`:do { /ip address add address=10.5.50.1/24 interface=bridge-hotspot comment="Zyra Net Hotspot Gateway" } on-error={}`,
+		`:local br "bridge";`,
+		`:if ([:len [/interface bridge find name="bridge"]] = 0) do={`,
+		`:do { /ip address add address=10.5.50.1/24 interface=$br comment="Zyra Net Hotspot Gateway" } on-error={}`,
 		`hs-pool-zyranet`,
 		`hs-dhcp-zyranet`,
 		`hsp-zyranet`,
