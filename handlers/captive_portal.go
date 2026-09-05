@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -203,13 +202,9 @@ func ZoneCaptiveLoginHTML(c *fiber.Ctx) error {
 	}
 
 	portalHost := "https://captive.zyranet.co.ke"
-	gatewayIP := "10.5.50.1"
-	if zone.HotspotAddress != "" {
-		gatewayIP = strings.TrimSpace(strings.Split(zone.HotspotAddress, "/")[0])
-	}
 	redirectURL := fmt.Sprintf(
-		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=http://%s/login&link-orig=$(link-orig-esc)#/dashboard",
-		portalHost, zone.ID, gatewayIP,
+		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)#/dashboard",
+		portalHost, zone.ID,
 	)
 
 	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Zyra Net</title><meta http-equiv="refresh" content="0; url=%s"><script>window.location.replace(%q);</script><style>html,body{background:#0b0f19;margin:0;height:100%%;overflow:hidden;}</style></head><body><script>window.location.replace(%q);</script></body></html>`, redirectURL, redirectURL, redirectURL)

@@ -721,11 +721,17 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	if customer != nil {
 		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
 		custUpdates := map[string]interface{}{
-			"status":      "active",
-			"package_id":  pkg.ID,
-			"zone_id":     pkg.ZoneID,
-			"mac_address": payment.MacAddress,
-			"expires_at":  expiresAt,
+			"status":     "active",
+			"package_id": pkg.ID,
+			"expires_at": expiresAt,
+		}
+		if payment.MacAddress != "" {
+			custUpdates["mac_address"] = payment.MacAddress
+		}
+		if payment.ZoneID > 0 {
+			custUpdates["zone_id"] = payment.ZoneID
+		} else if pkg.ZoneID > 0 {
+			custUpdates["zone_id"] = pkg.ZoneID
 		}
 
 		if phone != "" && (customer.Phone == "" || strings.HasPrefix(customer.Phone, "GUEST")) {

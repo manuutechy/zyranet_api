@@ -80,6 +80,19 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		}
 	}
 
+	if body.CustomerID != nil {
+		var owner models.Customer
+		if err := config.DB.First(&owner, *body.CustomerID).Error; err == nil {
+			if body.Mac == "" && owner.MacAddress != nil {
+				body.Mac = *owner.MacAddress
+			}
+			if body.Mac != "" && (owner.MacAddress == nil || *owner.MacAddress == "") {
+				owner.MacAddress = &body.Mac
+				config.DB.Model(&owner).Update("mac_address", body.Mac)
+			}
+		}
+	}
+
 	if body.CustomerID != nil && strings.TrimSpace(body.Name) != "" {
 		trimmedName := strings.TrimSpace(body.Name)
 		config.DB.Model(&models.Customer{}).Where("id = ?", *body.CustomerID).Update("name", trimmedName)

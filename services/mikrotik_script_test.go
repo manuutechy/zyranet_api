@@ -107,3 +107,55 @@ func TestGetStatus_HeartbeatTelemetryFallback(t *testing.T) {
 		t.Errorf("expected BoardName RB951Ui-2HnD, got %s", status.BoardName)
 	}
 }
+
+func TestGenerateSyncScript(t *testing.T) {
+	db := setupTestDB(t)
+
+	now := time.Now()
+	expiry := now.Add(24 * time.Hour)
+	zone := models.Zone{
+		Name:           "Sync Zone",
+		Location:       "Nairobi",
+		OrganizationID: 1,
+	}
+	db.Create(&zone)
+
+	pkg := models.Package{
+		ZoneID:            zone.ID,
+		Name:              "Daily Fast",
+		Type:              "hotspot",
+		Status:            "active",
+		SpeedUploadKbps:   5000,
+		SpeedDownloadKbps: 10000,
+	}
+	db.Create(&pkg)
+
+	mac := "00:11:22:33:44:55"
+	cust := models.Customer{
+		Name:          "John Doe",
+		Phone:         "254712345678",
+		ZoneID:        zone.ID,
+		Type:          "hotspot",
+		Status:        "active",
+		PackageID:     pkg.ID,
+		MacAddress:    &mac,
+		ExpiresAt:     &expiry,
+	}
+	db.Create(&cust)
+
+	svc := NewMikroTikScriptService()
+	script, err := svc.GenerateSyncScript(zone.ID)
+	if err != nil {
+		t.Fatalf("GenerateSyncScript failed: %v", err)
+	}
+
+	if !strings.Contains(script, "00:11:22:33:44:55") {
+		t.Errorf("expected script to contain customer MAC 00:11:22:33:44:55, got:\n%s", script)
+	}
+	if !strings.Contains(script, "type=bypassed") {
+		t.Errorf("expected script to contain type=bypassed, got:\n%s", script)
+	}
+	if !strings.Contains(script, "login-by=mac,http-pap,http-chap") {
+		t.Errorf("expected script to contain login-by=mac,http-pap,http-chap, got:\n%s", script)
+	}
+}
