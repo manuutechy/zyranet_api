@@ -205,7 +205,7 @@ func ZoneCaptiveLoginHTML(c *fiber.Ctx) error {
 	portalHost := "https://captive.zyranet.co.ke"
 	gatewayIP := "10.5.50.1"
 	if zone.HotspotAddress != "" {
-		gatewayIP = strings.TrimSpace(zone.HotspotAddress)
+		gatewayIP = strings.TrimSpace(strings.Split(zone.HotspotAddress, "/")[0])
 	}
 	redirectURL := fmt.Sprintf(
 		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=http://%s/login&link-orig=$(link-orig-esc)#/dashboard",
