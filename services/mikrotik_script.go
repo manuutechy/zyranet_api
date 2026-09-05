@@ -129,17 +129,18 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=api.safaricom.co.ke action=accept comment=\"Safaricom API HTTPS\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=daraja.safaricom.co.ke action=accept comment=\"Safaricom Daraja HTTPS\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=fonts.googleapis.com action=accept comment=\"Google Fonts HTTPS\" } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=fonts.gstatic.com action=accept comment=\"Google Static Fonts HTTPS\" } on-error={}\n")
-	// Clean up any old wildcard gstatic IP rules
-	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host=\"*gstatic.com\"] } on-error={}\n\n")
+	// Clean up any gstatic rules that break Android CNA detection
+	sb.WriteString(":do { /ip hotspot walled-garden remove [find dst-host~\"gstatic\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host~\"gstatic\"] } on-error={}\n\n")
 
 	// WAN NAT Masquerade
 	sb.WriteString("# --- Firewall NAT (Internet Access Masquerade) ---\n")
 	sb.WriteString(":if ([:len [/ip firewall nat find comment=\"Zyra Net Internet Access NAT\"]] = 0) do={ /ip firewall nat add chain=srcnat action=masquerade comment=\"Zyra Net Internet Access NAT\" }\n\n")
 
-	// Auto-fetch login.html directly to the router's /hotspot directory so manual file upload is not needed
-	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html ---\n")
-	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n\n", zone.ID))
+	// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
+	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
+	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n", zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
 
 	// Scheduled heartbeat to report router online health every 1 minute
 	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
