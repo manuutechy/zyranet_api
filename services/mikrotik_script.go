@@ -155,7 +155,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	// Scheduled heartbeat & Wall-Clock Session Decommissioner (1-Min Interval)
 	sb.WriteString("# --- Live Health, Telemetry & Wall-Clock Session Decommissioner (1-Min Interval) ---\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-heartbeat\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :do { /import zyra-sync.rsc; /file remove zyra-sync.rsc } on-error={}; /tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d\\\" mode=https keep-result=no\" comment=\"Zyra Net Cloud Telemetry & Sync\" } on-error={}\n", zone.ID, zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; /tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d\\\" mode=https keep-result=no\" comment=\"Zyra Net Cloud Telemetry & Sync\" } on-error={}\n", zone.ID, zone.ID))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-heartbeat-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-heartbeat-sched interval=1m on-event=zyranet-heartbeat comment=\"Zyra Net Cloud Telemetry Scheduler\" } on-error={}\n\n")
 
