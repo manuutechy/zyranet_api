@@ -165,6 +165,11 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	}
 	sb.WriteString("\n")
 
+	// Free Tier Instant Auto-Connect User & Profile
+	sb.WriteString("# --- Free Tier Auto-Connect User & Profile ---\n")
+	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 }\n")
+	sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
+
 	// Hotspot Users (from vouchers)
 	sb.WriteString("# --- Hotspot Users (Vouchers) ---\n")
 	for _, v := range vouchers {

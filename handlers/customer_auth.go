@@ -494,23 +494,27 @@ func CustomerReconnect(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "No active subscription found or Zone not configured.", "", fiber.StatusBadRequest)
 	}
 
-	// Whitelist MAC address on the zone's router
+	// Whitelist MAC address on the zone's router (best-effort push)
 	if mikrotikSvc != nil {
 		err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)
 		if err != nil {
-			log.Printf("[Reconnect] Failed to whitelist MAC %s: %v", body.Mac, err)
-			if config.Config.AppEnv != "local" {
-				return utils.ErrorResponse(c, err.Error(), "Failed to authorize device on router.", fiber.StatusInternalServerError)
-			}
+			log.Printf("[Reconnect] Note: direct router whitelist for MAC %s returned: %v (client will authenticate via hotspot login form)", body.Mac, err)
 		}
 	} else {
 		log.Printf("[Reconnect] Warning: mikrotikSvc is nil, skipping router whitelist in local/test environment.")
 	}
 
+	loginUser := body.Mac
+	loginPass := body.Mac
+	if customer.Package != nil && (customer.Package.IsFreeTier || customer.Package.Price == 0) {
+		loginUser = "free"
+		loginPass = "free"
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"success":  true,
-		"username": body.Mac,
-		"password": body.Mac,
+		"username": loginUser,
+		"password": loginPass,
 		"message":  "Device authorized successfully.",
 	}, "Reconnected.")
 }
