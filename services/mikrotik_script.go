@@ -93,8 +93,8 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-chap,cookie,mac-cookie split-user-domain=no dns-name=login.zyranet.lan } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-chap,cookie,mac-cookie split-user-domain=no dns-name=login.zyranet.lan }\n", gatewayIP, gatewayIP))
 	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n\n")
 
-	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden
-	sb.WriteString("# --- Walled Garden: allow cloud captive portal, API, M-Pesa, and assets ---\n")
+	// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden (HTTP & HTTPS)
+	sb.WriteString("# --- Walled Garden: allow cloud captive portal, API, M-Pesa, and assets (HTTP & HTTPS) ---\n")
 	sb.WriteString(":do { /ip hotspot walled-garden remove [find comment=\"Zyra Net Cloud\"] } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden add dst-host=*zyranet.co.ke action=allow comment=\"Zyra Net Cloud\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden remove [find comment=\"Safaricom Daraja\"] } on-error={}\n")
@@ -102,7 +102,17 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /ip hotspot walled-garden remove [find comment=\"Google Fonts\"] } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden add dst-host=*googleapis.com action=allow comment=\"Google Fonts\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden remove [find comment=\"Google Static\"] } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden add dst-host=*gstatic.com action=allow comment=\"Google Static\" } on-error={}\n\n")
+	sb.WriteString(":do { /ip hotspot walled-garden add dst-host=*gstatic.com action=allow comment=\"Google Static\" } on-error={}\n")
+
+	// Walled Garden IP for HTTPS (port 443)
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Zyra Net Cloud HTTPS\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*zyranet.co.ke action=accept comment=\"Zyra Net Cloud HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Safaricom Daraja HTTPS\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*safaricom.co.ke action=accept comment=\"Safaricom Daraja HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Google Fonts HTTPS\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*googleapis.com action=accept comment=\"Google Fonts HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Google Static HTTPS\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*gstatic.com action=accept comment=\"Google Static HTTPS\" } on-error={}\n\n")
 
 	// WAN NAT Masquerade
 	sb.WriteString("# --- Firewall NAT (Internet Access Masquerade) ---\n")
