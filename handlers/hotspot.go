@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
+	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
 )
@@ -188,8 +189,32 @@ func HotspotStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
 	}
 
+	buildPaidResponse := func(p *models.Payment) fiber.Map {
+		resp := fiber.Map{"status": "paid"}
+		pkgID := uint(0)
+		if p.PackageID != nil {
+			pkgID = *p.PackageID
+		}
+		pkgTag := fmt.Sprintf("pkg-%d", pkgID)
+		var pkg models.Package
+		if pkgID > 0 && config.DB.First(&pkg, pkgID).Error == nil {
+			if pkg.IsFreeTier || pkg.Price == 0 {
+				pkgTag = "free"
+			}
+		}
+		resp["username"] = pkgTag
+		resp["password"] = pkgTag
+		if p.CustomerID != nil && *p.CustomerID > 0 {
+			token, _ := middleware.GenerateCustomerToken(*p.CustomerID)
+			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+			resp["token"] = token
+			resp["customer_id"] = *p.CustomerID
+		}
+		return resp
+	}
+
 	if payment.Status == "completed" {
-		return c.JSON(fiber.Map{"status": "paid"})
+		return c.JSON(buildPaidResponse(&payment))
 	} else if payment.Status == "failed" {
 		msg := "Payment failed"
 		if payment.StatusReason != nil {
@@ -203,7 +228,7 @@ func HotspotStatus(c *fiber.Ctx) error {
 		newStatus, err := mpesaSvcGlobal.QueryAndUpdateSTKStatus(&payment)
 		if err == nil {
 			if newStatus == "completed" {
-				return c.JSON(fiber.Map{"status": "paid"})
+				return c.JSON(buildPaidResponse(&payment))
 			} else if newStatus == "failed" {
 				msg := "Payment failed"
 				if payment.StatusReason != nil {
