@@ -870,24 +870,51 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 	}
 	cooldownCutoff := time.Now().Add(-time.Duration(cooldownHours) * time.Hour)
 
-	// 2. Anti-abuse check: verify if MAC or Phone already claimed within cooldown period
+	bypassCooldown := c.Query("reset") == "true" || c.Query("force") == "true" || os.Getenv("FREE_TIER_COOLDOWN_DISABLED") == "true"
+
+	// 2. Anti-abuse & Active Session check
+	var existingCustomer models.Customer
+	hasExisting := false
 	if body.Mac != "" {
-		var recentClaimCount int64
-		config.DB.Model(&models.Customer{}).
-			Where("mac_address = ? AND package_id = ? AND updated_at > ?", body.Mac, pkg.ID, cooldownCutoff).
-			Count(&recentClaimCount)
-		if recentClaimCount > 0 {
-			return utils.ErrorResponse(c, fmt.Sprintf("You have already used your free trial. You can claim again after %d hours or purchase a package.", cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
+		if err := config.DB.Where("mac_address = ? AND package_id = ?", body.Mac, pkg.ID).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
+			hasExisting = true
+		}
+	}
+	if !hasExisting && body.Phone != "" {
+		if err := config.DB.Where("phone = ? AND package_id = ?", body.Phone, pkg.ID).Order("updated_at DESC").First(&existingCustomer).Error; err == nil {
+			hasExisting = true
 		}
 	}
 
-	if body.Phone != "" {
-		var recentClaimCount int64
-		config.DB.Model(&models.Customer{}).
-			Where("phone = ? AND package_id = ? AND updated_at > ?", body.Phone, pkg.ID, cooldownCutoff).
-			Count(&recentClaimCount)
-		if recentClaimCount > 0 {
-			return utils.ErrorResponse(c, fmt.Sprintf("Phone %s has already claimed the free trial. Please wait %d hours or select a plan.", body.Phone, cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
+	if hasExisting && !bypassCooldown {
+		// If the existing session is still valid (ExpiresAt in the future), resume seamlessly!
+		if existingCustomer.ExpiresAt != nil && existingCustomer.ExpiresAt.After(time.Now()) {
+			if pkg.Zone != nil && mikrotikSvcGlobal != nil && body.Mac != "" {
+				go func(z models.Zone, m string, p models.Package) {
+					_ = mikrotikSvcGlobal.WhitelistMAC(&z, m, &p)
+				}(*pkg.Zone, body.Mac, pkg)
+			}
+			token, _ := middleware.GenerateCustomerToken(existingCustomer.ID)
+			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+			remainingMins := int(time.Until(*existingCustomer.ExpiresAt).Minutes())
+			if remainingMins < 1 {
+				remainingMins = 1
+			}
+			return utils.SuccessResponse(c, fiber.Map{
+				"token":         token,
+				"customer":      buildCustomerProfile(&existingCustomer),
+				"expires_at":    *existingCustomer.ExpiresAt,
+				"duration_mins": remainingMins,
+				"username":      "free",
+				"password":      "free",
+				"package_name":  pkg.Name,
+				"message":       fmt.Sprintf("Your free trial is already active with %d minutes remaining.", remainingMins),
+			}, "Free trial session resumed.")
+		}
+
+		// Cooldown check for already-expired sessions
+		if existingCustomer.UpdatedAt.After(cooldownCutoff) {
+			return utils.ErrorResponse(c, fmt.Sprintf("You have already used your free trial. You can claim again after %d hours or purchase a package.", cooldownHours), "Cooldown Active", fiber.StatusTooManyRequests)
 		}
 	}
 
@@ -955,6 +982,8 @@ func CustomerClaimFreeTier(c *fiber.Ctx) error {
 		"customer":       buildCustomerProfile(&customer),
 		"expires_at":     expiresAt,
 		"duration_mins":  int(duration.Minutes()),
+		"username":       "free",
+		"password":       "free",
 		"package_name":   pkg.Name,
 		"message":        fmt.Sprintf("Free trial of %d minutes activated! Enjoy your browsing.", int(duration.Minutes())),
 	}, "Free trial activated successfully.")

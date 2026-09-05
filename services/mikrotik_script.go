@@ -114,13 +114,19 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /ip hotspot walled-garden remove [find dst-host=\"*gstatic.com\"] } on-error={}\n")
 
 	// Walled Garden IP for HTTPS (port 443)
-	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Zyra Net Cloud HTTPS\"] } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*zyranet.co.ke action=accept comment=\"Zyra Net Cloud HTTPS\" } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Safaricom Daraja HTTPS\"] } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=*safaricom.co.ke action=accept comment=\"Safaricom Daraja HTTPS\" } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Google Fonts HTTPS\"] } on-error={}\n")
+	// RouterOS /ip hotspot walled-garden ip does NOT support wildcards (e.g. *zyranet.co.ke fails DNS lookup).
+	// Concrete hostnames must be used so RouterOS resolves their IPs and creates firewall accept rules.
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host=\"*zyranet.co.ke\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host=\"*safaricom.co.ke\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment~\"Zyra Net\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment~\"Safaricom\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment~\"Google\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=api.zyranet.co.ke action=accept comment=\"Zyra Net API HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=captive.zyranet.co.ke action=accept comment=\"Zyra Net Captive HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=zyranet.co.ke action=accept comment=\"Zyra Net Apex HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=api.safaricom.co.ke action=accept comment=\"Safaricom API HTTPS\" } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=daraja.safaricom.co.ke action=accept comment=\"Safaricom Daraja HTTPS\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=fonts.googleapis.com action=accept comment=\"Google Fonts HTTPS\" } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find comment=\"Google Static Fonts HTTPS\"] } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=fonts.gstatic.com action=accept comment=\"Google Static Fonts HTTPS\" } on-error={}\n")
 	// Clean up any old wildcard gstatic IP rules
 	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host=\"*gstatic.com\"] } on-error={}\n\n")
