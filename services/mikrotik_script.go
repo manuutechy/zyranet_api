@@ -292,3 +292,107 @@ func formatRateLimitWithBurst(upKbps, downKbps int) string {
 	}
 	return fmt.Sprintf("%dk/%dk %dk/%dk %dk/%dk 15/15 8", upKbps, downKbps, burstUp, burstDown, threshUp, threshDown)
 }
+
+// GenerateSyncScript generates dynamic RouterOS commands for 1-minute heartbeat sync.
+// It ensures:
+// 1. Hotspot profile login-by includes mac,http-pap,http-chap
+// 2. All hotspot package user profiles and pkg-<id> auto-connect users exist
+// 3. Free tier user profile and free user exist
+// 4. All active paid customers are bypassed in IP-Binding (instant internet) AND added to Hotspot Users
+// 5. Expired customer sessions and bindings are decommissioned
+func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) {
+	var zone models.Zone
+	if err := config.DB.First(&zone, zoneID).Error; err != nil {
+		return "# Zone not found\n", fmt.Errorf("zone not found")
+	}
+
+	now := time.Now()
+
+	var packages []models.Package
+	config.DB.Where("(zone_id = ? OR zone_id = 0) AND status = ? AND type = ?", zone.ID, "active", "hotspot").Find(&packages)
+
+	var activeCustomers []models.Customer
+	config.DB.Preload("Package").
+		Where("zone_id = ? AND status = ? AND expires_at IS NOT NULL AND expires_at > ?", zone.ID, "active", now).
+		Find(&activeCustomers)
+
+	var expiredCustomers []models.Customer
+	config.DB.Where("zone_id = ? AND ((status = 'expired') OR (expires_at IS NOT NULL AND expires_at < ? AND status = 'active'))", zone.ID, now).
+		Find(&expiredCustomers)
+
+	var sb strings.Builder
+	sb.WriteString("# Zyra Net Dynamic RouterOS Sync & Instant Activator\n")
+	sb.WriteString(fmt.Sprintf("# Zone: %s (ID: %d) | Generated: %s\n\n", zone.Name, zone.ID, now.Format("2006-01-02 15:04:05")))
+
+	// Ensure hotspot profile authentication methods
+	sb.WriteString("# --- Hotspot Authentication Methods ---\n")
+	sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot profile set [find default=yes] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n\n")
+
+	// Ensure package profiles & auto-connect users
+	sb.WriteString("# --- Hotspot Package Profiles & Auto-Connect Users ---\n")
+	for _, pkg := range packages {
+		profileName := sanitizeProfileName(pkg.Name)
+		pkgTag := fmt.Sprintf("pkg-%d", pkg.ID)
+		rateLimit := formatRateLimitWithBurst(pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
+		timeout := "0s"
+		if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+			timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
+		}
+		sharedUsers := 500
+		if pkg.DeviceLimit > 1 {
+			sharedUsers = 500 * pkg.DeviceLimit
+		}
+
+		sb.WriteString(fmt.Sprintf(
+			":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no }\n",
+			profileName, profileName, rateLimit, timeout, sharedUsers, profileName, rateLimit, timeout, sharedUsers,
+		))
+
+		sb.WriteString(fmt.Sprintf(
+			":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" }\n",
+			pkgTag, pkgTag, pkgTag, profileName, pkgTag, pkgTag, profileName,
+		))
+	}
+
+	// Free tier user & profile
+	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no }\n")
+	sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
+
+	// Active paid customers: bypass captive portal in IP-Binding + add to hotspot users
+	sb.WriteString("# --- Active Paid Subscriptions (Instant IP-Binding Bypass & Users) ---\n")
+	for _, cust := range activeCustomers {
+		if cust.MacAddress != nil && *cust.MacAddress != "" {
+			mac := strings.ToUpper(strings.TrimSpace(*cust.MacAddress))
+			mac = strings.ReplaceAll(mac, "-", ":")
+			if len(mac) == 17 {
+				profileName := "default"
+				if cust.Package != nil {
+					profileName = sanitizeProfileName(cust.Package.Name)
+				}
+				sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot ip-binding find mac-address=\"%s\"]] = 0) do={ /ip hotspot ip-binding add mac-address=\"%s\" type=bypassed comment=\"ZyraNet Paid Active\" } else={ /ip hotspot ip-binding set [find mac-address=\"%s\"] type=bypassed comment=\"ZyraNet Paid Active\" }\n", mac, mac, mac))
+				sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Active\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Active\" }\n", mac, mac, mac, profileName, mac, mac, profileName))
+			}
+		}
+	}
+	sb.WriteString("\n")
+
+	// Expired customers: decommission
+	sb.WriteString("# --- Expired Customer Sessions Decommissioner ---\n")
+	for _, cust := range expiredCustomers {
+		config.DB.Model(&cust).Update("status", "expired")
+		if cust.MacAddress != nil && *cust.MacAddress != "" {
+			mac := strings.ToUpper(strings.TrimSpace(*cust.MacAddress))
+			mac = strings.ReplaceAll(mac, "-", ":")
+			if len(mac) == 17 {
+				sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+				sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+				sb.WriteString(fmt.Sprintf(":do { /ip hotspot host remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+				sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find mac-address=\"%s\"] } on-error={}\n", mac))
+				sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", mac))
+			}
+		}
+	}
+
+	return sb.String(), nil
+}
