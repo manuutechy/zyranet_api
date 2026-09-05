@@ -56,7 +56,7 @@ func PublicZoneLoginPage(c *fiber.Ctx) error {
 
 	portalHost := "https://captive.zyranet.co.ke"
 	redirectURL := fmt.Sprintf(
-		"%s/login?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)",
+		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)#/dashboard",
 		portalHost, zone.ID,
 	)
 
@@ -64,12 +64,24 @@ func PublicZoneLoginPage(c *fiber.Ctx) error {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Redirecting…</title>
+  <title>Connecting to Zyra Net…</title>
+  <link rel="preconnect" href="https://captive.zyranet.co.ke">
+  <link rel="preconnect" href="https://api.zyranet.co.ke">
+  <link rel="dns-prefetch" href="https://captive.zyranet.co.ke">
+  <link rel="dns-prefetch" href="https://api.zyranet.co.ke">
   <meta http-equiv="refresh" content="0; url=%s">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0b0f19; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .loader { border: 3px solid rgba(255,255,255,0.15); border-top: 3px solid #FF6B00; border-radius: 50%%; width: 32px; height: 32px; animation: spin 0.6s linear infinite; margin: 0 auto 12px; }
+    @keyframes spin { 0%% { transform: rotate(0deg); } 100%% { transform: rotate(360deg); } }
+  </style>
 </head>
 <body>
+  <div style="text-align:center;">
+    <div class="loader"></div>
+    <div style="font-size:14px; opacity:0.85;">Connecting to Zyra Net…</div>
+  </div>
   <script>window.location.replace(%q);</script>
-  <p>Redirecting to the login page…</p>
 </body>
 </html>`, redirectURL, redirectURL)
 
