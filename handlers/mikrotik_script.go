@@ -55,35 +55,16 @@ func PublicZoneLoginPage(c *fiber.Ctx) error {
 	}
 
 	portalHost := "https://captive.zyranet.co.ke"
+	gatewayIP := "10.5.50.1"
+	if zone.HotspotAddress != "" {
+		gatewayIP = strings.TrimSpace(zone.HotspotAddress)
+	}
 	redirectURL := fmt.Sprintf(
-		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)#/dashboard",
-		portalHost, zone.ID,
+		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=http://%s/login&link-orig=$(link-orig-esc)#/dashboard",
+		portalHost, zone.ID, gatewayIP,
 	)
 
-	html := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Connecting to Zyra Net…</title>
-  <link rel="preconnect" href="https://captive.zyranet.co.ke">
-  <link rel="preconnect" href="https://api.zyranet.co.ke">
-  <link rel="dns-prefetch" href="https://captive.zyranet.co.ke">
-  <link rel="dns-prefetch" href="https://api.zyranet.co.ke">
-  <meta http-equiv="refresh" content="0; url=%s">
-  <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0b0f19; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .loader { border: 3px solid rgba(255,255,255,0.15); border-top: 3px solid #FF6B00; border-radius: 50%%; width: 32px; height: 32px; animation: spin 0.6s linear infinite; margin: 0 auto 12px; }
-    @keyframes spin { 0%% { transform: rotate(0deg); } 100%% { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div style="text-align:center;">
-    <div class="loader"></div>
-    <div style="font-size:14px; opacity:0.85;">Connecting to Zyra Net…</div>
-  </div>
-  <script>window.location.replace(%q);</script>
-</body>
-</html>`, redirectURL, redirectURL)
+	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Zyra Net</title><meta http-equiv="refresh" content="0; url=%s"><script>window.location.replace(%q);</script><style>html,body{background:#0b0f19;margin:0;height:100%%;overflow:hidden;}</style></head><body><script>window.location.replace(%q);</script></body></html>`, redirectURL, redirectURL, redirectURL)
 
 	c.Set("Content-Type", "text/html; charset=utf-8")
 	return c.SendString(html)
