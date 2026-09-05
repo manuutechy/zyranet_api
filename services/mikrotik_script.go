@@ -170,11 +170,6 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-memprotect-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-memprotect-sched interval=2m on-event=zyranet-memprotect comment=\"Zyra Net Overload Scheduler\" } on-error={}\n\n")
 
-	// High-speed priority queue for Captive Portal traffic so portal loading gets up to 50M/100M burst
-	sb.WriteString("# --- Captive Portal Fast-Track & High-Speed Priority Queue ---\n")
-	sb.WriteString(":do { /queue simple remove [find name=\"zyra-captive-priority\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /queue simple add name=zyra-captive-priority target=%s dst=captive.zyranet.co.ke max-limit=50M/50M burst-limit=100M/100M burst-threshold=30M/30M burst-time=15s/15s priority=1/1 comment=\"Zyra Net Captive Portal Fast-Track\" place-before=0 } on-error={}\n\n", networkCIDR))
-
 	// Hotspot User Profiles & Instant Auto-Connect Users
 	sb.WriteString("# --- Hotspot User Profiles & Auto-Connect Users ---\n")
 	for _, pkg := range packages {
@@ -205,7 +200,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 
 	// Free Tier Instant Auto-Connect User & Profile (with 20Mbps Burst)
 	sb.WriteString("# --- Free Tier Auto-Connect User & Profile (20Mbps Burst) ---\n")
-	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15s/15s\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15s/15s\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 }\n")
+	sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 }\n")
 	sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
 
 	// Hotspot Users (from vouchers)
@@ -277,7 +272,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 // formatRateLimitWithBurst calculates steady-state rate limit with an instant 20Mbps burst for lightning-fast responsiveness
 func formatRateLimitWithBurst(upKbps, downKbps int) string {
 	if upKbps <= 0 || downKbps <= 0 {
-		return "10M/10M 20M/20M 7M/7M 15s/15s"
+		return "10M/10M 20M/20M 7M/7M 15/15 8"
 	}
 	burstUp := 20000
 	if upKbps > burstUp {
@@ -295,5 +290,5 @@ func formatRateLimitWithBurst(upKbps, downKbps int) string {
 	if threshDown < 512 {
 		threshDown = 512
 	}
-	return fmt.Sprintf("%dk/%dk %dk/%dk %dk/%dk 15s/15s", upKbps, downKbps, burstUp, burstDown, threshUp, threshDown)
+	return fmt.Sprintf("%dk/%dk %dk/%dk %dk/%dk 15/15 8", upKbps, downKbps, burstUp, burstDown, threshUp, threshDown)
 }
