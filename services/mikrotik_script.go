@@ -405,16 +405,16 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		}
 	}
 
-	// Active paid customers: bypass captive portal in IP-Binding + add to hotspot users
-	sb.WriteString("# --- Active Paid Subscriptions (Instant IP-Binding Bypass & Users) ---\n")
+	// Clean up any bypassed bindings so all devices must select/authenticate a plan
+	sb.WriteString("# --- Revert All Devices to Captive Portal Plans (Remove Bypasses) ---\n")
+	sb.WriteString(":do { /ip hotspot ip-binding remove [find comment~\"ZyraNet\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot ip-binding remove [find type=bypassed] } on-error={}\n\n")
+
+	// Active paid customers: authenticate through hotspot user profiles with bandwidth limits
+	sb.WriteString("# --- Hotspot Plan Users (Controlled by Package Profiles) ---\n")
 	for mac, profileName := range activeBinds {
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding add mac-address=\"%s\" type=bypassed comment=\"ZyraNet Paid Active\" } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot host remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find mac-address=\"%s\"] } on-error={}\n", mac))
 		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"\" profile=\"%s\" comment=\"ZyraNet Paid Active\" } on-error={}\n", mac, profileName))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", mac, mac, profileName))
 	}
 	sb.WriteString("\n")
 

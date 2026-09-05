@@ -152,8 +152,8 @@ func TestGenerateSyncScript(t *testing.T) {
 	if !strings.Contains(script, "00:11:22:33:44:55") {
 		t.Errorf("expected script to contain customer MAC 00:11:22:33:44:55, got:\n%s", script)
 	}
-	if !strings.Contains(script, "type=bypassed") {
-		t.Errorf("expected script to contain type=bypassed, got:\n%s", script)
+	if !strings.Contains(script, "remove [find type=bypassed]") {
+		t.Errorf("expected script to contain remove bypassed bindings, got:\n%s", script)
 	}
 	if !strings.Contains(script, "login-by=mac,http-pap,http-chap") {
 		t.Errorf("expected script to contain login-by=mac,http-pap,http-chap, got:\n%s", script)
