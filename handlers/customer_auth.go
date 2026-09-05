@@ -506,9 +506,15 @@ func CustomerReconnect(c *fiber.Ctx) error {
 
 	loginUser := body.Mac
 	loginPass := body.Mac
-	if customer.Package != nil && (customer.Package.IsFreeTier || customer.Package.Price == 0) {
-		loginUser = "free"
-		loginPass = "free"
+	if customer.Package != nil {
+		if customer.Package.IsFreeTier || customer.Package.Price == 0 {
+			loginUser = "free"
+			loginPass = "free"
+		} else {
+			pkgTag := fmt.Sprintf("pkg-%d", customer.Package.ID)
+			loginUser = pkgTag
+			loginPass = pkgTag
+		}
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
@@ -753,7 +759,7 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 	// Wrapping them means any failure rolls back the whole operation
 	// instead of leaving a paid-but-unrecorded state.
 	newBalance := customer.CreditBalance - pkg.Price
-	expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
+	expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
 	var payment models.Payment
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&customer).Update("credit_balance", newBalance).Error; err != nil {

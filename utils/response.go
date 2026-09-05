@@ -107,11 +107,14 @@ func FormatPhoneE164(phone string) string {
 	return p
 }
 
-// CalculateExpiry returns an expiry time based on billing_cycle.
-func CalculateExpiry(billingCycle string, base *time.Time) time.Time {
+// CalculateExpiry returns an expiry time based on timeLimitMinutes (if set) or billing_cycle.
+func CalculateExpiry(billingCycle string, base *time.Time, timeLimitMinutes ...*int) time.Time {
 	t := time.Now().UTC()
 	if base != nil && base.After(t) {
 		t = *base
+	}
+	if len(timeLimitMinutes) > 0 && timeLimitMinutes[0] != nil && *timeLimitMinutes[0] > 0 {
+		return t.Add(time.Duration(*timeLimitMinutes[0]) * time.Minute)
 	}
 	switch billingCycle {
 	case "hourly":

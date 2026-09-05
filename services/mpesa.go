@@ -719,7 +719,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 
 	// 3. Update customer subscription status & expiry
 	if customer != nil {
-		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt)
+		expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
 		custUpdates := map[string]interface{}{
 			"status":      "active",
 			"package_id":  pkg.ID,

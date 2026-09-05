@@ -187,7 +187,7 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 				})
 			}
 
-			expiresAt := utils.CalculateExpiry(pkg.BillingCycle, nil)
+			expiresAt := utils.CalculateExpiry(pkg.BillingCycle, nil, pkg.TimeLimitMinutes)
 			config.DB.Model(&customer).Updates(map[string]interface{}{
 				"status":     "active",
 				"package_id": pkg.ID,

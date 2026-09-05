@@ -160,21 +160,30 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-memprotect-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-memprotect-sched interval=2m on-event=zyranet-memprotect comment=\"Zyra Net Overload Scheduler\" } on-error={}\n\n")
 
-	// Hotspot Profiles (Strict shared-users=1 to prevent tethering/reselling)
-	sb.WriteString("# --- Hotspot User Profiles (Anti-Tethering & Speed Queues) ---\n")
+	// Hotspot User Profiles & Instant Auto-Connect Users
+	sb.WriteString("# --- Hotspot User Profiles & Auto-Connect Users ---\n")
 	for _, pkg := range packages {
 		if pkg.Type != "hotspot" {
 			continue
 		}
 		profileName := sanitizeProfileName(pkg.Name)
+		pkgTag := fmt.Sprintf("pkg-%d", pkg.ID)
 		rateLimit := fmt.Sprintf("%dk/%dk", pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
 		timeout := "0s"
 		if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
 			timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
 		}
+		sharedUsers := 500
+		if pkg.DeviceLimit > 1 {
+			sharedUsers = 500 * pkg.DeviceLimit
+		}
 		sb.WriteString(fmt.Sprintf(
-			":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 }\n",
-			profileName, profileName, rateLimit, timeout, profileName, rateLimit, timeout,
+			":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d }\n",
+			profileName, profileName, rateLimit, timeout, sharedUsers, profileName, rateLimit, timeout, sharedUsers,
+		))
+		sb.WriteString(fmt.Sprintf(
+			":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" }\n",
+			pkgTag, pkgTag, pkgTag, profileName, pkgTag, pkgTag, profileName,
 		))
 	}
 	sb.WriteString("\n")
