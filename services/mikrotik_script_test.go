@@ -42,8 +42,9 @@ func TestGenerateScript_IdempotencyAndBridgePortRemoval(t *testing.T) {
 	}
 
 	expectedSnippets := []string{
-		`:local br "bridge";`,
-		`:if ([:len [/interface bridge find name="bridge"]] = 0) do={`,
+		`:local br "bridge-hotspot";`,
+		`:if ([:len [/interface bridge find name="bridge-hotspot"]] = 0) do={`,
+		`:do { /interface wireless disable [find default-name=wlan1] } on-error={}`,
 		`:do { /ip address add address=10.5.50.1/24 interface=$br comment="Zyra Net Hotspot Gateway" } on-error={}`,
 		`hs-pool-zyranet`,
 		`hs-dhcp-zyranet`,

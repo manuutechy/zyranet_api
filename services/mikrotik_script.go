@@ -65,24 +65,34 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		ipPoolRange = fmt.Sprintf("%s.%s.%s.10-%s.%s.%s.254", ipOctets[0], ipOctets[1], ipOctets[2], ipOctets[0], ipOctets[1], ipOctets[2])
 	}
 
-	sb.WriteString("# --- Bridge & LAN Interface Setup ---\n")
-	sb.WriteString(":local br \"bridge\";\n")
-	sb.WriteString(":if ([:len [/interface bridge find name=\"bridge\"]] = 0) do={\n")
-	sb.WriteString("  :set br \"bridge-hotspot\";\n")
-	sb.WriteString("  :if ([:len [/interface bridge find name=\"bridge-hotspot\"]] = 0) do={ /interface bridge add name=bridge-hotspot comment=\"Zyra Net Hotspot Bridge\" disabled=no }\n")
+	sb.WriteString("# --- Bridge & LAN Interface Setup (Ethernet Ports 2-4 for External APs) ---\n")
+	sb.WriteString(":local br \"bridge-hotspot\";\n")
+	sb.WriteString(":if ([:len [/interface bridge find name=\"bridge-hotspot\"]] = 0) do={\n")
+	sb.WriteString("  /interface bridge add name=bridge-hotspot comment=\"Zyra Net Hotspot Bridge\" disabled=no\n")
 	sb.WriteString("}\n")
 	portsList := strings.Split(lanPorts, ",")
+	hasWlan := false
 	for _, port := range portsList {
 		port = strings.TrimSpace(port)
-		if port != "" && port != "wlan1" {
+		if port == "wlan1" {
+			hasWlan = true
+		} else if port != "" {
+			sb.WriteString(fmt.Sprintf(":do { /interface bridge port remove [find interface=%s] } on-error={}\n", port))
 			sb.WriteString(fmt.Sprintf(":do { /interface bridge port add bridge=$br interface=%s } on-error={}\n", port))
 		}
 	}
-	sb.WriteString("\n# --- Wireless Hotspot Setup (AP Mode, Open) ---\n")
-	sb.WriteString(":do { /interface wireless cap set enabled=no } on-error={}\n")
-	sb.WriteString(":do { /interface wireless security-profiles set [find default=yes] mode=none } on-error={}\n")
-	sb.WriteString(":do { /interface wireless set [find default-name=wlan1] ssid=\"Zyra Net WiFi\" mode=ap-bridge disabled=no } on-error={}\n")
-	sb.WriteString(":do { /interface bridge port add bridge=$br interface=wlan1 } on-error={}\n\n")
+	if hasWlan {
+		sb.WriteString("\n# --- Wireless Hotspot Setup (AP Mode, Open) ---\n")
+		sb.WriteString(":do { /interface wireless cap set enabled=no } on-error={}\n")
+		sb.WriteString(":do { /interface wireless security-profiles set [find default=yes] mode=none } on-error={}\n")
+		sb.WriteString(":do { /interface wireless set [find default-name=wlan1] ssid=\"Zyra Net WiFi\" mode=ap-bridge disabled=no } on-error={}\n")
+		sb.WriteString(":do { /interface bridge port remove [find interface=wlan1] } on-error={}\n")
+		sb.WriteString(":do { /interface bridge port add bridge=$br interface=wlan1 } on-error={}\n\n")
+	} else {
+		sb.WriteString("\n# --- Wireless Disabled (External APs Connected to Ethernet Ports) ---\n")
+		sb.WriteString(":do { /interface wireless disable [find default-name=wlan1] } on-error={}\n")
+		sb.WriteString(":do { /interface bridge port remove [find interface=wlan1] } on-error={}\n\n")
+	}
 
 	sb.WriteString("# --- IP Address & Gateway Configuration ---\n")
 	sb.WriteString(":do { /ip address remove [find comment=\"Zyra Net Hotspot Gateway\"] } on-error={}\n")
