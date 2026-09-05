@@ -251,69 +251,98 @@ func HotspotSession(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"active": false, "error": "mac is required"})
 	}
 
-	zone, err := resolveHotspotZone(c, "")
-	if err != nil {
-		return c.JSON(fiber.Map{"active": false})
+	cleanMac := strings.ToLower(strings.TrimSpace(mac))
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
+	now := time.Now()
+
+	// 1. Check Customer in DB for active unexpired subscription matching this MAC
+	var customer models.Customer
+	foundCustomer := false
+
+	// Try finding by direct MAC address
+	if err := config.DB.Preload("Package").Preload("Zone").
+		Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ? AND expires_at > ?", cleanMac, cleanMac, "active", now).
+		Order("expires_at DESC").First(&customer).Error; err == nil {
+		foundCustomer = true
 	}
 
-	sessions, err := mikrotikSvc.GetActiveSessions(zone)
-	if err != nil {
-		// Local development bypass
-		if config.Config.AppEnv == "local" {
-			log.Printf("[Hotspot] Router connection failed: %v. Returning mock session for local testing.", err)
-			var payment models.Payment
-			if err := config.DB.Preload("Package").Where("mac_address = ? AND status = ?", mac, "completed").Order("created_at DESC").First(&payment).Error; err == nil && payment.Package != nil {
+	// Also check through CustomerDevice
+	if !foundCustomer {
+		var dev models.CustomerDevice
+		if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").
+			Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
+			Order("last_seen_at DESC").First(&dev).Error; err == nil && dev.Customer != nil {
+			if dev.Customer.Status == "active" && dev.Customer.ExpiresAt != nil && dev.Customer.ExpiresAt.After(now) {
+				customer = *dev.Customer
+				foundCustomer = true
+			}
+		}
+	}
+
+	// Also check if customer is authenticated via session cookie
+	if !foundCustomer {
+		if claims := middleware.OptionalCustomerClaims(c); claims != nil && claims.CustomerID > 0 {
+			if err := config.DB.Preload("Package").Preload("Zone").
+				Where("id = ? AND status = ? AND expires_at > ?", claims.CustomerID, "active", now).
+				First(&customer).Error; err == nil {
+				foundCustomer = true
+			}
+		}
+	}
+
+	// Also check recent completed payment for this MAC
+	if !foundCustomer {
+		var payment models.Payment
+		if err := config.DB.Preload("Package").Preload("Zone").
+			Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ?", cleanMac, cleanMac, "completed").
+			Order("created_at DESC").First(&payment).Error; err == nil && payment.Package != nil {
+			validUntil := utils.CalculateExpiry(payment.Package.BillingCycle, &payment.CreatedAt, payment.Package.TimeLimitMinutes)
+			if validUntil.After(now) {
+				timeLeft := int64(time.Until(validUntil).Seconds())
+				speed := fmt.Sprintf("%.0f Mbps", float64(payment.Package.SpeedDownloadKbps)/1024)
 				return c.JSON(fiber.Map{
-					"active":    true,
-					"plan_name": payment.Package.Name,
-					"speed":     fmt.Sprintf("%.0f Mbps", float64(payment.Package.SpeedDownloadKbps)/1024),
-					"time_left": 86300,     // 24 hours
-					"bytes_in":  104857600, // 100 MB
-					"bytes_out": 20971520,  // 20 MB
+					"active":     true,
+					"plan_name":  payment.Package.Name,
+					"speed":      speed,
+					"time_left":  timeLeft,
+					"expires_at": validUntil,
+					"bytes_in":   104857600,
+					"bytes_out":  20971520,
 				})
 			}
 		}
-		return c.JSON(fiber.Map{"active": false})
 	}
 
-	// Find the session matching the MAC
-	for _, s := range sessions {
-		if strings.EqualFold(s.MAC, mac) {
-			planName := "Standard"
-			speed := "5 Mbps"
-			var timeLeft int64 = 86400
+	if foundCustomer && customer.Package != nil && customer.ExpiresAt != nil && customer.ExpiresAt.After(now) {
+		timeLeft := int64(time.Until(*customer.ExpiresAt).Seconds())
+		speed := fmt.Sprintf("%.0f Mbps", float64(customer.Package.SpeedDownloadKbps)/1024)
+		return c.JSON(fiber.Map{
+			"active":     true,
+			"plan_name":  customer.Package.Name,
+			"speed":      speed,
+			"time_left":  timeLeft,
+			"expires_at": *customer.ExpiresAt,
+			"bytes_in":   104857600,
+			"bytes_out":  20971520,
+		})
+	}
 
-			// Enrich from database
-			var voucher models.Voucher
-			if err := config.DB.Preload("Package").Where("code = ?", s.Username).First(&voucher).Error; err == nil && voucher.Package != nil {
-				planName = voucher.Package.Name
-				speed = fmt.Sprintf("%.0f Mbps", float64(voucher.Package.SpeedDownloadKbps)/1024)
-				if voucher.ExpiresAt != nil {
-					timeLeft = int64(time.Until(*voucher.ExpiresAt).Seconds())
-				}
-			} else {
-				var payment models.Payment
-				if err := config.DB.Preload("Package").Where("mac_address = ? AND status = ?", mac, "completed").Order("created_at DESC").First(&payment).Error; err == nil && payment.Package != nil {
-					planName = payment.Package.Name
-					speed = fmt.Sprintf("%.0f Mbps", float64(payment.Package.SpeedDownloadKbps)/1024)
-					// Estimate time left (Daily plan is 24h)
-					expiry := payment.CreatedAt.Add(24 * time.Hour)
-					timeLeft = int64(time.Until(expiry).Seconds())
+	zone, err := resolveHotspotZone(c, "")
+	if err == nil && mikrotikSvc != nil {
+		sessions, err := mikrotikSvc.GetActiveSessions(zone)
+		if err == nil {
+			for _, s := range sessions {
+				if strings.EqualFold(s.MAC, cleanMac) || strings.EqualFold(s.MAC, mac) {
+					return c.JSON(fiber.Map{
+						"active":    true,
+						"plan_name": "Standard",
+						"speed":     "5 Mbps",
+						"time_left": 86400,
+						"bytes_in":  s.BytesIn,
+						"bytes_out": s.BytesOut,
+					})
 				}
 			}
-
-			if timeLeft < 0 {
-				timeLeft = 0
-			}
-
-			return c.JSON(fiber.Map{
-				"active":    true,
-				"plan_name": planName,
-				"speed":     speed,
-				"time_left": timeLeft,
-				"bytes_in":  s.BytesIn,
-				"bytes_out": s.BytesOut,
-			})
 		}
 	}
 

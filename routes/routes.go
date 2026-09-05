@@ -99,7 +99,7 @@ func Register(app *fiber.App) {
 	v1.Put("/customer/profile", customerAuth, handlers.CustomerProfileUpdate)
 	v1.Get("/customer/payments", customerAuth, handlers.CustomerAuthPayments)
 	v1.Post("/customer/vouchers/redeem", customerAuth, handlers.VoucherRedeemAuthenticated)
-	v1.Post("/customer/reconnect", customerAuth, handlers.CustomerReconnect)
+	v1.Post("/customer/reconnect", handlers.CustomerReconnect)
 	v1.Get("/customer/tickets", customerAuth, handlers.TicketCustomerList)
 	v1.Post("/customer/tickets", customerAuth, handlers.TicketStoreCustomer)
 	v1.Post("/customer/topup", customerAuth, handlers.CustomerTopUp)

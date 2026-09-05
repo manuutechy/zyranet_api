@@ -273,31 +273,64 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "MAC address is required.", "", fiber.StatusBadRequest)
 	}
 
-	// 1. Try finding linked customer device
-	var device models.CustomerDevice
+	cleanMac := strings.ToLower(mac)
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
+	now := time.Now()
+
 	var customer models.Customer
 	found := false
 
-	if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").Where("mac_address = ?", mac).Order("last_seen_at DESC").First(&device).Error; err == nil && device.Customer != nil {
-		customer = *device.Customer
+	// 1. Priority: Find active paid customer first (unexpired)
+	if err := config.DB.Preload("Package").Preload("Zone").
+		Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ? AND expires_at > ?", cleanMac, cleanMac, "active", now).
+		Order("expires_at DESC").First(&customer).Error; err == nil {
 		found = true
-		// Update last seen
-		device.LastSeenAt = time.Now()
-		if ip != "" {
-			device.IPAddress = &ip
-		}
-		config.DB.Save(&device)
 	}
 
-	// 2. Fallback to Customer.MacAddress directly
+	// 2. Priority: Find CustomerDevice linked to active paid customer
 	if !found {
-		if err := config.DB.Preload("Package").Preload("Zone").Where("mac_address = ?", mac).Order("created_at DESC").First(&customer).Error; err == nil {
+		var device models.CustomerDevice
+		if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").
+			Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
+			Order("last_seen_at DESC").First(&device).Error; err == nil && device.Customer != nil {
+			if device.Customer.Status == "active" && device.Customer.ExpiresAt != nil && device.Customer.ExpiresAt.After(now) {
+				customer = *device.Customer
+				found = true
+				device.LastSeenAt = now
+				if ip != "" {
+					device.IPAddress = &ip
+				}
+				config.DB.Save(&device)
+			}
+		}
+	}
+
+	// 3. Fallback: Any linked customer device
+	if !found {
+		var device models.CustomerDevice
+		if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").
+			Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
+			Order("last_seen_at DESC").First(&device).Error; err == nil && device.Customer != nil {
+			customer = *device.Customer
 			found = true
-			// Auto-create CustomerDevice record for consistency
+			device.LastSeenAt = now
+			if ip != "" {
+				device.IPAddress = &ip
+			}
+			config.DB.Save(&device)
+		}
+	}
+
+	// 4. Fallback: Customer.MacAddress directly
+	if !found {
+		if err := config.DB.Preload("Package").Preload("Zone").
+			Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
+			Order("created_at DESC").First(&customer).Error; err == nil {
+			found = true
 			dev := models.CustomerDevice{
 				CustomerID: customer.ID,
-				MacAddress: mac,
-				LastSeenAt: time.Now(),
+				MacAddress: cleanMac,
+				LastSeenAt: now,
 			}
 			if ip != "" {
 				dev.IPAddress = &ip
@@ -320,9 +353,25 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 
 	middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
 
+	isActive := customer.Status == "active" && customer.ExpiresAt != nil && customer.ExpiresAt.After(now)
+	loginUser := cleanMac
+	loginPass := cleanMac
+	if customer.Package != nil {
+		if customer.Package.IsFreeTier || customer.Package.Price == 0 {
+			loginUser = "free"
+			loginPass = "free"
+		} else {
+			loginUser = fmt.Sprintf("pkg-%d", customer.Package.ID)
+			loginPass = loginUser
+		}
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"found":         true,
 		"authenticated": true,
+		"is_active":     isActive,
+		"username":      loginUser,
+		"password":      loginPass,
 		"token":         token,
 		"customer":      buildCustomerProfile(&customer),
 	}, "Device recognized.")
@@ -472,47 +521,130 @@ func CustomerProfileUpdate(c *fiber.Ctx) error {
 }
 
 // CustomerReconnect whitelists the customer's MAC address on the zone's router.
+// Accessible with customer session cookie or directly via MAC lookup for unauthenticated returning devices.
 func CustomerReconnect(c *fiber.Ctx) error {
-	claims := middleware.GetClaims(c)
-	if claims == nil {
-		return utils.ErrorResponse(c, "Unauthenticated.", "", fiber.StatusUnauthorized)
-	}
-
 	var body struct {
 		Mac string `json:"mac"`
 	}
-	if err := c.BodyParser(&body); err != nil || body.Mac == "" {
-		return utils.ErrorResponse(c, "MAC address is required.", "", fiber.StatusUnprocessableEntity)
+	_ = c.BodyParser(&body)
+	if body.Mac == "" {
+		body.Mac = c.Query("mac")
 	}
+
+	cleanMac := strings.ToLower(strings.TrimSpace(body.Mac))
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
 
 	var customer models.Customer
-	if err := config.DB.Preload("Package").Preload("Zone").First(&customer, claims.CustomerID).Error; err != nil {
-		return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
+	found := false
+	now := time.Now()
+
+	// 1. Try authenticated claims if present
+	claims := middleware.OptionalCustomerClaims(c)
+	if claims != nil && claims.CustomerID > 0 {
+		if err := config.DB.Preload("Package").Preload("Zone").First(&customer, claims.CustomerID).Error; err == nil {
+			if customer.Status == "active" && customer.ExpiresAt != nil && customer.ExpiresAt.After(now) {
+				found = true
+			}
+		}
 	}
 
-	if customer.Status != "active" || customer.Package == nil || customer.Zone == nil {
-		return utils.ErrorResponse(c, "No active subscription found or Zone not configured.", "", fiber.StatusBadRequest)
+	// 2. Validate MAC address against active paid subscriptions
+	if !found && cleanMac != "" {
+		// A. Direct customer match with active status and unexpired time
+		if err := config.DB.Preload("Package").Preload("Zone").
+			Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ? AND expires_at > ?", cleanMac, cleanMac, "active", now).
+			Order("expires_at DESC").First(&customer).Error; err == nil {
+			found = true
+		}
+
+		// B. CustomerDevice match with active unexpired customer
+		if !found {
+			var dev models.CustomerDevice
+			if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").
+				Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
+				Order("last_seen_at DESC").First(&dev).Error; err == nil && dev.Customer != nil {
+				if dev.Customer.Status == "active" && dev.Customer.ExpiresAt != nil && dev.Customer.ExpiresAt.After(now) {
+					customer = *dev.Customer
+					found = true
+				}
+			}
+		}
+
+		// C. Fallback: check recent completed payment for this MAC where time is still valid
+		if !found {
+			var payment models.Payment
+			if err := config.DB.Preload("Package").Preload("Zone").
+				Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ?", cleanMac, cleanMac, "completed").
+				Order("created_at DESC").First(&payment).Error; err == nil && payment.Package != nil {
+				validUntil := utils.CalculateExpiry(payment.Package.BillingCycle, &payment.CreatedAt, payment.Package.TimeLimitMinutes)
+				if validUntil.After(now) {
+					if payment.CustomerID != nil {
+						if err := config.DB.Preload("Package").Preload("Zone").First(&customer, *payment.CustomerID).Error; err == nil {
+							customer.Status = "active"
+							customer.ExpiresAt = &validUntil
+							config.DB.Model(&customer).Updates(map[string]interface{}{
+								"status":     "active",
+								"expires_at": validUntil,
+							})
+							found = true
+						}
+					}
+				}
+			}
+		}
 	}
 
-	// Strictly enforce wall-clock expiry (e.g. bought at 7am for 1h, expires at 8am sharp)
-	if customer.ExpiresAt != nil && customer.ExpiresAt.Before(time.Now()) {
+	// If still not found or cleanMac was empty
+	if !found {
+		if cleanMac == "" && claims == nil {
+			return utils.ErrorResponse(c, "MAC address is required.", "", fiber.StatusBadRequest)
+		}
+		// Check if expired customer exists to give a polite expired message
+		if cleanMac != "" {
+			var expCust models.Customer
+			if err := config.DB.Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?)", cleanMac, cleanMac).
+				Order("updated_at DESC").First(&expCust).Error; err == nil && expCust.ExpiresAt != nil && expCust.ExpiresAt.Before(now) {
+				return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", expCust.ExpiresAt.Local().Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
+			}
+		}
+		return utils.ErrorResponse(c, "No active subscription found for this device. Please purchase a package to connect.", "No Active Subscription", fiber.StatusNotFound)
+	}
+
+	// Double-check wall-clock expiry
+	if customer.ExpiresAt != nil && customer.ExpiresAt.Before(now) {
 		customer.Status = "expired"
 		config.DB.Model(&customer).Update("status", "expired")
 		return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", customer.ExpiresAt.Local().Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
 	}
 
-	// Whitelist MAC address on the zone's router (best-effort push)
-	if mikrotikSvc != nil {
-		err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)
-		if err != nil {
-			log.Printf("[Reconnect] Note: direct router whitelist for MAC %s returned: %v (client will authenticate via hotspot login form)", body.Mac, err)
+	// Update device last seen and customer MAC
+	if cleanMac != "" {
+		customer.MacAddress = &cleanMac
+		config.DB.Model(&customer).Update("mac_address", cleanMac)
+		var dev models.CustomerDevice
+		if err := config.DB.Where("customer_id = ? AND (LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?)", customer.ID, cleanMac, cleanMac).First(&dev).Error; err != nil {
+			dev = models.CustomerDevice{
+				CustomerID: customer.ID,
+				MacAddress: cleanMac,
+				LastSeenAt: now,
+			}
+			config.DB.Create(&dev)
+		} else {
+			dev.LastSeenAt = now
+			config.DB.Save(&dev)
 		}
-	} else {
-		log.Printf("[Reconnect] Warning: mikrotikSvc is nil, skipping router whitelist in local/test environment.")
 	}
 
-	loginUser := body.Mac
-	loginPass := body.Mac
+	// Whitelist MAC address on the zone's router (best-effort push)
+	if mikrotikSvc != nil && customer.Zone != nil && customer.Package != nil && cleanMac != "" {
+		err := mikrotikSvc.WhitelistMAC(customer.Zone, cleanMac, customer.Package)
+		if err != nil {
+			log.Printf("[Reconnect] Note: direct router whitelist for MAC %s returned: %v (client will authenticate via hotspot login form)", cleanMac, err)
+		}
+	}
+
+	loginUser := cleanMac
+	loginPass := cleanMac
 	if customer.Package != nil {
 		if customer.Package.IsFreeTier || customer.Package.Price == 0 {
 			loginUser = "free"
@@ -524,11 +656,28 @@ func CustomerReconnect(c *fiber.Ctx) error {
 		}
 	}
 
+	token, _ := middleware.GenerateCustomerToken(customer.ID)
+	if token != "" {
+		middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+	}
+
+	speed := "5 Mbps"
+	planName := "Internet Package"
+	if customer.Package != nil {
+		planName = customer.Package.Name
+		speed = fmt.Sprintf("%.0f Mbps", float64(customer.Package.SpeedDownloadKbps)/1024)
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
-		"success":  true,
-		"username": loginUser,
-		"password": loginPass,
-		"message":  "Device authorized successfully.",
+		"success":    true,
+		"username":   loginUser,
+		"password":   loginPass,
+		"plan_name":  planName,
+		"speed":      speed,
+		"expires_at": customer.ExpiresAt,
+		"token":      token,
+		"customer":   buildCustomerProfile(&customer),
+		"message":    "Device authorized successfully.",
 	}, "Reconnected.")
 }
 
