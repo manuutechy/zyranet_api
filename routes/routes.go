@@ -76,8 +76,10 @@ func Register(app *fiber.App) {
 	// Voucher redemption (public captive portal flow)
 	v1.Post("/vouchers/redeem", handlers.VoucherRedeem)
 
-	// Support tickets (public guest submission)
+	// Support tickets (public guest submission, upload, & status)
 	v1.Post("/public/tickets", handlers.TicketStorePublic)
+	v1.Post("/public/tickets/upload", handlers.TicketUploadPublic)
+	v1.Get("/public/tickets/status", handlers.TicketStatusPublic)
 
 	// Hotspot Captive Portal Routes
 	v1.Post("/hotspot/pay", payLimiter(5, time.Minute), handlers.HotspotPay)
