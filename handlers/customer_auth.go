@@ -70,6 +70,7 @@ func RequestOtp(c *fiber.Ctx) error {
 	otpRequestStore.Store(phone, time.Now())
 
 	var customer models.Customer
+	cleanName := strings.TrimSpace(body.Name)
 	if err := config.DB.Where("phone = ?", phone).First(&customer).Error; err != nil {
 		// Auto-register
 		var zone models.Zone
@@ -84,7 +85,7 @@ func RequestOtp(c *fiber.Ctx) error {
 		}
 		pppoeUser := "user_" + phone[max(0, len(phone)-6):]
 		
-		customerName := body.Name
+		customerName := cleanName
 		if customerName == "" {
 			customerName = "Customer_" + phone[max(0, len(phone)-4):]
 		}
@@ -100,10 +101,11 @@ func RequestOtp(c *fiber.Ctx) error {
 		}
 		config.DB.Create(&customer)
 	} else {
-		// Update customer name if a new one is provided during OTP request
-		if body.Name != "" && customer.Name != body.Name {
-			customer.Name = body.Name
-			config.DB.Save(&customer)
+		// Set name only once: If customer has a placeholder or empty name, set their real name.
+		// Once set to a real name, it cannot be edited or overwritten from the captive portal.
+		if !isRealCustomerName(customer.Name) && isRealCustomerName(cleanName) {
+			customer.Name = cleanName
+			config.DB.Model(&customer).Update("name", cleanName)
 		}
 	}
 
@@ -536,6 +538,9 @@ func CustomerProfileUpdate(c *fiber.Ctx) error {
 
 	trimmedName := strings.TrimSpace(body.Name)
 	if trimmedName != "" {
+		if isRealCustomerName(customer.Name) {
+			return utils.ErrorResponse(c, "Your name is permanently set and cannot be modified from the captive portal.", "", fiber.StatusForbidden)
+		}
 		customer.Name = trimmedName
 		config.DB.Model(&customer).Update("name", trimmedName)
 	}
@@ -816,6 +821,25 @@ func generateOtp() string {
 		return fmt.Sprintf("%04d", time.Now().UnixNano()%10000)
 	}
 	return fmt.Sprintf("%04d", n.Int64())
+}
+
+func isRealCustomerName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "customer_") ||
+		strings.HasPrefix(lower, "guest") ||
+		strings.HasPrefix(lower, "user_") {
+		return false
+	}
+	// Check if name is purely digits/phone format
+	matched, _ := regexp.MatchString(`^\+?[0-9\s-]+$`, trimmed)
+	if matched && len(trimmed) >= 9 {
+		return false
+	}
+	return true
 }
 
 // CustomerTopUp initiates an M-Pesa STK Push to top up credit balance.
