@@ -112,6 +112,12 @@ func main() {
 		log.Printf("[database] Failed to query customers for backfill: %v", err)
 	}
 
+	// Purge inactive/guest/expired customers on startup — preserve only active subscribers
+	log.Println("[database] Purging inactive customers (retaining only active users)...")
+	if _, err := handlers.PurgeInactiveCustomers(); err != nil {
+		log.Printf("[database] PurgeInactiveCustomers error: %v", err)
+	}
+
 	// Initialise services
 	smsSvc := services.NewSmsService()
 	mikrotikSvc := services.NewMikroTikService()

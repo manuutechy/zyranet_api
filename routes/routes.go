@@ -166,6 +166,7 @@ func Register(app *fiber.App) {
 	admin.Get("/customers/:id/sessions", adminAuth, handlers.CustomerSessions)
 	admin.Post("/customers/:id/add-credit", adminAuth, handlers.CustomerAddCredit)
 	admin.Get("/customers/:id/credit-logs", adminAuth, handlers.CustomerCreditLogs)
+	admin.Post("/customers/cleanup-inactive", adminAuth, handlers.CustomerCleanupInactive)
 
 	// Payments
 	admin.Get("/payments", adminAuth, handlers.PaymentIndex)

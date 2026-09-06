@@ -3,6 +3,9 @@ package handlers
 import (
 	crand "crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"log"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -284,3 +287,50 @@ func CustomerCreditLogs(c *fiber.Ctx) error {
 		Order("created_at DESC").Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&logs)
 	return utils.PaginatedResponse(c, logs, total, page, perPage)
 }
+
+// PurgeInactiveCustomers deletes all customer records that do not have an active unexpired subscription.
+// Only genuinely active paying customers (status == 'active' && expires_at > now) are preserved.
+func PurgeInactiveCustomers() (int64, error) {
+	if config.DB == nil {
+		return 0, nil
+	}
+	now := time.Now()
+	var inactiveIDs []uint
+	err := config.DB.Model(&models.Customer{}).
+		Where("status != ? OR expires_at IS NULL OR expires_at <= ?", "active", now).
+		Pluck("id", &inactiveIDs).Error
+	if err != nil {
+		log.Printf("[PurgeInactiveCustomers] Error querying inactive customers: %v", err)
+		return 0, err
+	}
+
+	if len(inactiveIDs) == 0 {
+		log.Printf("[PurgeInactiveCustomers] No inactive customers to purge.")
+		return 0, nil
+	}
+
+	// 1. Delete associated customer devices
+	config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CustomerDevice{})
+	// 2. Delete associated sessions
+	config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.Session{})
+	// 3. Clear customer_id on payments & tickets to preserve audit logs
+	config.DB.Model(&models.Payment{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
+	config.DB.Model(&models.Ticket{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
+	config.DB.Model(&models.Voucher{}).Where("used_by IN ?", inactiveIDs).Update("used_by", nil)
+	// 4. Hard delete the inactive customers
+	res := config.DB.Unscoped().Where("id IN ?", inactiveIDs).Delete(&models.Customer{})
+	log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive customer records. Only active paying users retained.", res.RowsAffected)
+	return res.RowsAffected, res.Error
+}
+
+// CustomerCleanupInactive is an HTTP endpoint for super_admins to purge all inactive customer records.
+func CustomerCleanupInactive(c *fiber.Ctx) error {
+	deleted, err := PurgeInactiveCustomers()
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to purge inactive customers: "+err.Error(), "", fiber.StatusInternalServerError)
+	}
+	return utils.SuccessResponse(c, fiber.Map{
+		"deleted_count": deleted,
+	}, fmt.Sprintf("Successfully removed %d inactive/guest customers. Only active subscribers retained.", deleted))
+}
+

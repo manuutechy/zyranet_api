@@ -203,7 +203,7 @@ func ZoneCaptiveLoginHTML(c *fiber.Ctx) error {
 
 	portalHost := "https://captive.zyranet.co.ke"
 	redirectURL := fmt.Sprintf(
-		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)#/dashboard",
+		"%s/?zone=%d&mac=$(mac)&ip=$(ip)&link-login=$(link-login-only)&link-orig=$(link-orig-esc)#/login",
 		portalHost, zone.ID,
 	)
 

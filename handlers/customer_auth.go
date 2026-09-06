@@ -361,6 +361,15 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 		}, "Device not recognized.")
 	}
 
+	isActive := customer.Status == "active" && customer.ExpiresAt != nil && customer.ExpiresAt.After(now)
+	if !isActive {
+		return utils.SuccessResponse(c, fiber.Map{
+			"found":         true,
+			"authenticated": false,
+			"is_active":     false,
+		}, "Device has no active subscription.")
+	}
+
 	token, err := middleware.GenerateCustomerToken(customer.ID)
 	if err != nil {
 		return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
@@ -368,7 +377,6 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 
 	middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
 
-	isActive := customer.Status == "active" && customer.ExpiresAt != nil && customer.ExpiresAt.After(now)
 	loginUser := cleanMac
 	loginPass := cleanMac
 	if customer.Package != nil {
@@ -384,7 +392,7 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, fiber.Map{
 		"found":         true,
 		"authenticated": true,
-		"is_active":     isActive,
+		"is_active":     true,
 		"username":      loginUser,
 		"password":      loginPass,
 		"token":         token,
