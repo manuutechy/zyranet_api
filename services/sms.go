@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
@@ -40,7 +41,21 @@ type smsCreds struct {
 // resolveSmsCreds returns the SMS credentials to use for a send
 // tied to organizationID, mirroring resolveMpesaCreds in services/mpesa.go.
 func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
-	provider := strings.ToLower(s.GetSetting("sms_provider", "hostpinnacle"))
+	msToken := s.GetSetting("mobilesasa_api_token", config.Config.MobilesasaAPIToken)
+	if msToken == "" {
+		msToken = "mbs_01374389d8941ce529787244418eca014714a71b467215467e1ab7b860c35465"
+	}
+	msSender := s.GetSetting("mobilesasa_sender_id", config.Config.MobilesasaSenderID)
+	if msSender == "" {
+		msSender = "MOBILESASA"
+	}
+
+	provider := strings.ToLower(s.GetSetting("sms_provider", "mobilesasa"))
+	// Prioritize MobileSasa if token exists and provider is unconfigured or set to failing hostpinnacle
+	if msToken != "" && (provider == "" || provider == "hostpinnacle" || provider == "mobilesasa") {
+		provider = "mobilesasa"
+	}
+
 	creds := smsCreds{
 		Provider:           provider,
 		BaseURL:            s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL),
@@ -48,8 +63,8 @@ func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
 		Username:           s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername),
 		SenderID:           s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID),
 		MobilesasaBaseURL:  s.GetSetting("mobilesasa_base_url", config.Config.MobilesasaBaseURL),
-		MobilesasaToken:    s.GetSetting("mobilesasa_api_token", config.Config.MobilesasaAPIToken),
-		MobilesasaSenderID: s.GetSetting("mobilesasa_sender_id", config.Config.MobilesasaSenderID),
+		MobilesasaToken:    msToken,
+		MobilesasaSenderID: msSender,
 		BrevoAPIKey:        s.GetSetting("brevo_api_key", ""),
 		BrevoSenderID:      s.GetSetting("brevo_sender_id", "ZyraNet"),
 	}
@@ -116,69 +131,7 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 	creds := s.resolveSmsCreds(organizationID)
 
 	if creds.Provider == "mobilesasa" {
-		apiURL := creds.MobilesasaBaseURL
-		if apiURL == "" {
-			apiURL = "https://api.mobilesasa.com/v1/send/message"
-		}
-		token := creds.MobilesasaToken
-		sender := creds.MobilesasaSenderID
-		if sender == "" {
-			sender = "MOBILESASA"
-		}
-
-		if token == "" {
-			status = "sent"
-			mock := map[string]string{"status": "mock_success", "reason": "No API token configured for MobileSasa"}
-			b, _ := json.Marshal(mock)
-			providerResponse = string(b)
-			log.Printf("[SMS] MobileSasa Mock: to=%s msg=%s", phone, message)
-		} else {
-			payload := map[string]string{
-				"senderID": sender,
-				"phone":    phone,
-				"message":  message,
-			}
-			payloadBytes, _ := json.Marshal(payload)
-			req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewBuffer(payloadBytes))
-			if err == nil {
-				req.Header.Set("Authorization", "Bearer "+token)
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Accept", "application/json")
-				req.Close = true
-
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err == nil {
-					defer resp.Body.Close()
-					respBytes, _ := io.ReadAll(resp.Body)
-					providerResponse = string(respBytes)
-
-					var msResp struct {
-						Status       bool   `json:"status"`
-						ResponseCode string `json:"responseCode"`
-						Message      string `json:"message"`
-						MessageID    string `json:"messageId"`
-					}
-					if errUnmarshal := json.Unmarshal(respBytes, &msResp); errUnmarshal == nil {
-						if msResp.Status || msResp.ResponseCode == "0200" {
-							status = "sent"
-						} else {
-							log.Printf("[SMS] MobileSasa error code=%s: %s", msResp.ResponseCode, msResp.Message)
-						}
-					} else if resp.StatusCode == http.StatusOK {
-						status = "sent"
-					} else {
-						log.Printf("[SMS] MobileSasa HTTP error status=%d: %s", resp.StatusCode, providerResponse)
-					}
-				} else {
-					providerResponse = err.Error()
-					log.Printf("[SMS] MobileSasa request error: %v", err)
-				}
-			} else {
-				providerResponse = err.Error()
-				log.Printf("[SMS] Request creation error: %v", err)
-			}
-		}
+		status, providerResponse = s.sendMobileSasa(creds, phone, message)
 	} else if creds.Provider == "brevo" || (creds.BrevoAPIKey != "" && creds.APIKey == "" && creds.MobilesasaToken == "") {
 		if creds.BrevoAPIKey == "" {
 			status = "sent"
@@ -212,7 +165,7 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Accept", "application/json")
 
-				client := &http.Client{}
+				client := &http.Client{Timeout: 5 * time.Second}
 				resp, err := client.Do(req)
 				if err == nil {
 					defer resp.Body.Close()
@@ -264,7 +217,7 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 				req.Header.Set("apikey", apiKey)
 				req.Close = true
 
-				client := &http.Client{}
+				client := &http.Client{Timeout: 5 * time.Second}
 				resp, err := client.Do(req)
 				if err == nil {
 					defer resp.Body.Close()
@@ -304,6 +257,12 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 		}
 	}
 
+	// Automatic instant failover to MobileSasa if primary provider failed
+	if status != "sent" && creds.MobilesasaToken != "" && creds.Provider != "mobilesasa" {
+		log.Printf("[SMS] Primary provider %s failed (%s). Triggering immediate MobileSasa failover...", creds.Provider, providerResponse)
+		status, providerResponse = s.sendMobileSasa(creds, phone, message)
+	}
+
 	logEntry := &models.SmsLog{
 		Phone:            phone,
 		Message:          message,
@@ -330,4 +289,63 @@ func (s *SmsService) GetSetting(key, defaultVal string) string {
 		}
 	}
 	return strings.TrimSpace(defaultVal)
+}
+
+func (s *SmsService) sendMobileSasa(creds smsCreds, phone, message string) (string, string) {
+	apiURL := creds.MobilesasaBaseURL
+	if apiURL == "" {
+		apiURL = "https://api.mobilesasa.com/v1/send/message"
+	}
+	token := creds.MobilesasaToken
+	if token == "" {
+		token = "mbs_01374389d8941ce529787244418eca014714a71b467215467e1ab7b860c35465"
+	}
+	sender := creds.MobilesasaSenderID
+	if sender == "" {
+		sender = "MOBILESASA"
+	}
+
+	payload := map[string]string{
+		"senderID": sender,
+		"phone":    phone,
+		"message":  message,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "failed", err.Error()
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Close = true
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[SMS] MobileSasa HTTP error: %v", err)
+		return "failed", err.Error()
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	providerResponse := string(respBytes)
+
+	var msResp struct {
+		Status       bool   `json:"status"`
+		ResponseCode string `json:"responseCode"`
+		Message      string `json:"message"`
+		MessageID    string `json:"messageId"`
+	}
+	if errUnmarshal := json.Unmarshal(respBytes, &msResp); errUnmarshal == nil {
+		if msResp.Status || msResp.ResponseCode == "0200" {
+			log.Printf("[SMS] MobileSasa SMS sent successfully to %s, msgId=%s", phone, msResp.MessageID)
+			return "sent", providerResponse
+		}
+		log.Printf("[SMS] MobileSasa error code=%s: %s", msResp.ResponseCode, msResp.Message)
+		return "failed", providerResponse
+	}
+	if resp.StatusCode == http.StatusOK {
+		return "sent", providerResponse
+	}
+	return "failed", providerResponse
 }

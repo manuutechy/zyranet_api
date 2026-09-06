@@ -537,15 +537,16 @@ func CustomerProfileUpdate(c *fiber.Ctx) error {
 	}
 
 	trimmedName := strings.TrimSpace(body.Name)
-	if trimmedName != "" {
-		if isRealCustomerName(customer.Name) {
-			return utils.ErrorResponse(c, "Your name is permanently set and cannot be modified from the captive portal.", "", fiber.StatusForbidden)
-		}
-		customer.Name = trimmedName
-		config.DB.Model(&customer).Update("name", trimmedName)
+	if trimmedName == "" || len(trimmedName) < 2 {
+		return utils.ErrorResponse(c, "Please provide your full name (minimum 2 characters).", "", fiber.StatusUnprocessableEntity)
 	}
+	if isRealCustomerName(customer.Name) {
+		return utils.ErrorResponse(c, "Your name is permanently set and cannot be modified from the captive portal.", "", fiber.StatusForbidden)
+	}
+	customer.Name = trimmedName
+	config.DB.Model(&customer).Update("name", trimmedName)
 
-	return utils.SuccessResponse(c, buildCustomerProfile(&customer), "Profile updated successfully.")
+	return utils.SuccessResponse(c, buildCustomerProfile(&customer), "Name saved successfully.")
 }
 
 // CustomerReconnect whitelists the customer's MAC address on the zone's router.
@@ -733,7 +734,8 @@ func CustomerAuthPayments(c *fiber.Ctx) error {
 
 func buildCustomerProfile(c *models.Customer) fiber.Map {
 	displayName := c.Name
-	if strings.HasPrefix(displayName, "Guest_") || strings.HasPrefix(displayName, "Customer_") || strings.HasPrefix(displayName, "Guest ") {
+	isPlaceholder := !isRealCustomerName(displayName)
+	if isPlaceholder {
 		if c.Phone != "" && !strings.HasPrefix(c.Phone, "GUEST") {
 			formatted := utils.FormatPhone(c.Phone)
 			if len(formatted) == 12 && strings.HasPrefix(formatted, "254") {
@@ -742,13 +744,14 @@ func buildCustomerProfile(c *models.Customer) fiber.Map {
 				displayName = c.Phone
 			}
 		} else {
-			displayName = "Guest User"
+			displayName = ""
 		}
 	}
 
 	m := fiber.Map{
 		"id":             c.ID,
 		"name":           displayName,
+		"name_required":  isPlaceholder,
 		"phone":          c.Phone,
 		"account_number": c.AccountNumber,
 		"mac_address":    c.MacAddress,
@@ -825,13 +828,16 @@ func generateOtp() string {
 
 func isRealCustomerName(name string) bool {
 	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
+	if trimmed == "" || len(trimmed) < 2 {
 		return false
 	}
 	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "customer_") ||
 		strings.HasPrefix(lower, "guest") ||
-		strings.HasPrefix(lower, "user_") {
+		strings.HasPrefix(lower, "user_") ||
+		lower == "client" ||
+		lower == "guest user" ||
+		lower == "guest" {
 		return false
 	}
 	// Check if name is purely digits/phone format
