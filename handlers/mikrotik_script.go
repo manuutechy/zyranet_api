@@ -80,13 +80,19 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	}
 
 	// Update router IP if it was unconfigured or a private placeholder (learn real public IP)
-	clientIP := c.IP()
+	clientIP := c.Get("CF-Connecting-IP")
+	if clientIP == "" {
+		clientIP = c.Get("X-Forwarded-For")
+	}
+	if clientIP == "" {
+		clientIP = c.IP()
+	}
 	if clientIP != "" && clientIP != "127.0.0.1" && (zone.RouterIP == "" || zone.RouterIP == "10.100.0.1" || strings.HasPrefix(zone.RouterIP, "10.") || strings.HasPrefix(zone.RouterIP, "192.168.")) {
 		updates["router_ip"] = clientIP
 	}
 
 	board := strings.TrimSpace(c.Query("board"))
-	if board != "" && (zone.RouterName == "" || zone.RouterName == "Default Router") {
+	if board != "" && (zone.RouterName == "" || zone.RouterName == "Default Router" || zone.RouterName == "RB951") {
 		updates["router_name"] = board
 	}
 
