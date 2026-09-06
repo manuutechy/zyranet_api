@@ -24,6 +24,11 @@ func OrganizationSmsShow(c *fiber.Ctx) error {
 		return utils.SuccessResponse(c, fiber.Map{"mode": "platform", "provider": "hostpinnacle"}, "")
 	}
 
+	mobilesasaBaseURL := cfg.MobilesasaBaseURL
+	if mobilesasaBaseURL == "" {
+		mobilesasaBaseURL = "https://api.mobilesasa.com/v1/send/message"
+	}
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"mode":                     cfg.Mode,
 		"provider":                 cfg.Provider,
@@ -31,20 +36,14 @@ func OrganizationSmsShow(c *fiber.Ctx) error {
 		"has_hostpinnacle_api_key": cfg.HostpinnacleAPIKey != "",
 		"hostpinnacle_username":    cfg.HostpinnacleUsername,
 		"hostpinnacle_sender_id":   cfg.HostpinnacleSenderID,
+		"mobilesasa_base_url":      mobilesasaBaseURL,
+		"has_mobilesasa_api_token": cfg.MobilesasaAPIToken != "",
+		"mobilesasa_sender_id":     cfg.MobilesasaSenderID,
 	}, "")
 }
 
 // OrganizationSmsUpdate lets an ISP super_admin switch between the
-// platform's shared Hostpinnacle gateway and their own, and configure
-// their own credentials. A blank hostpinnacle_api_key keeps the existing
-// stored value (same "leave blank to keep current" pattern used for
-// OrganizationMpesaConfig.ConsumerSecret/Passkey) rather than overwriting
-// it with an empty string.
-//
-// Provider is currently restricted to "hostpinnacle": that's the only SMS
-// gateway services/sms.go actually knows how to send through. See the
-// Provider field doc comment on models.OrganizationSmsConfig for why the
-// field exists at all despite that restriction.
+// platform's shared gateway and their own, and configure HostPinnacle or MobileSasa.
 func OrganizationSmsUpdate(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	if claims.Role != "super_admin" {
@@ -58,6 +57,9 @@ func OrganizationSmsUpdate(c *fiber.Ctx) error {
 		HostpinnacleAPIKey   string `json:"hostpinnacle_api_key"`
 		HostpinnacleUsername string `json:"hostpinnacle_username"`
 		HostpinnacleSenderID string `json:"hostpinnacle_sender_id"`
+		MobilesasaBaseURL    string `json:"mobilesasa_base_url"`
+		MobilesasaAPIToken   string `json:"mobilesasa_api_token"`
+		MobilesasaSenderID   string `json:"mobilesasa_sender_id"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
@@ -68,8 +70,8 @@ func OrganizationSmsUpdate(c *fiber.Ctx) error {
 	if body.Provider == "" {
 		body.Provider = "hostpinnacle"
 	}
-	if body.Provider != "hostpinnacle" {
-		return utils.ErrorResponse(c, "provider must be 'hostpinnacle' — no other SMS gateway is currently supported.", "", fiber.StatusUnprocessableEntity)
+	if body.Provider != "hostpinnacle" && body.Provider != "mobilesasa" {
+		return utils.ErrorResponse(c, "provider must be 'hostpinnacle' or 'mobilesasa'.", "", fiber.StatusUnprocessableEntity)
 	}
 
 	var cfg models.OrganizationSmsConfig
@@ -79,12 +81,26 @@ func OrganizationSmsUpdate(c *fiber.Ctx) error {
 	cfg.Mode = body.Mode
 	cfg.Provider = body.Provider
 	if body.Mode == "own" {
-		cfg.HostpinnacleBaseURL = body.HostpinnacleBaseURL
-		if body.HostpinnacleAPIKey != "" {
-			cfg.HostpinnacleAPIKey = body.HostpinnacleAPIKey
+		if body.Provider == "hostpinnacle" {
+			cfg.HostpinnacleBaseURL = body.HostpinnacleBaseURL
+			if body.HostpinnacleAPIKey != "" {
+				cfg.HostpinnacleAPIKey = body.HostpinnacleAPIKey
+			}
+			cfg.HostpinnacleUsername = body.HostpinnacleUsername
+			cfg.HostpinnacleSenderID = body.HostpinnacleSenderID
+		} else if body.Provider == "mobilesasa" {
+			if body.MobilesasaBaseURL != "" {
+				cfg.MobilesasaBaseURL = body.MobilesasaBaseURL
+			} else {
+				cfg.MobilesasaBaseURL = "https://api.mobilesasa.com/v1/send/message"
+			}
+			if body.MobilesasaAPIToken != "" {
+				cfg.MobilesasaAPIToken = body.MobilesasaAPIToken
+			}
+			if body.MobilesasaSenderID != "" {
+				cfg.MobilesasaSenderID = body.MobilesasaSenderID
+			}
 		}
-		cfg.HostpinnacleUsername = body.HostpinnacleUsername
-		cfg.HostpinnacleSenderID = body.HostpinnacleSenderID
 	}
 
 	if err := config.DB.Save(&cfg).Error; err != nil {

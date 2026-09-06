@@ -164,36 +164,31 @@ func VerifyOtp(c *fiber.Ctx) error {
 
 	var customer models.Customer
 	if err := config.DB.Preload("Package").Preload("Zone").Where("phone = ?", phone).First(&customer).Error; err != nil {
-		// If sandbox/demo mode, auto-register them here as well so any number works with 1234/123456!
-		if sandboxPass {
-			var zone models.Zone
-			var pkg models.Package
-			config.DB.First(&zone)
-			config.DB.Where("type = ?", "hotspot").First(&pkg)
-			if pkg.ID == 0 {
-				config.DB.First(&pkg)
-			}
-			if zone.ID == 0 || pkg.ID == 0 {
-				return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
-			}
-			pppoeUser := "user_" + phone[max(0, len(phone)-6):]
-			customer = models.Customer{
-				Name:          "DemoCustomer_" + phone[max(0, len(phone)-4):],
-				Phone:         phone,
-				ZoneID:        zone.ID,
-				PackageID:     pkg.ID,
-				Type:          "hotspot",
-				Status:        "expired",
-				PPPoEUsername: &pppoeUser,
-			}
-			if err := config.DB.Create(&customer).Error; err != nil {
-				return utils.ErrorResponse(c, "Failed to auto-register demo customer.", "", fiber.StatusInternalServerError)
-			}
-			// Preload relations
-			config.DB.Preload("Package").Preload("Zone").First(&customer, customer.ID)
-		} else {
-			return utils.ErrorResponse(c, "Customer profile not found.", "", fiber.StatusNotFound)
+		var zone models.Zone
+		var pkg models.Package
+		config.DB.First(&zone)
+		config.DB.Where("type = ?", "hotspot").First(&pkg)
+		if pkg.ID == 0 {
+			config.DB.First(&pkg)
 		}
+		if zone.ID == 0 || pkg.ID == 0 {
+			return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
+		}
+		pppoeUser := "user_" + phone[max(0, len(phone)-6):]
+		customer = models.Customer{
+			Name:          "Customer_" + phone[max(0, len(phone)-4):],
+			Phone:         phone,
+			ZoneID:        zone.ID,
+			PackageID:     pkg.ID,
+			Type:          "hotspot",
+			Status:        "expired",
+			PPPoEUsername: &pppoeUser,
+		}
+		if err := config.DB.Create(&customer).Error; err != nil {
+			return utils.ErrorResponse(c, "Failed to register customer profile.", "", fiber.StatusInternalServerError)
+		}
+		// Preload relations
+		config.DB.Preload("Package").Preload("Zone").First(&customer, customer.ID)
 	}
 
 	// Only mark active if customer has a valid unexpired subscription
@@ -228,8 +223,8 @@ func VerifyOtp(c *fiber.Ctx) error {
 		customer.MacAddress = &body.Mac
 		config.DB.Save(&customer)
 
-		if mikrotikSvc != nil {
-			log.Printf("[OTP Verify] Whitelisting MAC %s for customer %s (%s)", body.Mac, customer.Name, customer.Phone)
+		if mikrotikSvc != nil && customer.Status == "active" && customer.Zone != nil && customer.Package != nil {
+			log.Printf("[OTP Verify] Whitelisting MAC %s for active customer %s (%s)", body.Mac, customer.Name, customer.Phone)
 			err := mikrotikSvc.WhitelistMAC(customer.Zone, body.Mac, customer.Package)
 			if err != nil {
 				log.Printf("[OTP Verify] WhitelistMAC failed for %s: %v", body.Mac, err)

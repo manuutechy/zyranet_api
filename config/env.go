@@ -57,6 +57,11 @@ type AppConfig struct {
 	HostpinnacleUsername string
 	HostpinnacleSenderID string
 
+	// MobileSasa
+	MobilesasaBaseURL  string
+	MobilesasaAPIToken string
+	MobilesasaSenderID string
+
 	// CORS Origins
 	AllowedOrigins []string
 
@@ -110,6 +115,10 @@ func Load() {
 		HostpinnacleApiKey:   getEnv("HOSTPINNACLE_API_KEY", ""),
 		HostpinnacleUsername: getEnv("HOSTPINNACLE_USERNAME", ""),
 		HostpinnacleSenderID: getEnv("HOSTPINNACLE_SENDER_ID", ""),
+
+		MobilesasaBaseURL:  getEnv("MOBILESASA_BASE_URL", "https://api.mobilesasa.com/v1/send/message"),
+		MobilesasaAPIToken: getEnv("MOBILESASA_API_TOKEN", ""),
+		MobilesasaSenderID: getEnv("MOBILESASA_SENDER_ID", "MOBILESASA"),
 
 		AllowedOrigins: allowedOrigins(getEnv("APP_ENV", "production")),
 

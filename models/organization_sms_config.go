@@ -32,6 +32,9 @@ type OrganizationSmsConfig struct {
 	HostpinnacleAPIKey   string    `gorm:"size:255" json:"-"`
 	HostpinnacleUsername string    `gorm:"size:255" json:"hostpinnacle_username"`
 	HostpinnacleSenderID string    `gorm:"size:50" json:"hostpinnacle_sender_id"`
+	MobilesasaBaseURL    string    `gorm:"size:255" json:"mobilesasa_base_url"`
+	MobilesasaAPIToken   string    `gorm:"size:255" json:"-"`
+	MobilesasaSenderID   string    `gorm:"size:50" json:"mobilesasa_sender_id"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }

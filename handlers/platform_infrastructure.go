@@ -36,6 +36,7 @@ var daraKeys = []string{
 var smsKeys = []string{
 	"sms_provider", "hostpinnacle_base_url", "hostpinnacle_api_key",
 	"hostpinnacle_username", "hostpinnacle_sender_id",
+	"mobilesasa_base_url", "mobilesasa_api_token", "mobilesasa_sender_id",
 	"brevo_api_key", "brevo_sender_id",
 }
 
