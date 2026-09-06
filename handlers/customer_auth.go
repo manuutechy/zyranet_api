@@ -198,6 +198,26 @@ func VerifyOtp(c *fiber.Ctx) error {
 		customer.Status = "expired"
 		customer.ExpiresAt = nil
 	}
+
+	// Seamless active user migration: If this phone account is not active, check if the device MAC
+	// currently holds an active subscription (e.g. from previous guest sessions or voucher redemptions).
+	if (customer.Status != "active" || customer.ExpiresAt == nil) && body.Mac != "" {
+		cleanMac := strings.ToLower(strings.ReplaceAll(body.Mac, "-", ":"))
+		var priorActive models.Customer
+		if err := config.DB.Preload("Package").Preload("Zone").
+			Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = 'active' AND expires_at > ?", cleanMac, cleanMac, time.Now()).
+			Order("expires_at DESC").First(&priorActive).Error; err == nil && priorActive.ID != customer.ID {
+			customer.Status = "active"
+			customer.ExpiresAt = priorActive.ExpiresAt
+			customer.PackageID = priorActive.PackageID
+			customer.Package = priorActive.Package
+			if customer.ZoneID == 0 && priorActive.ZoneID != 0 {
+				customer.ZoneID = priorActive.ZoneID
+				customer.Zone = priorActive.Zone
+			}
+			log.Printf("[OTP Verify] Seamlessly migrated active subscription from guest #%d to phone customer #%d (%s, expires %v)", priorActive.ID, customer.ID, customer.Phone, priorActive.ExpiresAt)
+		}
+	}
 	config.DB.Save(&customer)
 
 	// Whitelist the MAC address on the MikroTik router if MAC is provided
