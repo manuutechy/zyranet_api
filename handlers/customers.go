@@ -297,7 +297,7 @@ func PurgeInactiveCustomers() (int64, error) {
 	now := time.Now()
 	var inactiveIDs []uint
 	err := config.DB.Model(&models.Customer{}).
-		Where("status != ? OR expires_at IS NULL OR expires_at <= ?", "active", now).
+		Where("phone LIKE 'GUEST%' OR account_number LIKE 'GUEST%' OR pppoe_username LIKE 'GUEST%' OR status != ? OR expires_at IS NULL OR expires_at <= ?", "active", now).
 		Pluck("id", &inactiveIDs).Error
 	if err != nil {
 		log.Printf("[PurgeInactiveCustomers] Error querying inactive customers: %v", err)
@@ -309,20 +309,22 @@ func PurgeInactiveCustomers() (int64, error) {
 		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CustomerDevice{})
 		// 2. Delete associated sessions
 		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.Session{})
-		// 3. Clear customer_id on payments & tickets to preserve audit logs
+		// 3. Delete credit logs associated with purged guest/test accounts
+		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CreditLog{})
+		// 4. Clear customer_id on payments & tickets to preserve financial audit logs
 		config.DB.Model(&models.Payment{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
 		config.DB.Model(&models.Ticket{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
 		config.DB.Model(&models.Voucher{}).Where("used_by IN ?", inactiveIDs).Update("used_by", nil)
-		// 4. Hard delete the inactive customers
+		// 5. Hard delete the inactive and guest customers
 		res := config.DB.Unscoped().Where("id IN ?", inactiveIDs).Delete(&models.Customer{})
-		log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive customer records.", res.RowsAffected)
+		log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive/guest customer records.", res.RowsAffected)
 	}
 
 	// Reset device cache so no device auto-bypasses the OTP login
 	config.DB.Exec("DELETE FROM customer_devices")
 	config.DB.Model(&models.Customer{}).Where("status != ?", "active").Update("mac_address", nil)
 
-	log.Printf("[PurgeInactiveCustomers] Retained active customers only. Reset device cache for OTP enforcement.")
+	log.Printf("[PurgeInactiveCustomers] Retained genuine active customers only. Reset device cache for OTP enforcement.")
 	return int64(len(inactiveIDs)), nil
 }
 

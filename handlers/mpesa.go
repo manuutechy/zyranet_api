@@ -316,26 +316,24 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		}
 	}
 
-	// If customer still not found, auto-link to latest guest customer or create fresh customer
+	// If customer not found by BillRefNumber or phone suffix, look up by full cleanPhone or create for payer
 	if !foundCustomer && cleanPhone != "" {
-		var guestCustomer models.Customer
-		if err := config.DB.Where("phone LIKE 'GUEST%'").Order("id DESC").First(&guestCustomer).Error; err == nil {
-			customer = guestCustomer
-			customer.Phone = cleanPhone
-			customer.Name = payerName
-			customer.AccountNumber = "ZYR#" + cleanPhone
-			config.DB.Model(&customer).Updates(map[string]interface{}{
-				"phone":          cleanPhone,
-				"name":           payerName,
-				"account_number": "ZYR#" + cleanPhone,
-			})
+		if err := config.DB.Where("phone = ?", cleanPhone).First(&customer).Error; err == nil {
 			foundCustomer = true
 		} else {
+			var zone models.Zone
+			config.DB.First(&zone)
+			var pkg models.Package
+			config.DB.Where("zone_id = ? AND price = ?", zone.ID, body.TransAmount).First(&pkg)
+			if pkg.ID == 0 {
+				config.DB.First(&pkg)
+			}
 			newCustomer := models.Customer{
 				Name:          payerName,
 				Phone:         cleanPhone,
 				AccountNumber: "ZYR#" + cleanPhone,
-				ZoneID:        1,
+				ZoneID:        zone.ID,
+				PackageID:     pkg.ID,
 				Type:          "hotspot",
 				Status:        "active",
 				CreditBalance: 0,
