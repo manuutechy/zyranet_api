@@ -304,23 +304,26 @@ func PurgeInactiveCustomers() (int64, error) {
 		return 0, err
 	}
 
-	if len(inactiveIDs) == 0 {
-		log.Printf("[PurgeInactiveCustomers] No inactive customers to purge.")
-		return 0, nil
+	if len(inactiveIDs) > 0 {
+		// 1. Delete associated customer devices for inactive
+		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CustomerDevice{})
+		// 2. Delete associated sessions
+		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.Session{})
+		// 3. Clear customer_id on payments & tickets to preserve audit logs
+		config.DB.Model(&models.Payment{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
+		config.DB.Model(&models.Ticket{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
+		config.DB.Model(&models.Voucher{}).Where("used_by IN ?", inactiveIDs).Update("used_by", nil)
+		// 4. Hard delete the inactive customers
+		res := config.DB.Unscoped().Where("id IN ?", inactiveIDs).Delete(&models.Customer{})
+		log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive customer records.", res.RowsAffected)
 	}
 
-	// 1. Delete associated customer devices
-	config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CustomerDevice{})
-	// 2. Delete associated sessions
-	config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.Session{})
-	// 3. Clear customer_id on payments & tickets to preserve audit logs
-	config.DB.Model(&models.Payment{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
-	config.DB.Model(&models.Ticket{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
-	config.DB.Model(&models.Voucher{}).Where("used_by IN ?", inactiveIDs).Update("used_by", nil)
-	// 4. Hard delete the inactive customers
-	res := config.DB.Unscoped().Where("id IN ?", inactiveIDs).Delete(&models.Customer{})
-	log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive customer records. Only active paying users retained.", res.RowsAffected)
-	return res.RowsAffected, res.Error
+	// Reset device cache so no device auto-bypasses the OTP login
+	config.DB.Exec("DELETE FROM customer_devices")
+	config.DB.Model(&models.Customer{}).Where("status != ?", "active").Update("mac_address", nil)
+
+	log.Printf("[PurgeInactiveCustomers] Retained active customers only. Reset device cache for OTP enforcement.")
+	return int64(len(inactiveIDs)), nil
 }
 
 // CustomerCleanupInactive is an HTTP endpoint for super_admins to purge all inactive customer records.
