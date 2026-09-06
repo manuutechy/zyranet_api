@@ -111,7 +111,24 @@ func RequestOtp(c *fiber.Ctx) error {
 
 	// Generate a cryptographically random 4-digit OTP
 	otp := generateOtp()
-	otpStore.Store(phone, otpEntry{OTP: otp, ExpiresAt: time.Now().Add(otpTimeout)})
+	expiresAt := time.Now().Add(otpTimeout)
+	otpStore.Store(phone, otpEntry{OTP: otp, ExpiresAt: expiresAt})
+
+	// Persist OTP in database so it survives server restarts, deployments, and multi-process workers
+	var otpRecord models.OtpCode
+	if err := config.DB.Where("phone = ?", phone).First(&otpRecord).Error; err == nil {
+		otpRecord.OTP = otp
+		otpRecord.ExpiresAt = expiresAt
+		otpRecord.Attempts = 0
+		config.DB.Save(&otpRecord)
+	} else {
+		config.DB.Create(&models.OtpCode{
+			Phone:     phone,
+			OTP:       otp,
+			ExpiresAt: expiresAt,
+			Attempts:  0,
+		})
+	}
 
 	template := GetSetting("sms_template_otp")
 	msg := utils.RenderTemplate(template, map[string]string{
@@ -140,28 +157,69 @@ func VerifyOtp(c *fiber.Ctx) error {
 	}
 
 	phone := normalizePhone(body.Phone)
-	otp := body.OTP
+	otp := strings.TrimSpace(body.OTP)
+
+	if phone == "" {
+		return utils.ErrorResponse(c, "Phone number is required.", "", fiber.StatusBadRequest)
+	}
+	if otp == "" {
+		return utils.ErrorResponse(c, "Verification code is required.", "", fiber.StatusBadRequest)
+	}
 
 	// Sandbox bypass — gated on an explicit opt-in (APP_ENV=local, or
 	// ALLOW_SANDBOX_OTP=true for other non-production setups like CI/QA),
-	// not merely `AppEnv != "production"`. Gating only on "not production"
-	// is the same fragile-string-match class of bug as the old JWT_SECRET
-	// check: a typo'd or unexpected APP_ENV value (e.g. "staging", "prod",
-	// a blank string) would silently leave this full auth bypass enabled.
+	// not merely `AppEnv != "production"`.
 	sandboxOtpAllowed := config.Config.AppEnv == "local" || strings.EqualFold(os.Getenv("ALLOW_SANDBOX_OTP"), "true")
 	sandboxPass := sandboxOtpAllowed && (otp == "1234" || otp == "123456")
 
 	if !sandboxPass {
-		v, ok := otpStore.Load(phone)
-		if !ok {
-			return utils.ErrorResponse(c, "Invalid or expired verification code.", "", fiber.StatusBadRequest)
+		var targetOtp string
+		var expiresAt time.Time
+		var attempts int
+		found := false
+
+		// 1. Check in-memory store
+		if v, ok := otpStore.Load(phone); ok {
+			entry := v.(otpEntry)
+			targetOtp = entry.OTP
+			expiresAt = entry.ExpiresAt
+			found = true
+		} else {
+			// 2. Fallback to database store (survives deployments and server restarts)
+			var dbRecord models.OtpCode
+			if err := config.DB.Where("phone = ?", phone).First(&dbRecord).Error; err == nil {
+				targetOtp = dbRecord.OTP
+				expiresAt = dbRecord.ExpiresAt
+				attempts = dbRecord.Attempts
+				found = true
+				otpStore.Store(phone, otpEntry{OTP: targetOtp, ExpiresAt: expiresAt})
+			}
 		}
-		entry := v.(otpEntry)
-		if time.Now().After(entry.ExpiresAt) || entry.OTP != otp {
+
+		if !found {
+			return utils.ErrorResponse(c, "No active verification code found for this number. Please request a new code.", "", fiber.StatusBadRequest)
+		}
+
+		if time.Now().After(expiresAt) {
 			otpStore.Delete(phone)
-			return utils.ErrorResponse(c, "Invalid or expired verification code.", "", fiber.StatusBadRequest)
+			config.DB.Where("phone = ?", phone).Delete(&models.OtpCode{})
+			return utils.ErrorResponse(c, "Verification code has expired. Please request a new code.", "", fiber.StatusBadRequest)
 		}
+
+		if attempts >= 5 {
+			otpStore.Delete(phone)
+			config.DB.Where("phone = ?", phone).Delete(&models.OtpCode{})
+			return utils.ErrorResponse(c, "Too many incorrect attempts. Please request a new code.", "", fiber.StatusTooManyRequests)
+		}
+
+		if targetOtp != otp {
+			config.DB.Model(&models.OtpCode{}).Where("phone = ?", phone).Update("attempts", attempts+1)
+			return utils.ErrorResponse(c, "Incorrect verification code. Please check your SMS and try again.", "", fiber.StatusBadRequest)
+		}
+
+		// Success: clear used OTP
 		otpStore.Delete(phone)
+		config.DB.Where("phone = ?", phone).Delete(&models.OtpCode{})
 	}
 
 	var customer models.Customer

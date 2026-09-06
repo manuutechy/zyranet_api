@@ -54,6 +54,7 @@ func main() {
 		&models.SmsLog{},
 		&models.ZoneAlert{},
 		&models.ZoneStat{},
+		&models.OtpCode{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
