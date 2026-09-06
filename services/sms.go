@@ -41,6 +41,19 @@ type smsCreds struct {
 // resolveSmsCreds returns the SMS credentials to use for a send
 // tied to organizationID, mirroring resolveMpesaCreds in services/mpesa.go.
 func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
+	hpKey := s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey)
+	if hpKey == "" {
+		hpKey = "b9ef4d402d6e2fef8af707113ecef101a341d90c"
+	}
+	hpUser := s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername)
+	if hpUser == "" {
+		hpUser = "munchify"
+	}
+	hpSender := s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID)
+	if hpSender == "" {
+		hpSender = "MUNCHIFY"
+	}
+
 	msToken := s.GetSetting("mobilesasa_api_token", config.Config.MobilesasaAPIToken)
 	if msToken == "" {
 		msToken = "mbs_01374389d8941ce529787244418eca014714a71b467215467e1ab7b860c35465"
@@ -50,18 +63,20 @@ func (s *SmsService) resolveSmsCreds(organizationID uint) smsCreds {
 		msSender = "MOBILESASA"
 	}
 
-	provider := strings.ToLower(s.GetSetting("sms_provider", "mobilesasa"))
-	// Prioritize MobileSasa if token exists and provider is unconfigured or set to failing hostpinnacle
-	if msToken != "" && (provider == "" || provider == "hostpinnacle" || provider == "mobilesasa") {
+	provider := strings.ToLower(s.GetSetting("sms_provider", "hostpinnacle"))
+	// Prioritize HostPinnacle with dedicated transactional sender MUNCHIFY for instant delivery
+	if hpKey != "" && hpUser != "" {
+		provider = "hostpinnacle"
+	} else if msToken != "" {
 		provider = "mobilesasa"
 	}
 
 	creds := smsCreds{
 		Provider:           provider,
 		BaseURL:            s.GetSetting("hostpinnacle_base_url", config.Config.HostpinnacleBaseURL),
-		APIKey:             s.GetSetting("hostpinnacle_api_key", config.Config.HostpinnacleApiKey),
-		Username:           s.GetSetting("hostpinnacle_username", config.Config.HostpinnacleUsername),
-		SenderID:           s.GetSetting("hostpinnacle_sender_id", config.Config.HostpinnacleSenderID),
+		APIKey:             hpKey,
+		Username:           hpUser,
+		SenderID:           hpSender,
 		MobilesasaBaseURL:  s.GetSetting("mobilesasa_base_url", config.Config.MobilesasaBaseURL),
 		MobilesasaToken:    msToken,
 		MobilesasaSenderID: msSender,
