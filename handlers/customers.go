@@ -69,6 +69,13 @@ func CustomerStore(c *fiber.Ctx) error {
 		pw := generatePPPoEPassword()
 		customer.PPPoEPassword = &pw
 	}
+	if customer.Status == "active" && customer.ExpiresAt == nil && customer.PackageID > 0 {
+		var pkg models.Package
+		if err := config.DB.First(&pkg, customer.PackageID).Error; err == nil {
+			exp := utils.CalculateExpiry(pkg.BillingCycle, nil, pkg.TimeLimitMinutes)
+			customer.ExpiresAt = &exp
+		}
+	}
 	if err := config.DB.Create(&customer).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create customer.", fiber.StatusInternalServerError)
 	}
@@ -141,6 +148,21 @@ func CustomerUpdate(c *fiber.Ctx) error {
 	}
 	var body map[string]interface{}
 	c.BodyParser(&body)
+	if statusVal, ok := body["status"].(string); ok && statusVal == "active" {
+		if _, hasExp := body["expires_at"]; !hasExp {
+			if customer.ExpiresAt == nil || customer.ExpiresAt.Before(time.Now()) {
+				targetPkgID := customer.PackageID
+				if pkgVal, okPkg := body["package_id"].(float64); okPkg && uint(pkgVal) > 0 {
+					targetPkgID = uint(pkgVal)
+				}
+				var pkg models.Package
+				if err := config.DB.First(&pkg, targetPkgID).Error; err == nil {
+					exp := utils.CalculateExpiry(pkg.BillingCycle, nil, pkg.TimeLimitMinutes)
+					body["expires_at"] = exp
+				}
+			}
+		}
+	}
 	if err := config.DB.Model(&customer).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
