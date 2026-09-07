@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,7 +187,13 @@ func HotspotStatus(c *fiber.Ctx) error {
 
 	var payment models.Payment
 	if err := config.DB.Where("mpesa_transaction_id = ?", ref).First(&payment).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
+		if id, errConv := strconv.ParseUint(ref, 10, 64); errConv == nil {
+			if err := config.DB.First(&payment, id).Error; err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
+			}
+		} else {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
+		}
 	}
 
 	buildPaidResponse := func(p *models.Payment) fiber.Map {
@@ -201,6 +208,8 @@ func HotspotStatus(c *fiber.Ctx) error {
 			if pkg.IsFreeTier || pkg.Price == 0 {
 				pkgTag = "free"
 			}
+			resp["plan_name"] = pkg.Name
+			resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
 		}
 		resp["username"] = pkgTag
 		resp["password"] = pkgTag
