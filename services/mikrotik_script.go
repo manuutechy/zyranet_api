@@ -148,6 +148,14 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString("# --- Firewall NAT (Internet Access Masquerade) ---\n")
 	sb.WriteString(":if ([:len [/ip firewall nat find comment=\"Zyra Net Internet Access NAT\"]] = 0) do={ /ip firewall nat add chain=srcnat action=masquerade comment=\"Zyra Net Internet Access NAT\" }\n\n")
 
+	// Remote Management (WebFig, WinBox, API, and MikroTik Cloud DDNS)
+	sb.WriteString("# --- Remote Management (WebFig, WinBox, API & MikroTik Cloud DDNS) ---\n")
+	sb.WriteString(":do { /ip service set www disabled=no port=80 } on-error={}\n")
+	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
+	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
+	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n\n")
+
 	// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
 	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n", zone.ID))
@@ -440,6 +448,14 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 			}
 		}
 	}
+
+	// Maintain Remote Management & Cloud DDNS
+	sb.WriteString("# --- Maintain Remote Access (WebFig, WinBox, API & Cloud DDNS) ---\n")
+	sb.WriteString(":do { /ip service set www disabled=no port=80 } on-error={}\n")
+	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
+	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
+	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n\n")
 
 	return sb.String(), nil
 }

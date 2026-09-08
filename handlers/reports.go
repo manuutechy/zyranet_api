@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -44,12 +45,22 @@ func ReportRevenue(c *fiber.Ctx) error {
 	}
 
 	type DailyRevenue struct {
-		Date  string  `json:"date"`
-		Total float64 `json:"total"`
+		Date       string  `json:"date"`
+		Total      float64 `json:"total"`
+		Count      int64   `json:"count"`
+		MpesaTotal float64 `json:"mpesa_total"`
+		C2bTotal   float64 `json:"c2b_total"`
+		CashTotal  float64 `json:"cash_total"`
+		AvgPerTx   float64 `json:"avg_per_tx"`
 	}
 
 	dailyQuery := config.DB.Model(&models.Payment{}).
-		Select("DATE(created_at) as date, SUM(amount) as total").
+		Select("DATE(created_at) as date, " +
+			"COALESCE(SUM(amount), 0) as total, " +
+			"COUNT(id) as count, " +
+			"COALESCE(SUM(CASE WHEN method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) as mpesa_total, " +
+			"COALESCE(SUM(CASE WHEN method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) as c2b_total, " +
+			"COALESCE(SUM(CASE WHEN method IN ('cash', 'manual', 'bank') THEN amount ELSE 0 END), 0) as cash_total").
 		Where("status = ?", "completed").
 		Where("zone_id IN (?)", orgZoneIDs).
 		Where("DATE(created_at) >= ?", dateFrom).
@@ -59,6 +70,15 @@ func ReportRevenue(c *fiber.Ctx) error {
 	}
 	var daily []DailyRevenue
 	dailyQuery.Group("DATE(created_at)").Order("date ASC").Find(&daily)
+
+	for i := range daily {
+		if strings.Contains(daily[i].Date, "T") {
+			daily[i].Date = strings.Split(daily[i].Date, "T")[0]
+		}
+		if daily[i].Count > 0 {
+			daily[i].AvgPerTx = roundFloat(daily[i].Total/float64(daily[i].Count), 2)
+		}
+	}
 
 	var totalRevenue float64
 	var totalPayments int64
@@ -80,6 +100,9 @@ func ReportRevenue(c *fiber.Ctx) error {
 			highestAmount = d.Total
 			highestDay = d.Date
 		}
+	}
+	if strings.Contains(highestDay, "T") {
+		highestDay = strings.Split(highestDay, "T")[0]
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
