@@ -202,17 +202,35 @@ func HotspotStatus(c *fiber.Ctx) error {
 		if p.PackageID != nil {
 			pkgID = *p.PackageID
 		}
-		pkgTag := fmt.Sprintf("pkg-%d", pkgID)
 		var pkg models.Package
 		if pkgID > 0 && config.DB.First(&pkg, pkgID).Error == nil {
 			if pkg.IsFreeTier || pkg.Price == 0 {
-				pkgTag = "free"
+				resp["plan_name"] = pkg.Name
+				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
+				resp["username"] = "free"
+				resp["password"] = "free"
+			} else {
+				resp["plan_name"] = pkg.Name
+				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
+				// WhitelistMAC creates the MikroTik hotspot user with name=MAC / password=MAC.
+				// We MUST return the MAC as credentials so the captive portal login form
+				// submits the correct username/password to the router.
+				// Fall back to pkg-N only when there is no MAC (which means whitelist
+				// also could not have used the MAC, so consistency is preserved).
+				if p.MacAddress != "" {
+					resp["username"] = strings.ToLower(p.MacAddress)
+					resp["password"] = strings.ToLower(p.MacAddress)
+				} else {
+					pkgTag := fmt.Sprintf("pkg-%d", pkgID)
+					resp["username"] = pkgTag
+					resp["password"] = pkgTag
+				}
 			}
-			resp["plan_name"] = pkg.Name
-			resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
+		} else if p.MacAddress != "" {
+			// Package not loaded but we have a MAC — return MAC creds as best effort
+			resp["username"] = strings.ToLower(p.MacAddress)
+			resp["password"] = strings.ToLower(p.MacAddress)
 		}
-		resp["username"] = pkgTag
-		resp["password"] = pkgTag
 		if p.CustomerID != nil && *p.CustomerID > 0 {
 			token, _ := middleware.GenerateCustomerToken(*p.CustomerID)
 			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
