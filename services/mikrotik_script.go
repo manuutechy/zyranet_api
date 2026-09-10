@@ -108,7 +108,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 
 	sb.WriteString("# --- Hotspot Server Setup (Overload-Protected & Instant Direct-IP Redirection) ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /ip dns static remove [find name=\"login.zyranet.lan\"] } on-error={}\n"))
-	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-pap,http-chap split-user-domain=no dns-name=\"\" } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-pap,http-chap split-user-domain=no dns-name=\"\" }\n", gatewayIP, gatewayIP))
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-pap,http-chap,mac split-user-domain=no dns-name=\"\" } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-pap,http-chap,mac split-user-domain=no dns-name=\"\" }\n", gatewayIP, gatewayIP))
 	sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n")
 	sb.WriteString(":do { /ip hotspot cookie remove [find] } on-error={}\n\n")
 
@@ -141,7 +141,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=daraja.safaricom.co.ke action=accept comment=\"Safaricom Daraja HTTPS\" } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip add dst-host=fonts.googleapis.com action=accept comment=\"Google Fonts HTTPS\" } on-error={}\n")
 	// Clean up any gstatic rules that break Android CNA detection
-	sb.WriteString(":do { /ip hotspot walled-garden remove [find dst-host~\"gstatic\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host~\"gstatic\"] } on-error={}\n")
 	sb.WriteString(":do { /ip hotspot walled-garden ip remove [find dst-host~\"gstatic\"] } on-error={}\n\n")
 
 	// WAN NAT Masquerade
@@ -159,7 +159,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
 	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n", zone.ID))
-	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
 
 	// Scheduled heartbeat to report router online health every 1 minute
 	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
@@ -336,7 +336,9 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	// Ensure hotspot profile authentication methods
 	sb.WriteString("# --- Hotspot Authentication Methods ---\n")
 	sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
-	sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n\n")
+	sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
+	// Ensure hotspot redirect.html points to destination, not captive portal
+	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
 
 	// Auto-upgrade heartbeat script to push real live telemetry metrics
 	sb.WriteString("# --- Auto-Upgrade Live Telemetry Heartbeat ---\n")
@@ -425,8 +427,14 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	// Active paid customers: authenticate through hotspot user profiles with bandwidth limits
 	sb.WriteString("# --- Hotspot Plan Users (Controlled by Package Profiles) ---\n")
 	for mac, profileName := range activeBinds {
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", mac))
-		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", mac, mac, profileName))
+		macUpper := strings.ToUpper(mac)
+		macLower := strings.ToLower(mac)
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", macUpper))
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", macUpper, macUpper, profileName))
+		if macLower != macUpper {
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", macLower))
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", macLower, macLower, profileName))
+		}
 	}
 	sb.WriteString("\n")
 

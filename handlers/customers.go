@@ -14,6 +14,27 @@ import (
 	"github.com/zyranet/zyranet-api/utils"
 )
 
+// parseCustomerDateTime attempts to parse user-provided date/time strings.
+func parseCustomerDateTime(val string, endOfDay bool) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, val); err == nil {
+			if layout == "2006-01-02" && endOfDay {
+				t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, t.Location())
+			}
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid date format: %s", val)
+}
+
 // CustomerIndex lists customers with filters.
 func CustomerIndex(c *fiber.Ctx) error {
 	page, perPage := utils.ParsePage(c)
@@ -39,12 +60,106 @@ func CustomerIndex(c *fiber.Ctx) error {
 		query = query.Where("status = ?", s)
 	}
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR phone LIKE ? OR pppoe_username LIKE ?",
-			"%"+search+"%", "%"+search+"%", "%"+search+"%")
+		query = query.Where("name LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ?",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+	}
+
+	// Active Now filter (active subscription that has not expired)
+	if c.Query("active_now") == "true" || c.Query("active_now") == "1" {
+		now := time.Now()
+		query = query.Where("status = ? AND (expires_at > ? OR expires_at IS NULL)", "active", now)
+	}
+
+	// Date and time range filters (tailored for active subscribers)
+	activeMode := c.Query("active_mode", "window") // window | activated | expired
+	dateParam := c.Query("date")
+	fromParam := c.Query("date_from")
+	if fromParam == "" {
+		fromParam = c.Query("from")
+	}
+	toParam := c.Query("date_to")
+	if toParam == "" {
+		toParam = c.Query("to")
+	}
+
+	// Single date shortcut (e.g. ?date=2026-09-08)
+	if dateParam != "" {
+		if startDate, err := parseCustomerDateTime(dateParam, false); err == nil {
+			endDate, _ := parseCustomerDateTime(dateParam, true)
+			if activeMode == "activated" {
+				query = query.Where("created_at >= ? AND created_at <= ?", startDate, endDate)
+			} else if activeMode == "expired" {
+				query = query.Where("expires_at >= ? AND expires_at <= ?", startDate, endDate)
+			} else {
+				// Active during this day: customer was activated before end-of-day AND (expires after start-of-day OR is unexpired)
+				query = query.Where("created_at <= ? AND (expires_at >= ? OR expires_at IS NULL)", endDate, startDate)
+			}
+		}
+	} else if fromParam != "" || toParam != "" {
+		var fromTime, toTime time.Time
+		hasFrom := false
+		hasTo := false
+		if fromParam != "" {
+			if parsed, err := parseCustomerDateTime(fromParam, false); err == nil {
+				fromTime = parsed
+				hasFrom = true
+			}
+		}
+		if toParam != "" {
+			if parsed, err := parseCustomerDateTime(toParam, true); err == nil {
+				toTime = parsed
+				hasTo = true
+			}
+		}
+
+		if hasFrom && hasTo {
+			if activeMode == "activated" {
+				query = query.Where("created_at >= ? AND created_at <= ?", fromTime, toTime)
+			} else if activeMode == "expired" {
+				query = query.Where("expires_at >= ? AND expires_at <= ?", fromTime, toTime)
+			} else {
+				// Was active during window: activated on/before window end, expires on/after window start
+				query = query.Where("created_at <= ? AND (expires_at >= ? OR expires_at IS NULL)", toTime, fromTime)
+			}
+		} else if hasFrom {
+			if activeMode == "activated" {
+				query = query.Where("created_at >= ?", fromTime)
+			} else if activeMode == "expired" {
+				query = query.Where("expires_at >= ?", fromTime)
+			} else {
+				query = query.Where("expires_at >= ? OR expires_at IS NULL OR created_at >= ?", fromTime, fromTime)
+			}
+		} else if hasTo {
+			if activeMode == "activated" {
+				query = query.Where("created_at <= ?", toTime)
+			} else if activeMode == "expired" {
+				query = query.Where("expires_at <= ?", toTime)
+			} else {
+				query = query.Where("created_at <= ?", toTime)
+			}
+		}
 	}
 
 	query.Count(&total)
-	query.Order("created_at DESC").Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
+
+	// Sorting options
+	orderClause := "created_at DESC"
+	switch c.Query("sort") {
+	case "created_asc":
+		orderClause = "created_at ASC"
+	case "created_desc":
+		orderClause = "created_at DESC"
+	case "expires_asc":
+		orderClause = "expires_at ASC"
+	case "expires_desc":
+		orderClause = "expires_at DESC"
+	case "name_asc":
+		orderClause = "name ASC"
+	case "name_desc":
+		orderClause = "name DESC"
+	}
+
+	query.Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
 	return utils.PaginatedResponse(c, customers, total, page, perPage)
 }
 

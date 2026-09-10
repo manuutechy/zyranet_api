@@ -617,19 +617,13 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	var zone models.Zone
 	if err := config.DB.First(&zone, payment.ZoneID).Error; err == nil {
 		if payment.MacAddress != "" {
+			normalizedMac := strings.ToUpper(strings.ReplaceAll(payment.MacAddress, "-", ":"))
 			go func() {
-				err := s.whitelistWithRetry(&zone, payment.MacAddress, &pkg, 3)
+				err := s.whitelistWithRetry(&zone, normalizedMac, &pkg, 1)
 				if err != nil {
-					log.Printf("[M-Pesa] Failed to whitelist MAC %s on router after retries: %v", payment.MacAddress, err)
-					if voucher != nil {
-						if _, pushErr := s.MikroTik.PushHotspotUsers(&zone, []models.Voucher{*voucher}); pushErr != nil {
-							log.Printf("[M-Pesa] Fallback voucher push also failed for payment %d: %v", payment.ID, pushErr)
-						} else {
-							log.Printf("[M-Pesa] Fallback: voucher %s pushed as router login for payment %d", voucher.Code, payment.ID)
-						}
-					}
+					log.Printf("[M-Pesa] Async WhitelistMAC failed for %s (normal for routers behind NAT): %v", normalizedMac, err)
 				} else {
-					log.Printf("[M-Pesa] Successfully whitelisted MAC %s on router", payment.MacAddress)
+					log.Printf("[M-Pesa] Successfully whitelisted MAC %s on router", normalizedMac)
 				}
 			}()
 		} else if voucher != nil {

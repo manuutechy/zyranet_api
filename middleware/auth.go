@@ -29,9 +29,17 @@ const (
 )
 
 // SetAuthCookie writes an httpOnly session cookie carrying the JWT. The
-// cookie's Domain is shared across admin./portal./api. subdomains in
-// production (via COOKIE_DOMAIN) so all three can read a session set by the API.
+// cookie's Domain is shared across admin./portal./captive./api. subdomains
+// in production (via COOKIE_DOMAIN) so all can read a session set by the API.
+// SameSite=None is required for the captive portal (captive.zyranet.co.ke)
+// to include the cookie on cross-origin fetch requests to api.zyranet.co.ke.
+// Secure must be true whenever SameSite=None (enforced by browsers).
 func SetAuthCookie(c *fiber.Ctx, name, token string) {
+	isProduction := config.Config.AppEnv != "local"
+	sameSite := "Lax"
+	if isProduction {
+		sameSite = "None"
+	}
 	c.Cookie(&fiber.Cookie{
 		Name:     name,
 		Value:    token,
@@ -39,13 +47,18 @@ func SetAuthCookie(c *fiber.Ctx, name, token string) {
 		Domain:   config.Config.CookieDomain,
 		Expires:  time.Now().Add(config.Config.JWTExpiry),
 		HTTPOnly: true,
-		Secure:   config.Config.AppEnv != "local",
-		SameSite: "Lax",
+		Secure:   isProduction,
+		SameSite: sameSite,
 	})
 }
 
 // ClearAuthCookie deletes a previously-set auth cookie on logout.
 func ClearAuthCookie(c *fiber.Ctx, name string) {
+	isProduction := config.Config.AppEnv != "local"
+	sameSite := "Lax"
+	if isProduction {
+		sameSite = "None"
+	}
 	c.Cookie(&fiber.Cookie{
 		Name:     name,
 		Value:    "",
@@ -53,8 +66,8 @@ func ClearAuthCookie(c *fiber.Ctx, name string) {
 		Domain:   config.Config.CookieDomain,
 		Expires:  time.Now().Add(-time.Hour),
 		HTTPOnly: true,
-		Secure:   config.Config.AppEnv != "local",
-		SameSite: "Lax",
+		Secure:   isProduction,
+		SameSite: sameSite,
 	})
 }
 

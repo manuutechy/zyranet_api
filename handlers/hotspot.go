@@ -217,19 +217,13 @@ func HotspotStatus(c *fiber.Ctx) error {
 				// submits the correct username/password to the router.
 				// Fall back to pkg-N only when there is no MAC (which means whitelist
 				// also could not have used the MAC, so consistency is preserved).
-				if p.MacAddress != "" {
-					resp["username"] = strings.ToLower(p.MacAddress)
-					resp["password"] = strings.ToLower(p.MacAddress)
-				} else {
-					pkgTag := fmt.Sprintf("pkg-%d", pkgID)
-					resp["username"] = pkgTag
-					resp["password"] = pkgTag
-				}
+				pkgTag := fmt.Sprintf("pkg-%d", pkgID)
+				resp["username"] = pkgTag
+				resp["password"] = pkgTag
 			}
-		} else if p.MacAddress != "" {
-			// Package not loaded but we have a MAC — return MAC creds as best effort
-			resp["username"] = strings.ToLower(p.MacAddress)
-			resp["password"] = strings.ToLower(p.MacAddress)
+		} else {
+			resp["username"] = "pkg-1"
+			resp["password"] = "pkg-1"
 		}
 		if p.CustomerID != nil && *p.CustomerID > 0 {
 			token, _ := middleware.GenerateCustomerToken(*p.CustomerID)

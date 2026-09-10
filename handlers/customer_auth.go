@@ -736,19 +736,14 @@ func CustomerReconnect(c *fiber.Ctx) error {
 		if customer.Package.IsFreeTier || customer.Package.Price == 0 {
 			loginUser = "free"
 			loginPass = "free"
-		} else if cleanMac != "" {
-			// WhitelistMAC registers the MikroTik hotspot user as name=MAC / password=MAC.
-			// Return MAC creds so the captive-portal login form matches the registered user.
-			loginUser = cleanMac
-			loginPass = cleanMac
 		} else {
 			pkgTag := fmt.Sprintf("pkg-%d", customer.Package.ID)
 			loginUser = pkgTag
 			loginPass = pkgTag
 		}
 	} else if cleanMac != "" {
-		loginUser = cleanMac
-		loginPass = cleanMac
+		loginUser = "pkg-1"
+		loginPass = "pkg-1"
 	}
 
 	token, _ := middleware.GenerateCustomerToken(customer.ID)

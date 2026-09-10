@@ -149,6 +149,7 @@ func allowedOrigins(appEnv string) []string {
 	origins := []string{
 		"https://admin.zyranet.co.ke",
 		"https://portal.zyranet.co.ke",
+		"https://captive.zyranet.co.ke",
 	}
 	if custom := getEnv("ALLOWED_ORIGINS", ""); custom != "" {
 		for _, o := range strings.Split(custom, ",") {

@@ -66,6 +66,15 @@ func PublicZoneLoginPage(c *fiber.Ctx) error {
 	return c.SendString(html)
 }
 
+// PublicZoneRedirectPage serves the router's redirect.html directly to MikroTik /tool fetch
+// This page is served by RouterOS right after a client successfully authenticates.
+// It redirects the client to $(link-orig) or the connectivity probe so the CNA closes and grants internet.
+func PublicZoneRedirectPage(c *fiber.Ctx) error {
+	html := `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connected - Zyra Net</title><meta http-equiv="refresh" content="0; url=$(link-orig)"><script>var t="$(link-orig)";if(!t||t.indexOf("10.5.50.1")!==-1||t.indexOf("captive.zyranet.co.ke")!==-1){t="http://connectivitycheck.gstatic.com/generate_204";}window.location.replace(t);</script><style>html,body{background:#0b0f19;color:#10b981;margin:0;height:100%;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-align:center;}h1{font-size:18px;margin-bottom:8px;}p{font-size:14px;color:#94a3b8;}</style></head><body><div><h1>Connected!</h1><p>Enjoy high-speed internet.</p></div></body></html>`
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	return c.SendString(html)
+}
+
 // PublicZoneHeartbeat receives 1-minute heartbeats from active MikroTik routers.
 func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	var zone models.Zone

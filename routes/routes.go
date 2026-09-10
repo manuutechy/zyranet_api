@@ -90,6 +90,7 @@ func Register(app *fiber.App) {
 	// Public MikroTik Router Endpoints (for /tool fetch 1-line auto-provision & heartbeat)
 	v1.Get("/public/zones/setup/:id", handlers.PublicZoneSetupScript)
 	v1.Get("/public/zones/login-page/:id", handlers.PublicZoneLoginPage)
+	v1.Get("/public/zones/redirect-page/:id", handlers.PublicZoneRedirectPage)
 	v1.Get("/public/zones/heartbeat/:id", handlers.PublicZoneHeartbeat)
 	v1.Get("/public/zones/sync/:id", handlers.PublicZoneSync)
 
