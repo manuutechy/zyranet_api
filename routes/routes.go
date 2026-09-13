@@ -130,6 +130,7 @@ func Register(app *fiber.App) {
 	admin.Put("/zones/:id", adminAuth, handlers.ZoneUpdate)
 	admin.Delete("/zones/:id", adminAuth, handlers.ZoneDestroy)
 	admin.Get("/zones/:id/script", adminAuth, handlers.MikroTikScriptGenerate)
+	admin.Get("/zones/:id/provision-token", adminAuth, handlers.ZoneProvisionToken)
 	admin.Get("/zones/:id/captive-login-html", adminAuth, handlers.ZoneCaptiveLoginHTML)
 	admin.Get("/zones/:id/status", adminAuth, handlers.ZoneStatus)
 	admin.Post("/zones/:id/test-connection", adminAuth, handlers.ZoneTestConnection)

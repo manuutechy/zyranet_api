@@ -1,6 +1,8 @@
 package models
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"time"
 
 	"gorm.io/gorm"
@@ -26,6 +28,13 @@ type Zone struct {
 	Status         string         `gorm:"size:20;default:active" json:"status"`
 	LastSeenAt     *time.Time     `json:"last_seen_at"`
 	LastStatus     string         `gorm:"size:20;default:unknown" json:"last_status"` // online | offline | unknown
+	// ProvisionToken gates the unauthenticated /public/zones/* router-provisioning
+	// endpoints (setup script, sync script, heartbeat). Those endpoints hand back
+	// live customer/voucher credentials and accept router-identity updates, so a
+	// guessable numeric zone ID alone must never be enough to reach them. Never
+	// exposed in API JSON responses — see UI/admin surfaces that render the
+	// provisioning one-liner for the one place it's read back out.
+	ProvisionToken string         `gorm:"size:64" json:"-"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
@@ -36,3 +45,20 @@ type Zone struct {
 }
 
 func (Zone) TableName() string { return "zones" }
+
+// BeforeCreate generates the router-provisioning token.
+func (z *Zone) BeforeCreate(tx *gorm.DB) (err error) {
+	if z.ProvisionToken == "" {
+		z.ProvisionToken, err = GenerateProvisionToken()
+	}
+	return err
+}
+
+// GenerateProvisionToken returns a fresh random router-provisioning token.
+func GenerateProvisionToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}

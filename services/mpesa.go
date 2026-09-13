@@ -302,6 +302,20 @@ func (s *MpesaService) GetAccessToken(creds mpesaCreds) (string, error) {
 	return "", fmt.Errorf("daraja auth failed (status %d on %s): %s", lastStatus, creds.Env, lastBody)
 }
 
+// appendCallbackToken adds ?token=<MPESA_CALLBACK_SECRET> (or &token= if the
+// URL already has a query string) so mpesaCallbackAuthorized accepts the
+// inbound webhook. No-op if the URL already carries a token.
+func appendCallbackToken(url string) string {
+	if url == "" || strings.Contains(url, "token=") {
+		return url
+	}
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%stoken=%s", url, sep, config.Config.MpesaCallbackSecret)
+}
+
 // InitiateSTKPush sends a payment prompt to the customer's phone, using
 // zoneID to resolve whether that zone's Organization has its own Daraja
 // app configured or should use the platform-wide default (see
@@ -322,12 +336,8 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	env := creds.Env
 
 	// Ensure callback URL carries secret token if configured so Safaricom webhooks are never rejected
-	if config.Config.MpesaCallbackSecret != "" && !strings.Contains(callbackURL, "token=") {
-		sep := "?"
-		if strings.Contains(callbackURL, "?") {
-			sep = "&"
-		}
-		callbackURL = fmt.Sprintf("%s%stoken=%s", callbackURL, sep, config.Config.MpesaCallbackSecret)
+	if config.Config.MpesaCallbackSecret != "" {
+		callbackURL = appendCallbackToken(callbackURL)
 	}
 
 	token, err := s.GetAccessToken(creds)
@@ -1195,6 +1205,14 @@ func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationU
 	}
 	if validationURL == "" {
 		validationURL = creds.CallbackURL
+	}
+
+	// Match InitiateSTKPush: append the shared secret so mpesaCallbackAuthorized
+	// (handlers/mpesa.go) doesn't reject the C2B validation/confirmation hits
+	// Safaricom sends to these URLs.
+	if config.Config.MpesaCallbackSecret != "" {
+		confirmationURL = appendCallbackToken(confirmationURL)
+		validationURL = appendCallbackToken(validationURL)
 	}
 
 	token, err := s.GetAccessToken(creds)
