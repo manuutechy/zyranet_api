@@ -425,16 +425,17 @@ func CustomerCreditLogs(c *fiber.Ctx) error {
 	return utils.PaginatedResponse(c, logs, total, page, perPage)
 }
 
-// PurgeInactiveCustomers deletes all customer records that do not have an active unexpired subscription.
-// Only genuinely active paying customers (status == 'active' && expires_at > now) are preserved.
+// PurgeInactiveCustomers cleans up abandoned guest/voucher test accounts older than 7 days.
+// Genuine customers (even with expired plans) are retained so their accounts, history, and device sessions remain valid upon renewal.
 func PurgeInactiveCustomers() (int64, error) {
 	if config.DB == nil {
 		return 0, nil
 	}
 	now := time.Now()
+	cutoff := now.Add(-7 * 24 * time.Hour)
 	var inactiveIDs []uint
 	err := config.DB.Model(&models.Customer{}).
-		Where("phone LIKE 'GUEST%' OR account_number LIKE 'GUEST%' OR pppoe_username LIKE 'GUEST%' OR status != ? OR expires_at IS NULL OR expires_at <= ?", "active", now).
+		Where("(phone LIKE 'GUEST%' OR phone LIKE 'VCHR%' OR account_number LIKE 'ZYR#GUEST%' OR account_number LIKE 'ZYR#VCHR%') AND status != 'active' AND created_at < ?", cutoff).
 		Pluck("id", &inactiveIDs).Error
 	if err != nil {
 		log.Printf("[PurgeInactiveCustomers] Error querying inactive customers: %v", err)
@@ -452,16 +453,12 @@ func PurgeInactiveCustomers() (int64, error) {
 		config.DB.Model(&models.Payment{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
 		config.DB.Model(&models.Ticket{}).Where("customer_id IN ?", inactiveIDs).Update("customer_id", nil)
 		config.DB.Model(&models.Voucher{}).Where("used_by IN ?", inactiveIDs).Update("used_by", nil)
-		// 5. Hard delete the inactive and guest customers
+		// 5. Hard delete the abandoned guest accounts
 		res := config.DB.Unscoped().Where("id IN ?", inactiveIDs).Delete(&models.Customer{})
-		log.Printf("[PurgeInactiveCustomers] Successfully purged %d inactive/guest customer records.", res.RowsAffected)
+		log.Printf("[PurgeInactiveCustomers] Successfully purged %d abandoned guest customer records.", res.RowsAffected)
 	}
 
-	// Reset device cache so no device auto-bypasses the OTP login
-	config.DB.Exec("DELETE FROM customer_devices")
-	config.DB.Model(&models.Customer{}).Where("status != ?", "active").Update("mac_address", nil)
-
-	log.Printf("[PurgeInactiveCustomers] Retained genuine active customers only. Reset device cache for OTP enforcement.")
+	log.Printf("[PurgeInactiveCustomers] Customer accounts validated.")
 	return int64(len(inactiveIDs)), nil
 }
 

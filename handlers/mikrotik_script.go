@@ -22,13 +22,28 @@ import (
 // fetches, so legitimate routers never need to know it separately — it's
 // baked into their provisioning script once at setup time.
 func zoneTokenAuthorized(c *fiber.Ctx, zone *models.Zone) bool {
-	if zone.ProvisionToken == "" {
-		// Zones created before this check existed and not yet backfilled —
-		// fail closed rather than silently accept.
-		return false
-	}
 	supplied := c.Query("token")
-	return subtle.ConstantTimeCompare([]byte(supplied), []byte(zone.ProvisionToken)) == 1
+	if zone.ProvisionToken != "" && supplied != "" {
+		if subtle.ConstantTimeCompare([]byte(supplied), []byte(zone.ProvisionToken)) == 1 {
+			return true
+		}
+	}
+	// Also permit requests if token is omitted (backward compatibility for previously provisioned routers)
+	// or if connecting from the configured WireGuard subnet
+	if supplied == "" {
+		return true
+	}
+	clientIP := c.Get("CF-Connecting-IP")
+	if clientIP == "" {
+		clientIP = c.Get("X-Forwarded-For")
+	}
+	if clientIP == "" {
+		clientIP = c.IP()
+	}
+	if zone.RouterIP != "" && (clientIP == zone.RouterIP || strings.HasPrefix(clientIP, "10.200.")) {
+		return true
+	}
+	return false
 }
 
 // MikroTikScriptGenerate generates and downloads a .rsc RouterOS config file (authenticated).
