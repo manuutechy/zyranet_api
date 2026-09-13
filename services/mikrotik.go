@@ -64,6 +64,10 @@ func validateRouterIP(rawIP string) error {
 	if h, _, err := net.SplitHostPort(rawIP); err == nil {
 		host = h
 	}
+	// Allow WireGuard VPN subnet for router management
+	if strings.HasPrefix(host, "10.200.") {
+		return nil
+	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		// Not a resolvable hostname — try parsing directly as an IP.
@@ -451,12 +455,15 @@ func (s *MikroTikService) pushHotspotUsersAPI(zone *models.Zone, vouchers []mode
 			}
 		}
 		// Add user
-		client.Run("/ip/hotspot/user/add", //nolint:errcheck
+		_, err := client.Run("/ip/hotspot/user/add", //nolint:errcheck
 			"=name="+v.Code,
 			"=password="+v.Code,
 			"=profile="+profileName,
 			"=comment=pkg:"+profileName,
 		)
+		if err == nil {
+			count++
+		}
 	}
 	return count, nil
 }

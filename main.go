@@ -82,6 +82,23 @@ func main() {
 		log.Printf("[database] Failed to backfill users.organization_id: %v", err)
 	}
 
+	// Backfill provisioning tokens for zones created before ProvisionToken
+	// existed — new zones get one from Zone.BeforeCreate.
+	log.Println("[database] Backfilling zone provisioning tokens...")
+	var zonesWithoutToken []models.Zone
+	if err := config.DB.Where("provision_token IS NULL OR provision_token = ''").Find(&zonesWithoutToken).Error; err == nil {
+		for _, z := range zonesWithoutToken {
+			token, tErr := models.GenerateProvisionToken()
+			if tErr != nil {
+				log.Printf("[database] Failed to generate provision token for zone ID %d: %v", z.ID, tErr)
+				continue
+			}
+			if err := config.DB.Model(&models.Zone{}).Where("id = ?", z.ID).Update("provision_token", token).Error; err != nil {
+				log.Printf("[database] Failed to backfill provision token for zone ID %d: %v", z.ID, err)
+			}
+		}
+	}
+
 	// Backfill existing account numbers
 	log.Println("[database] Backfilling customer account numbers...")
 	var customersWithoutAcc []models.Customer
@@ -128,7 +145,7 @@ func main() {
 
 	// Inject services into handlers
 	handlers.InitMpesaService(mpesaSvc, smsSvc, mikrotikSvc)
-	handlers.InitVoucherService(voucherSvc)
+	handlers.InitVoucherService(voucherSvc, mikrotikSvc)
 	handlers.InitZoneServices(mikrotikSvc, scriptSvc)
 	handlers.InitCustomerAuthSMS(smsSvc)
 

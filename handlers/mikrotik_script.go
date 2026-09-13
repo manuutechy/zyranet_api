@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,24 @@ import (
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
 )
+
+// zoneTokenAuthorized guards the router-facing /public/zones/* endpoints that
+// hand back or accept sensitive per-zone data (setup/sync scripts contain
+// live customer & voucher credentials; heartbeat writes router identity).
+// Zone IDs are small sequential integers, so without this check anyone could
+// iterate them and harvest every zone's credentials. The token is embedded
+// by GenerateScript/GenerateSyncScript into the URLs the router itself
+// fetches, so legitimate routers never need to know it separately — it's
+// baked into their provisioning script once at setup time.
+func zoneTokenAuthorized(c *fiber.Ctx, zone *models.Zone) bool {
+	if zone.ProvisionToken == "" {
+		// Zones created before this check existed and not yet backfilled —
+		// fail closed rather than silently accept.
+		return false
+	}
+	supplied := c.Query("token")
+	return subtle.ConstantTimeCompare([]byte(supplied), []byte(zone.ProvisionToken)) == 1
+}
 
 // MikroTikScriptGenerate generates and downloads a .rsc RouterOS config file (authenticated).
 func MikroTikScriptGenerate(c *fiber.Ctx) error {
@@ -30,10 +49,36 @@ func MikroTikScriptGenerate(c *fiber.Ctx) error {
 	return c.SendString(content)
 }
 
+// ZoneProvisionToken returns the zone's router-provisioning token (authenticated,
+// org-scoped) so the admin UI can embed it in the 1-liner it shows for copy/paste.
+// The token itself is never included in the regular zone JSON (see Zone.ProvisionToken
+// `json:"-"`) to keep it out of list/detail responses that get logged or cached more broadly.
+func ZoneProvisionToken(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	var zone models.Zone
+	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
+	if zone.ProvisionToken == "" {
+		token, err := models.GenerateProvisionToken()
+		if err != nil {
+			return utils.ErrorResponse(c, "Failed to generate provisioning token.", "", fiber.StatusInternalServerError)
+		}
+		zone.ProvisionToken = token
+		if err := config.DB.Model(&zone).Update("provision_token", token).Error; err != nil {
+			return utils.ErrorResponse(c, "Failed to save provisioning token.", "", fiber.StatusInternalServerError)
+		}
+	}
+	return utils.SuccessResponse(c, fiber.Map{"provision_token": zone.ProvisionToken}, "Provisioning token.")
+}
+
 // PublicZoneSetupScript serves the RouterOS .rsc script directly to MikroTik /tool fetch
 func PublicZoneSetupScript(c *fiber.Ctx) error {
 	var zone models.Zone
 	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
+	if !zoneTokenAuthorized(c, &zone) {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 
@@ -81,6 +126,9 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
+	if !zoneTokenAuthorized(c, &zone) {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
 
 	now := time.Now()
 	updates := map[string]interface{}{
@@ -89,6 +137,7 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	}
 
 	// Update router IP if it was unconfigured or a private placeholder (learn real public IP)
+	// Never overwrite WireGuard tunnel IP (10.200.x.x) or already configured valid IPs
 	clientIP := c.Get("CF-Connecting-IP")
 	if clientIP == "" {
 		clientIP = c.Get("X-Forwarded-For")
@@ -96,7 +145,7 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	if clientIP == "" {
 		clientIP = c.IP()
 	}
-	if clientIP != "" && clientIP != "127.0.0.1" && (zone.RouterIP == "" || zone.RouterIP == "10.100.0.1" || strings.HasPrefix(zone.RouterIP, "10.") || strings.HasPrefix(zone.RouterIP, "192.168.")) {
+	if clientIP != "" && clientIP != "127.0.0.1" && !strings.HasPrefix(zone.RouterIP, "10.200.") && (zone.RouterIP == "" || zone.RouterIP == "10.100.0.1") {
 		updates["router_ip"] = clientIP
 	}
 
@@ -141,6 +190,9 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 func PublicZoneSync(c *fiber.Ctx) error {
 	var zone models.Zone
 	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil {
+		return c.SendString("# Zone not found\n")
+	}
+	if !zoneTokenAuthorized(c, &zone) {
 		return c.SendString("# Zone not found\n")
 	}
 

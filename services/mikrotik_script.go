@@ -154,17 +154,30 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
 	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
 	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n\n")
+	// Management ports (WebFig/WinBox/API) are only ever needed from ether1
+	// (WAN/VPN uplink) for remote admin, never from the hotspot LAN bridge
+	// where every connecting guest device sits. Scoping the accept rule to
+	// in-interface=ether1 (instead of every interface, with no source
+	// restriction) keeps these off the open hotspot network while still
+	// reachable over the WAN/VPN path admins actually use.
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=ether1 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n")
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Block Hotspot Management\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=!ether1 action=drop comment=\"Zyra Net Block Hotspot Management\" place-before=1 }\n\n")
 
 	// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
 	sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n", zone.ID))
 	sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
 
-	// Scheduled heartbeat to report router online health every 1 minute
+	// Scheduled heartbeat to report router online health every 1 minute.
+	// The sync/heartbeat URLs carry the zone's ProvisionToken (`?token=`) —
+	// those endpoints hand back live customer/voucher credentials and accept
+	// router-identity updates, so they're gated server-side (zoneTokenAuthorized
+	// in handlers/mikrotik_script.go) on this same token.
 	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-heartbeat\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" comment=\"Zyra Net Cloud Sync & Telemetry\" } on-error={}\n", zone.ID, zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" comment=\"Zyra Net Cloud Sync & Telemetry\" } on-error={}\n", zone.ID, zone.ProvisionToken, zone.ID, zone.ProvisionToken))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-heartbeat-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-heartbeat-sched interval=1m on-event=zyranet-heartbeat comment=\"Zyra Net Cloud Telemetry Scheduler\" } on-error={}\n\n")
 
@@ -342,7 +355,7 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 
 	// Auto-upgrade heartbeat script to push real live telemetry metrics
 	sb.WriteString("# --- Auto-Upgrade Live Telemetry Heartbeat ---\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script set [find name=\"zyranet-heartbeat\"] source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" } on-error={}\n\n", zone.ID, zone.ID))
+	sb.WriteString(fmt.Sprintf(":do { /system script set [find name=\"zyranet-heartbeat\"] source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" } on-error={}\n\n", zone.ID, zone.ProvisionToken, zone.ID, zone.ProvisionToken))
 
 	// Ensure package profiles & auto-connect users
 	sb.WriteString("# --- Hotspot Package Profiles & Auto-Connect Users ---\n")
@@ -438,6 +451,31 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	}
 	sb.WriteString("\n")
 
+	// Active/Unused Hotspot Vouchers
+	var unusedVouchers []models.Voucher
+	config.DB.Preload("Package").Where("zone_id = ? AND status = 'unused'", zone.ID).Find(&unusedVouchers)
+	sb.WriteString("# --- Hotspot Users (Vouchers) ---\n")
+	for _, v := range unusedVouchers {
+		if v.Package == nil {
+			continue
+		}
+		profileName := sanitizeProfileName(v.Package.Name)
+		sb.WriteString(fmt.Sprintf(
+			":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" }\n",
+			v.Code, v.Code, v.Code, profileName, profileName, v.Code, v.Code, profileName, profileName,
+		))
+	}
+	sb.WriteString("\n")
+
+	// Depleted / Expired Vouchers Cleanup
+	var oldVouchers []models.Voucher
+	config.DB.Where("zone_id = ? AND status IN ('depleted', 'expired')", zone.ID).Find(&oldVouchers)
+	sb.WriteString("# --- Depleted / Expired Vouchers Cleanup ---\n")
+	for _, v := range oldVouchers {
+		sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", v.Code))
+	}
+	sb.WriteString("\n")
+
 	// Expired customers: decommission
 	sb.WriteString("# --- Expired Customer Sessions Decommissioner ---\n")
 	for _, cust := range expiredCustomers {
@@ -463,7 +501,13 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
 	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
 	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n\n")
+	// Management ports must only ever be reachable from ether1 (WAN/VPN
+	// uplink), never from the open hotspot LAN where every guest device
+	// sits — see the matching pair of rules in GenerateScript.
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=ether1 action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n")
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Block Hotspot Management\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=!ether1 action=drop comment=\"Zyra Net Block Hotspot Management\" place-before=1 }\n\n")
 
 	return sb.String(), nil
 }

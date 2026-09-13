@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	"fmt"
+	"log"
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
@@ -11,9 +15,12 @@ import (
 
 var voucherSvcGlobal *services.VoucherService
 
-// InitVoucherService injects the voucher service.
-func InitVoucherService(svc *services.VoucherService) {
+// InitVoucherService injects the voucher service and router service.
+func InitVoucherService(svc *services.VoucherService, mikrotik *services.MikroTikService) {
 	voucherSvcGlobal = svc
+	if mikrotik != nil {
+		mikrotikSvcGlobal = mikrotik
+	}
 }
 
 // VoucherIndex lists vouchers with filters.
@@ -83,24 +90,55 @@ func VoucherGenerate(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 	}
 
+	var createdVouchers []*models.Voucher
 	if body.Quantity == 1 {
 		voucher, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
 		if err != nil {
 			return utils.ErrorResponse(c, err.Error(), "Voucher generation failed.", fiber.StatusInternalServerError)
 		}
-		return utils.SuccessResponse(c, voucher, "Voucher generated successfully.", fiber.StatusCreated)
+		createdVouchers = append(createdVouchers, voucher)
+	} else {
+		// Batch generation
+		for i := 0; i < body.Quantity; i++ {
+			v, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
+			if err != nil {
+				return utils.ErrorResponse(c, err.Error(), "Batch generation failed.", fiber.StatusInternalServerError)
+			}
+			createdVouchers = append(createdVouchers, v)
+		}
 	}
 
-	// Batch generation
-	var vouchers []*models.Voucher
-	for i := 0; i < body.Quantity; i++ {
-		v, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
-		if err != nil {
-			return utils.ErrorResponse(c, err.Error(), "Batch generation failed.", fiber.StatusInternalServerError)
+	// Push newly generated vouchers to router hotspot
+	if mikrotikSvcGlobal == nil {
+		log.Printf("[VoucherGenerate] WARNING: mikrotikSvcGlobal is nil")
+	} else if len(createdVouchers) > 0 {
+		var voucherModels []models.Voucher
+		for _, v := range createdVouchers {
+			var vm models.Voucher
+			if err := config.DB.Preload("Package").First(&vm, v.ID).Error; err != nil {
+				log.Printf("[VoucherGenerate] Preload failed for voucher %d: %v", v.ID, err)
+			} else if vm.Package == nil {
+				log.Printf("[VoucherGenerate] Voucher %d has nil package", v.ID)
+			} else {
+				voucherModels = append(voucherModels, vm)
+			}
 		}
-		vouchers = append(vouchers, v)
+		if len(voucherModels) > 0 {
+			go func(z models.Zone, vm []models.Voucher) {
+				count, err := mikrotikSvcGlobal.PushHotspotUsers(&z, vm)
+				if err != nil {
+					log.Printf("[VoucherGenerate] PushHotspotUsers to router failed: %v", err)
+				} else {
+					log.Printf("[VoucherGenerate] Successfully pushed %d vouchers to router at %s", count, z.RouterIP)
+				}
+			}(targetZone, voucherModels)
+		}
 	}
-	return utils.SuccessResponse(c, vouchers, "Vouchers generated successfully.", fiber.StatusCreated)
+
+	if body.Quantity == 1 {
+		return utils.SuccessResponse(c, createdVouchers[0], "Voucher generated successfully.", fiber.StatusCreated)
+	}
+	return utils.SuccessResponse(c, createdVouchers, "Vouchers generated successfully.", fiber.StatusCreated)
 }
 
 // VoucherShow returns a single voucher.
@@ -142,6 +180,7 @@ func VoucherRedeem(c *fiber.Ctx) error {
 		Code  string `json:"code"`
 		Phone string `json:"phone"`
 		Name  string `json:"name"`
+		Mac   string `json:"mac"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
 		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
@@ -156,12 +195,51 @@ func VoucherRedeem(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, err.Error(), "Redemption failed.", fiber.StatusBadRequest)
 	}
 
-	// Update customer name if provided
-	if body.Name != "" {
-		if c, ok := result["customer"].(*models.Customer); ok {
-			config.DB.Model(c).Update("name", body.Name)
+	cleanMac := strings.ToLower(strings.TrimSpace(body.Mac))
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
+
+	// Update customer name and MAC if provided
+	if cust, ok := result["customer"].(models.Customer); ok {
+		updates := map[string]interface{}{}
+		if body.Name != "" {
+			updates["name"] = body.Name
+			cust.Name = body.Name
+		}
+		if cleanMac != "" {
+			updates["mac_address"] = cleanMac
+			cust.MacAddress = &cleanMac
+		}
+		if len(updates) > 0 {
+			config.DB.Model(&models.Customer{}).Where("id = ?", cust.ID).Updates(updates)
+		}
+		result["customer"] = cust
+	}
+
+	redeemedPkg := result["package"].(models.Package)
+	redeemedCustomer := result["customer"].(models.Customer)
+
+	// Whitelist MAC on zone router if available
+	if cleanMac != "" && mikrotikSvcGlobal != nil {
+		var zone models.Zone
+		if err := config.DB.First(&zone, redeemedCustomer.ZoneID).Error; err == nil {
+			go func(z models.Zone, m string, p models.Package) {
+				if err := mikrotikSvcGlobal.WhitelistMAC(&z, m, &p); err != nil {
+					log.Printf("[VoucherRedeem] WhitelistMAC for %s failed: %v", m, err)
+				} else {
+					log.Printf("[VoucherRedeem] Successfully whitelisted MAC %s on router at %s", m, z.RouterIP)
+				}
+			}(zone, cleanMac, redeemedPkg)
 		}
 	}
+
+	pkgTag := fmt.Sprintf("pkg-%d", redeemedPkg.ID)
+	speed := fmt.Sprintf("%.0f Mbps", float64(redeemedPkg.SpeedDownloadKbps)/1024)
+
+	result["username"] = pkgTag
+	result["password"] = pkgTag
+	result["plan_name"] = redeemedPkg.Name
+	result["speed"] = speed
+	result["expires_at"] = redeemedCustomer.ExpiresAt
 
 	return utils.SuccessResponse(c, result, "Voucher redeemed successfully. Internet activated.")
 }
@@ -175,6 +253,7 @@ func VoucherRedeemAuthenticated(c *fiber.Ctx) error {
 
 	var body struct {
 		Code string `json:"code"`
+		Mac  string `json:"mac"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
 		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
@@ -189,5 +268,41 @@ func VoucherRedeemAuthenticated(c *fiber.Ctx) error {
 	if err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Redemption failed.", fiber.StatusBadRequest)
 	}
+
+	cleanMac := strings.ToLower(strings.TrimSpace(body.Mac))
+	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
+	if cleanMac != "" {
+		customer.MacAddress = &cleanMac
+		config.DB.Model(&customer).Update("mac_address", cleanMac)
+	} else if customer.MacAddress != nil {
+		cleanMac = *customer.MacAddress
+	}
+
+	redeemedPkg := result["package"].(models.Package)
+	redeemedCustomer := result["customer"].(models.Customer)
+
+	// Whitelist MAC on zone router if available
+	if cleanMac != "" && mikrotikSvcGlobal != nil {
+		var zone models.Zone
+		if err := config.DB.First(&zone, redeemedCustomer.ZoneID).Error; err == nil {
+			go func(z models.Zone, m string, p models.Package) {
+				if err := mikrotikSvcGlobal.WhitelistMAC(&z, m, &p); err != nil {
+					log.Printf("[VoucherRedeemAuthenticated] WhitelistMAC for %s failed: %v", m, err)
+				} else {
+					log.Printf("[VoucherRedeemAuthenticated] Successfully whitelisted MAC %s on router at %s", m, z.RouterIP)
+				}
+			}(zone, cleanMac, redeemedPkg)
+		}
+	}
+
+	pkgTag := fmt.Sprintf("pkg-%d", redeemedPkg.ID)
+	speed := fmt.Sprintf("%.0f Mbps", float64(redeemedPkg.SpeedDownloadKbps)/1024)
+
+	result["username"] = pkgTag
+	result["password"] = pkgTag
+	result["plan_name"] = redeemedPkg.Name
+	result["speed"] = speed
+	result["expires_at"] = redeemedCustomer.ExpiresAt
+
 	return utils.SuccessResponse(c, result, "Voucher redeemed successfully. Internet activated.")
 }
