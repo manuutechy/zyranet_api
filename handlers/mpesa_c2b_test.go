@@ -25,7 +25,7 @@ func setupC2BTestDB(t *testing.T) {
 	if err := db.AutoMigrate(
 		&models.Organization{}, &models.OrganizationMpesaConfig{}, &models.Zone{}, &models.Package{},
 		&models.Customer{}, &models.CustomerDevice{}, &models.Payment{}, &models.CreditLog{},
-		&models.UnmatchedC2BPayment{}, &models.Setting{}, &models.User{}, &models.Payout{}, &models.PlatformSetting{},
+		&models.UnmatchedC2BPayment{}, &models.Setting{}, &models.User{}, &models.Payout{}, &models.PlatformSetting{}, &models.RadiusAccount{}, &models.SmsLog{}, &models.AuditLog{},
 	); err != nil {
 		t.Fatal(err)
 	}

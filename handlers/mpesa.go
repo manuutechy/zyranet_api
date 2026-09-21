@@ -430,6 +430,10 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 	}
 	config.DB.Create(&payment)
 
+	if radiusSvcGlobal != nil {
+		radiusSvcGlobal.SyncCustomerAsync(customer.ID)
+	}
+
 	return c.JSON(fiber.Map{
 		"ResultCode": 0,
 		"ResultDesc": "Success",

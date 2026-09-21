@@ -38,10 +38,21 @@ type Zone struct {
 	// LegacyRequestAt is the last time this zone's router called a
 	// /public/zones/* endpoint without a valid ProvisionToken — i.e. it still
 	// runs a pre-token script and needs re-provisioning. Nil = never seen.
-	LegacyRequestAt *time.Time     `json:"legacy_request_at"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+	LegacyRequestAt *time.Time `json:"legacy_request_at"`
+	// AuthMode is how this zone's router authenticates customers: "api" (the
+	// API pushes users/MACs to the router — the original model) or "radius"
+	// (the router asks the RADIUS server; the API keeps the RADIUS tables in
+	// step). RadiusSecret is the shared secret between this router and the
+	// RADIUS server; never exposed in JSON.
+	AuthMode     string `gorm:"size:10;default:api" json:"auth_mode"`
+	RadiusSecret string `gorm:"size:64" json:"-"`
+	// UplinkDownMbps/UplinkUpMbps are what the ISP really gets from upstream,
+	// used only to generate the fair-queue tuning script.
+	UplinkDownMbps int            `json:"uplink_down_mbps"`
+	UplinkUpMbps   int            `json:"uplink_up_mbps"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
 	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

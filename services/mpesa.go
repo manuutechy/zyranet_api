@@ -23,6 +23,9 @@ type MpesaService struct {
 	SMS      *SmsService
 	Voucher  *VoucherService
 	MikroTik *MikroTikService
+	// Radius, when set, is told about a customer as soon as they pay so a
+	// reconnecting device is accepted without waiting for the next reconcile.
+	Radius *RadiusService
 
 	httpClient *http.Client
 
@@ -893,6 +896,9 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		}
 
 		config.DB.Model(customer).Updates(custUpdates)
+		if s.Radius != nil {
+			s.Radius.SyncCustomerAsync(customer.ID)
+		}
 
 		templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
 		msg := utils.RenderTemplate(templateActive, map[string]string{

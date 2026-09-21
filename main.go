@@ -40,6 +40,7 @@ func main() {
 		&models.OrganizationSmsConfig{},
 		&models.UnmatchedC2BPayment{},
 		&models.Payout{},
+		&models.RadiusAccount{},
 		&models.User{},
 		&models.Zone{},
 		&models.Package{},
@@ -147,6 +148,9 @@ func main() {
 	// Inject services into handlers
 	handlers.InitMpesaService(mpesaSvc, smsSvc, mikrotikSvc)
 	handlers.InitPayoutService(services.NewPayoutService(mpesaSvc))
+	radiusSvc := services.NewRadiusService()
+	handlers.InitRadiusService(radiusSvc)
+	mpesaSvc.Radius = radiusSvc
 	handlers.InitVoucherService(voucherSvc, mikrotikSvc)
 	handlers.InitZoneServices(mikrotikSvc, scriptSvc)
 	handlers.InitCustomerAuthSMS(smsSvc)
@@ -239,6 +243,11 @@ func main() {
 	watchdog := services.NewWatchdogService(services.NewMikroTikService())
 	watchdog.Start()
 	defer watchdog.Stop()
+
+	// Keep RADIUS tables in step with who is paid up (only zones switched to
+	// RADIUS are touched; a no-op until FreeRADIUS is installed).
+	radiusSvc.Start()
+	defer radiusSvc.Stop()
 
 	// Start Automated Subscriber Expiry SMS Reminders
 	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())

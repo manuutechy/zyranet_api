@@ -235,6 +235,10 @@ func Register(app *fiber.App) {
 	admin.Get("/customers/:id/sessions", adminAuth, handlers.CustomerSessions)
 	admin.Post("/customers/:id/add-credit", adminAuth, handlers.CustomerAddCredit)
 	admin.Get("/customers/:id/credit-logs", adminAuth, handlers.CustomerCreditLogs)
+	admin.Get("/customers/:id/activity", adminAuth, handlers.CustomerActivity)
+	admin.Get("/logs/sessions", adminAuth, middleware.IsManagerOrAdmin(), handlers.ClientSessionsLog)
+	admin.Get("/logs/sign-ins", adminAuth, middleware.IsManagerOrAdmin(), handlers.ClientSignInsLog)
+	admin.Get("/zones/:id/queue-tuning-script", adminAuth, middleware.IsSuperAdmin(), handlers.ZoneQueueTuningScript)
 	admin.Post("/customers/cleanup-inactive", adminAuth, handlers.CustomerCleanupInactive)
 
 	// Payments
@@ -309,6 +313,9 @@ func Register(app *fiber.App) {
 	platform.Get("/organizations", platformAuth, handlers.OrganizationIndex)
 	platform.Get("/subdomains/check", platformAuth, handlers.OrganizationSubdomainCheck)
 	platform.Get("/routers/legacy", platformAuth, handlers.PlatformLegacyRouters)
+	platform.Get("/radius/status", platformAuth, handlers.PlatformRadiusStatus)
+	platform.Post("/zones/:id/radius", platformAuth, handlers.PlatformZoneRadiusSet)
+	platform.Get("/zones/:id/radius-script", platformAuth, handlers.PlatformZoneRadiusScript)
 	platform.Get("/payouts/balances", platformAuth, handlers.PlatformPayoutBalances)
 	platform.Post("/payouts/backfill", platformAuth, handlers.PlatformPayoutBackfill)
 	platform.Get("/payouts", platformAuth, handlers.PlatformPayoutIndex)

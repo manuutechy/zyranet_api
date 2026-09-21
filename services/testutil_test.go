@@ -30,6 +30,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.Ticket{},
 		&models.Payment{},
 		&models.Payout{},
+		&models.RadiusAccount{},
 		&models.Session{},
 		&models.Setting{},
 		&models.Voucher{},

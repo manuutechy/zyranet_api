@@ -278,7 +278,12 @@ func (s *SmsService) Send(organizationID uint, phone, message string) (*models.S
 		status, providerResponse = s.sendMobileSasa(creds, phone, message)
 	}
 
+	var logOrg *uint
+	if organizationID != 0 {
+		logOrg = &organizationID
+	}
 	logEntry := &models.SmsLog{
+		OrganizationID:   logOrg,
 		Phone:            phone,
 		Message:          message,
 		Status:           status,

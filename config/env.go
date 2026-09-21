@@ -88,6 +88,15 @@ type AppConfig struct {
 	// zone's setup script by guessing its sequential id.
 	AllowLegacyRouterRequests bool
 
+	// RadiusServerAddr is the address routers use to reach the RADIUS server —
+	// the server's WireGuard tunnel address, so RADIUS traffic never crosses the
+	// public internet. Used only when generating router scripts.
+	RadiusServerAddr string
+	// RadiusReloadCmd is run after a router is added to or removed from the
+	// RADIUS client list, because FreeRADIUS only reads that list when it
+	// (re)loads. Empty disables it (then a person must reload the server).
+	RadiusReloadCmd string
+
 	// BaseDomain is the parent domain ISPs' subdomains hang off: an ISP with
 	// subdomain "acme" has its staff admin at acme.<BaseDomain>.
 	BaseDomain string
@@ -113,6 +122,9 @@ func Load() {
 		DBName: getEnv("DB_NAME", "zyranet"),
 		DBUser: getEnv("DB_USER", "root"),
 		DBPass: getEnv("DB_PASS", ""),
+
+		RadiusServerAddr: getEnv("RADIUS_SERVER_ADDR", "10.200.0.1"),
+		RadiusReloadCmd:  strings.TrimSpace(getEnv("RADIUS_RELOAD_CMD", "sudo -n systemctl reload freeradius")),
 
 		AllowLegacyRouterRequests: strings.EqualFold(getEnv("ALLOW_LEGACY_ROUTER_REQUESTS", "false"), "true"),
 
