@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
 )
 
@@ -44,7 +45,8 @@ func TestGenerateScript_IdempotencyAndBridgePortRemoval(t *testing.T) {
 	expectedSnippets := []string{
 		`:local br "bridge-hotspot";`,
 		`:if ([:len [/interface bridge find name="bridge-hotspot"]] = 0) do={`,
-		`:do { /interface wireless disable [find default-name=wlan1] } on-error={}`,
+		`:do { /interface wireless disable [find] } on-error={}`,
+		`:do { /interface wifi disable [find] } on-error={}`,
 		`:do { /ip address add address=10.5.50.1/24 interface=$br comment="Zyra Net Hotspot Gateway" } on-error={}`,
 		`hs-pool-zyranet`,
 		`hs-dhcp-zyranet`,
@@ -132,14 +134,14 @@ func TestGenerateSyncScript(t *testing.T) {
 
 	mac := "00:11:22:33:44:55"
 	cust := models.Customer{
-		Name:          "John Doe",
-		Phone:         "254712345678",
-		ZoneID:        zone.ID,
-		Type:          "hotspot",
-		Status:        "active",
-		PackageID:     pkg.ID,
-		MacAddress:    &mac,
-		ExpiresAt:     &expiry,
+		Name:       "John Doe",
+		Phone:      "254712345678",
+		ZoneID:     zone.ID,
+		Type:       "hotspot",
+		Status:     "active",
+		PackageID:  pkg.ID,
+		MacAddress: &mac,
+		ExpiresAt:  &expiry,
 	}
 	db.Create(&cust)
 
@@ -157,5 +159,75 @@ func TestGenerateSyncScript(t *testing.T) {
 	}
 	if !strings.Contains(script, "login-by=mac,http-pap,http-chap") {
 		t.Errorf("expected script to contain login-by=mac,http-pap,http-chap, got:\n%s", script)
+	}
+}
+
+func scriptFor(t *testing.T, z models.Zone) (full, sync string) {
+	t.Helper()
+	setupTestDB(t)
+	z.Name, z.Location, z.RouterName, z.RouterIP = "Maseno", "L", "r", "10.200.0.2"
+	if err := config.DB.Create(&z).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMikroTikScriptService()
+	full, _, err := svc.GenerateScript(z.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sync, _ = svc.GenerateSyncScript(z.ID)
+	return full, sync
+}
+
+func TestGenerateScript_ServiceModes(t *testing.T) {
+	hs := "/ip hotspot add name=hs-zyranet"
+	dhcp := "hs-dhcp-zyranet"
+	ppp := "/interface pppoe-server server add"
+	cases := []struct {
+		mode           string
+		hotspot, pppoe bool
+	}{{"hotspot", true, false}, {"pppoe", false, true}, {"both", true, true}, {"", true, true}}
+	for _, c := range cases {
+		full, sync := scriptFor(t, models.Zone{ServiceMode: c.mode})
+		if got := strings.Contains(full, hs) && strings.Contains(full, dhcp); got != c.hotspot {
+			t.Errorf("mode %q: hotspot configured = %v, want %v", c.mode, got, c.hotspot)
+		}
+		if got := strings.Contains(full, ppp); got != c.pppoe {
+			t.Errorf("mode %q: PPPoE configured = %v, want %v", c.mode, got, c.pppoe)
+		}
+		if got := strings.Contains(sync, "Hotspot Authentication Methods"); got != c.hotspot {
+			t.Errorf("mode %q: sync touches hotspot = %v, want %v", c.mode, got, c.hotspot)
+		}
+		// Every mode keeps the heartbeat, NAT and management lock-down.
+		for _, must := range []string{"zyranet-heartbeat", "Zyra Net Internet Access NAT", "Zyra Net Remote Access"} {
+			if !strings.Contains(full, must) {
+				t.Errorf("mode %q: missing %q", c.mode, must)
+			}
+		}
+	}
+}
+
+func TestGenerateScript_PortsAndWifi(t *testing.T) {
+	full, sync := scriptFor(t, models.Zone{WanPort: "sfp-sfpplus1", LanPorts: "ether1,ether2,wifi1,wlan1", ServiceMode: "hotspot"})
+	for _, want := range []string{
+		"in-interface=sfp-sfpplus1 action=accept", "in-interface=!sfp-sfpplus1 action=drop",
+		"/interface bridge port add bridge=$br interface=ether1",
+		`/interface wifi set [find default-name=wifi1] configuration.ssid="Zyra Net WiFi"`,
+		`/interface wireless set [find default-name=wlan1] ssid="Zyra Net WiFi"`,
+	} {
+		if !strings.Contains(full, want) {
+			t.Errorf("script missing %q", want)
+		}
+	}
+	if !strings.Contains(sync, "in-interface=sfp-sfpplus1") {
+		t.Error("the sync script must use the zone's internet port too")
+	}
+	if strings.Contains(full, "in-interface=ether1 ") {
+		t.Error("ether1 is a customer port here and must not be treated as the uplink")
+	}
+
+	// A malicious or mistyped port list never reaches the router.
+	full, _ = scriptFor(t, models.Zone{LanPorts: "ether2; /system reset"})
+	if strings.Contains(full, "/system reset") || !strings.Contains(full, "interface=ether2 }") {
+		t.Error("invalid port input must fall back to the safe defaults")
 	}
 }

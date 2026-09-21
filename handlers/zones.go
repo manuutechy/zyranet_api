@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -61,6 +62,15 @@ func ZoneStore(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 	body.OrganizationID = claims.OrganizationID
+	body.AuthMode = "" // RADIUS is switched on from the platform, not here
+	wan, lan, err := utils.NormalizeRouterPorts(body.WanPort, defaultString(body.LanPorts, "ether2,ether3,ether4"))
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	body.WanPort, body.LanPorts = wan, lan
+	if body.ServiceMode, err = validServiceMode(body.ServiceMode, "hotspot"); err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
 
 	if err := config.DB.Create(&body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create zone.", fiber.StatusInternalServerError)
@@ -97,6 +107,34 @@ func ZoneUpdate(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 	delete(body, "organization_id") // never allow moving a zone to another tenant via this endpoint
+	// Server-managed fields are never set from the ISP admin.
+	for _, k := range []string{"auth_mode", "legacy_request_at", "last_seen_at", "last_status", "id"} {
+		delete(body, k)
+	}
+	_, hasWan := body["wan_port"]
+	_, hasLan := body["lan_ports"]
+	if hasWan || hasLan {
+		wanIn, lanIn := zone.WanPort, zone.LanPorts
+		if v, ok := body["wan_port"].(string); ok {
+			wanIn = v
+		}
+		if v, ok := body["lan_ports"].(string); ok {
+			lanIn = v
+		}
+		wan, lan, err := utils.NormalizeRouterPorts(wanIn, lanIn)
+		if err != nil {
+			return utils.ErrorResponse(c, err.Error(), "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+		body["wan_port"], body["lan_ports"] = wan, lan
+	}
+	if raw, ok := body["service_mode"]; ok {
+		str, _ := raw.(string)
+		mode, err := validServiceMode(str, "")
+		if err != nil {
+			return utils.ErrorResponse(c, err.Error(), "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+		body["service_mode"] = mode
+	}
 
 	if err := config.DB.Model(&zone).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
@@ -355,4 +393,24 @@ func canAccessZone(c *fiber.Ctx, zone *models.Zone) bool {
 		return true
 	}
 	return zone.ManagerID != nil && *zone.ManagerID == claims.UserID
+}
+
+// validServiceMode checks a zone service mode; "" becomes def (or is an error
+// when def is "").
+func validServiceMode(mode, def string) (string, error) {
+	if mode == "" {
+		mode = def
+	}
+	switch mode {
+	case "hotspot", "pppoe", "both":
+		return mode, nil
+	}
+	return "", fmt.Errorf("service_mode must be hotspot, pppoe or both")
+}
+
+func defaultString(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }

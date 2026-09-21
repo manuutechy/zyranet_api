@@ -10,18 +10,25 @@ import (
 
 // Zone represents a geographic area with its own MikroTik router.
 type Zone struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	Name           string     `gorm:"size:255;not null" json:"name"`
-	Location       string     `gorm:"size:255;not null" json:"location"`
-	Description    *string    `gorm:"type:text" json:"description"`
-	RouterName     string     `gorm:"size:255;not null" json:"router_name"`
-	RouterIP       string     `gorm:"size:45;not null" json:"router_ip"`
-	ConnectionType string     `gorm:"size:10;default:api" json:"connection_type"` // api | rest
-	RouterPort     int        `gorm:"default:8728" json:"router_port"`
-	RouterUsername *string    `gorm:"size:255" json:"router_username"`
-	RouterPassword *string    `gorm:"type:text" json:"router_password"`
-	RouterUseSSL   bool       `gorm:"default:false" json:"router_use_ssl"`
-	LanPorts       string     `gorm:"size:255;default:ether2,ether3,ether4" json:"lan_ports"`
+	ID             uint    `gorm:"primaryKey" json:"id"`
+	Name           string  `gorm:"size:255;not null" json:"name"`
+	Location       string  `gorm:"size:255;not null" json:"location"`
+	Description    *string `gorm:"type:text" json:"description"`
+	RouterName     string  `gorm:"size:255;not null" json:"router_name"`
+	RouterIP       string  `gorm:"size:45;not null" json:"router_ip"`
+	ConnectionType string  `gorm:"size:10;default:api" json:"connection_type"` // api | rest
+	RouterPort     int     `gorm:"default:8728" json:"router_port"`
+	RouterUsername *string `gorm:"size:255" json:"router_username"`
+	RouterPassword *string `gorm:"type:text" json:"router_password"`
+	RouterUseSSL   bool    `gorm:"default:false" json:"router_use_ssl"`
+	LanPorts       string  `gorm:"size:255;default:ether2,ether3,ether4" json:"lan_ports"`
+	// WanPort is the router port that goes to the internet (uplink).
+	WanPort string `gorm:"size:32;default:ether1" json:"wan_port"`
+	// ServiceMode is what the router does for customers:
+	//   hotspot — WiFi captive portal (customers pay/log in on the portal)
+	//   pppoe   — billing only: PPPoE accounts, no captive portal
+	//   both    — hotspot and PPPoE on the same router
+	ServiceMode    string     `gorm:"size:10;default:both" json:"service_mode"`
 	HotspotAddress string     `gorm:"size:45;default:10.5.50.1/24" json:"hotspot_address"`
 	ManagerID      *uint      `json:"manager_id"`
 	OrganizationID uint       `gorm:"not null;index" json:"organization_id"`

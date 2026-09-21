@@ -581,3 +581,54 @@ func TestCaptivePortalNotice(t *testing.T) {
 		t.Errorf("281 chars: %d, want 422", st)
 	}
 }
+
+func TestZoneSave_ValidatesPortsAndMode(t *testing.T) {
+	setupTenantTest(t)
+	org, _ := seedTenant(t, "acme", nil, "active")
+	app := fiber.New()
+	auth := func(c *fiber.Ctx) error {
+		c.Locals("claims", &middleware.Claims{Role: "super_admin", OrganizationID: org.ID, Type: "admin"})
+		return c.Next()
+	}
+	app.Post("/zones", auth, ZoneStore)
+	app.Put("/zones/:id", auth, ZoneUpdate)
+	send := func(method, path, body string) (int, map[string]interface{}) {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ := app.Test(req, -1)
+		out := map[string]interface{}{}
+		json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	base := `"name":"Z","location":"L","router_name":"r","router_ip":"10.200.0.9"`
+
+	st, out := send("POST", "/zones", `{`+base+`,"wan_port":"ether1","lan_ports":"ether2, wlan1"}`)
+	if st != 201 {
+		t.Fatalf("create: %d %v", st, out)
+	}
+	z := out["data"].(map[string]interface{})
+	if z["lan_ports"] != "ether2,wlan1" || z["service_mode"] != "hotspot" || z["auth_mode"] == "radius" {
+		t.Errorf("created zone: %v", z)
+	}
+	id := int(z["id"].(float64))
+	for _, bad := range []string{
+		`{` + base + `,"lan_ports":"ether2; /system reset"}`,
+		`{` + base + `,"wan_port":"ether2","lan_ports":"ether2"}`,
+		`{` + base + `,"service_mode":"radius-magic"}`,
+	} {
+		if st, _ := send("POST", "/zones", bad); st != 422 {
+			t.Errorf("create %s: %d, want 422", bad, st)
+		}
+	}
+	if st, out := send("PUT", fmt.Sprintf("/zones/%d", id), `{"service_mode":"pppoe","lan_ports":"ether3,ether4","auth_mode":"radius"}`); st != 200 {
+		t.Fatalf("update: %d %v", st, out)
+	}
+	var got models.Zone
+	config.DB.First(&got, id)
+	if got.ServiceMode != "pppoe" || got.LanPorts != "ether3,ether4" || got.AuthMode == "radius" {
+		t.Errorf("after update: mode=%q lan=%q auth=%q", got.ServiceMode, got.LanPorts, got.AuthMode)
+	}
+	if st, _ := send("PUT", fmt.Sprintf("/zones/%d", id), `{"wan_port":"ether3"}`); st != 422 {
+		t.Errorf("moving the uplink onto a customer port: %d, want 422", st)
+	}
+}
