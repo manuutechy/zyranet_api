@@ -321,3 +321,22 @@ func TestPayoutCallbacks_RefuseEverythingWhenNoSecretIsConfigured(t *testing.T) 
 		t.Errorf("a forged callback changed the payout: %+v", got)
 	}
 }
+
+func TestManualPayment_RejectsAnotherISPsPackage(t *testing.T) {
+	setupPayoutTest(t)
+	a := seedISP(t, "a", "", 1)
+	b := seedISP(t, "b", "", 1)
+	cust := seedCustomer(t, a.ZoneID, "Alice", "254711000001", "ZYR#A")
+	var bPkg models.Package
+	config.DB.Where("zone_id = ?", b.ZoneID).First(&bPkg)
+
+	app := fiber.New()
+	app.Post("/payments/manual", func(c *fiber.Ctx) error {
+		c.Locals("claims", &middleware.Claims{Role: "super_admin", OrganizationID: a.OrgID, Type: "admin"})
+		return c.Next()
+	}, PaymentRecordManual)
+	body := fmt.Sprintf(`{"customer_id":%d,"zone_id":%d,"package_id":%d,"amount":100,"method":"manual","action":"renew"}`, cust.ID, a.ZoneID, bPkg.ID)
+	if st, _ := pcall(t, app, "POST", "/payments/manual", body); st != 422 {
+		t.Errorf("another ISP's package: %d, want 422", st)
+	}
+}

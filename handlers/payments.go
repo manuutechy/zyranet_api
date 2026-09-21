@@ -13,7 +13,6 @@ import (
 	"github.com/zyranet/zyranet-api/utils"
 )
 
-
 func PaymentIndex(c *fiber.Ctx) error {
 	orgZoneIDs, err := middleware.OrgZoneIDs(c)
 	if err != nil {
@@ -111,9 +110,12 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 	var pkg models.Package
 	var packageIDPtr *uint
 	if body.PackageID != nil && *body.PackageID > 0 {
-		if err := config.DB.First(&pkg, *body.PackageID).Error; err == nil {
-			packageIDPtr = &pkg.ID
+		// Only this ISP's own packages: another ISP's price/speed must never apply.
+		if err := config.DB.Where("zone_id IN (?)", config.DB.Model(&models.Zone{}).Select("id").Where("organization_id = ?", claims.OrganizationID)).
+			First(&pkg, *body.PackageID).Error; err != nil {
+			return utils.ErrorResponse(c, "That package does not belong to your organization.", "", fiber.StatusUnprocessableEntity)
 		}
+		packageIDPtr = &pkg.ID
 	}
 
 	var voucherID *uint
@@ -734,4 +736,3 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 		"message": "We could not find an M-Pesa payment matching that code yet. If you just sent it, please give it a moment and try again.",
 	})
 }
-

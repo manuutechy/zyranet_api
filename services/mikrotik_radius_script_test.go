@@ -104,3 +104,18 @@ func TestQueueTuning_HotspotNetworkAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestRosEscape(t *testing.T) {
+	for in, want := range map[string]string{
+		`plain`:            `plain`,
+		`a"b`:              `a\"b`,
+		`$x`:               `\$x`,
+		`back\slash`:       `back\\slash`,
+		"line\nbreak\r":    `linebreak`,
+		`"; /system reset`: `\"; /system reset`,
+	} {
+		if got := rosEscape(in); got != want {
+			t.Errorf("rosEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

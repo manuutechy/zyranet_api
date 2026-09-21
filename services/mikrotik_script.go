@@ -272,8 +272,11 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		}
 		password := strVal(c.PPPoEPassword)
 		if password == "" {
-			password = "password123"
+			// Never invent a guessable shared password; set one on the customer first.
+			sb.WriteString(fmt.Sprintf("# skipped customer %d: no PPPoE password set\n", c.ID))
+			continue
 		}
+		username, password = rosEscape(username), rosEscape(password)
 		sb.WriteString(fmt.Sprintf(
 			":if ([:len [/ppp secret find name=\"%s\"]] = 0) do={ /ppp secret add name=\"%s\" password=\"%s\" service=pppoe profile=\"%s\" comment=\"customer_id:%d\" } else={ /ppp secret set [find name=\"%s\"] password=\"%s\" service=pppoe profile=\"%s\" comment=\"customer_id:%d\" }\n",
 			username, username, password, profileName, c.ID, username, password, profileName, c.ID,
@@ -510,4 +513,12 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Block Hotspot Management\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=!ether1 action=drop comment=\"Zyra Net Block Hotspot Management\" place-before=1 }\n\n")
 
 	return sb.String(), nil
+}
+
+// rosEscape makes a value safe inside a double-quoted RouterOS string: it
+// escapes backslash, quote and $ (variable expansion) and drops line breaks,
+// so a customer's name or password can never end the string or add commands.
+func rosEscape(v string) string {
+	v = strings.NewReplacer("\r", "", "\n", "").Replace(v)
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(v)
 }
