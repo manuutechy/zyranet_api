@@ -93,8 +93,8 @@ type AppConfig struct {
 	// public internet. Used only when generating router scripts.
 	RadiusServerAddr string
 	// RadiusReloadCmd is run after a router is added to or removed from the
-	// RADIUS client list, because FreeRADIUS only reads that list when it
-	// (re)loads. Empty disables it (then a person must reload the server).
+	// RADIUS client list. FreeRADIUS only picks up SQL clients when it starts —
+	// a HUP/reload was tested and does not — so this is a restart. Empty disables it (then a person must reload the server).
 	RadiusReloadCmd string
 
 	// BaseDomain is the parent domain ISPs' subdomains hang off: an ISP with
@@ -124,7 +124,7 @@ func Load() {
 		DBPass: getEnv("DB_PASS", ""),
 
 		RadiusServerAddr: getEnv("RADIUS_SERVER_ADDR", "10.200.0.1"),
-		RadiusReloadCmd:  strings.TrimSpace(getEnv("RADIUS_RELOAD_CMD", "sudo -n systemctl reload freeradius")),
+		RadiusReloadCmd:  strings.TrimSpace(getEnv("RADIUS_RELOAD_CMD", "sudo -n systemctl restart freeradius")),
 
 		AllowLegacyRouterRequests: strings.EqualFold(getEnv("ALLOW_LEGACY_ROUTER_REQUESTS", "false"), "true"),
 

@@ -93,9 +93,9 @@ func PlatformZoneRadiusSet(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, err.Error(), "", fiber.StatusInternalServerError)
 	}
 	reloaded := radiusSvcGlobal.ReloadServer()
-	msg := "RADIUS prepared and the server reloaded. Now apply the router script."
+	msg := "RADIUS prepared and the server restarted. Now apply the router script."
 	if !reloaded {
-		msg = "RADIUS prepared for this zone. Reload the RADIUS server once, then apply the router script."
+		msg = "RADIUS prepared for this zone. Restart the RADIUS server once, then apply the router script."
 	}
 	return utils.SuccessResponse(c, fiber.Map{
 		"zone_id": zone.ID, "auth_mode": "radius",
