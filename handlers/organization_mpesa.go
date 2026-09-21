@@ -26,6 +26,7 @@ func OrganizationMpesaShow(c *fiber.Ctx) error {
 	var org models.Organization
 	config.DB.First(&org, claims.OrganizationID)
 	settlement := fiber.Map{
+		"direct_settlement":         org.DirectSettlement,
 		"settlement_type":           org.SettlementType,
 		"settlement_till_number":    org.SettlementTillNumber,
 		"settlement_paybill_number": org.SettlementPaybillNumber,
@@ -107,11 +108,14 @@ func OrganizationMpesaUpdate(c *fiber.Ctx) error {
 		if body.SettlementType == "paybill" && (body.SettlementPaybillNumber == "" || body.SettlementAccountNumber == "") {
 			return utils.ErrorResponse(c, "settlement_paybill_number and settlement_account_number are required for paybill settlement.", "", fiber.StatusUnprocessableEntity)
 		}
+		// On the shared app the destination IS where customer money goes:
+		// saving it switches on direct settlement (each STK push pays it).
 		config.DB.Model(&models.Organization{}).Where("id = ?", claims.OrganizationID).Updates(map[string]interface{}{
 			"settlement_type":           body.SettlementType,
-			"settlement_till_number":    body.SettlementTillNumber,
-			"settlement_paybill_number": body.SettlementPaybillNumber,
-			"settlement_account_number": body.SettlementAccountNumber,
+			"settlement_till_number":    strings.TrimSpace(body.SettlementTillNumber),
+			"settlement_paybill_number": strings.TrimSpace(body.SettlementPaybillNumber),
+			"settlement_account_number": strings.TrimSpace(body.SettlementAccountNumber),
+			"direct_settlement":         true,
 		})
 	}
 

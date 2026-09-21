@@ -504,3 +504,24 @@ func TestPlatform_DirectSettlementNeedsADestination(t *testing.T) {
 		t.Errorf("non-boolean: %d, want 422", st)
 	}
 }
+
+func TestISPSavingDestinationSwitchesOnDirectSettlement(t *testing.T) {
+	setupTenantTest(t)
+	org, _ := seedTenant(t, "acme", nil, "active")
+	app := fiber.New()
+	app.Post("/settings/mpesa", func(c *fiber.Ctx) error {
+		c.Locals("claims", &middleware.Claims{Role: "super_admin", OrganizationID: org.ID, Type: "admin"})
+		return c.Next()
+	}, OrganizationMpesaUpdate)
+	req := httptest.NewRequest("POST", "/settings/mpesa", strings.NewReader(`{"mode":"platform","settlement_type":"till","settlement_till_number":" 555666 "}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := app.Test(req, -1)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var got models.Organization
+	config.DB.First(&got, org.ID)
+	if !got.DirectSettlement || got.SettlementTillNumber != "555666" {
+		t.Errorf("after saving a till: direct=%v till=%q", got.DirectSettlement, got.SettlementTillNumber)
+	}
+}
