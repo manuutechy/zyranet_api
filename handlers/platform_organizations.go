@@ -11,6 +11,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -314,6 +315,18 @@ func OrganizationUpdate(c *fiber.Ctx) error {
 		}
 	}
 
+	if raw, present := body["direct_settlement"]; present {
+		on, isBool := raw.(bool)
+		if !isBool {
+			return utils.ErrorResponse(c, "direct_settlement must be true or false.", "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+		if on {
+			if _, _, _, _, err := services.Destination(&org); err != nil {
+				return utils.ErrorResponse(c, "Set this ISP's till or paybill + account (Settlement Destination) before switching on direct settlement.", "Validation failed.", fiber.StatusUnprocessableEntity)
+			}
+		}
+	}
+
 	// Subdomain is validated and written on its own: it must be a valid,
 	// unreserved, unique DNS label, and "" clears it back to NULL (a bare ""
 	// would collide under the unique index with every other cleared ISP).
@@ -345,6 +358,7 @@ func OrganizationUpdate(c *fiber.Ctx) error {
 		}
 	}
 	middleware.InvalidateTenantCache()
+	services.InvalidateMpesaCaches()
 
 	config.DB.First(&org, org.ID)
 	org.AdminURL = middleware.AdminURL(org.Subdomain)

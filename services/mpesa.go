@@ -67,7 +67,16 @@ type mpesaCreds struct {
 	// platform's, and are never allowed to fall back to a mock/simulated
 	// payment outside local dev/test — see mockAllowed.
 	Own bool
+	// Direct* are set when the zone's ISP uses Zyra's credentials with direct
+	// settlement: the push is still signed by Zyra's app but pays the ISP's
+	// own till (DirectTill) or paybill + account (DirectPaybill/DirectAccount).
+	DirectTill    string
+	DirectPaybill string
+	DirectAccount string
 }
+
+// Direct reports whether pushes go straight to the ISP's own destination.
+func (c mpesaCreds) Direct() bool { return c.DirectTill != "" || c.DirectPaybill != "" }
 
 // normalizeBillingType maps a stored billing type onto the two collection
 // types Daraja actually supports. "bank" used to be a third option, but an
@@ -123,6 +132,12 @@ type stkRoute struct {
 // shortcode the request is signed with. Till (Buy Goods): the request is
 // signed with the store/head-office shortcode and PartyB is the till.
 func (c mpesaCreds) route() stkRoute {
+	if c.DirectTill != "" {
+		return stkRoute{TransactionType: "CustomerBuyGoodsOnline", PartyB: c.DirectTill}
+	}
+	if c.DirectPaybill != "" {
+		return stkRoute{TransactionType: "CustomerPayBillOnline", PartyB: c.DirectPaybill}
+	}
 	if c.BillingType == "till" && c.TillNumber != "" && c.TillNumber != c.Shortcode {
 		return stkRoute{TransactionType: "CustomerBuyGoodsOnline", PartyB: c.TillNumber}
 	}
@@ -148,16 +163,16 @@ var errPaymentsUnavailable = fmt.Errorf("payments are temporarily unavailable on
 // NewMpesaService constructs an MpesaService with an optimized, connection-pooled HTTP client.
 func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTikService) *MpesaService {
 	tr := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return &MpesaService{
-		SMS:        sms,
-		Voucher:    voucher,
-		MikroTik:   mikrotik,
+		SMS:      sms,
+		Voucher:  voucher,
+		MikroTik: mikrotik,
 		httpClient: &http.Client{
 			Timeout:   25 * time.Second,
 			Transport: tr,
@@ -211,7 +226,7 @@ func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
 	}
 	var orgCfg models.OrganizationMpesaConfig
 	if err := config.DB.Where("organization_id = ? AND mode = ?", zone.OrganizationID, "own").First(&orgCfg).Error; err != nil {
-		return platform
+		return withDirectSettlement(platform, zone.OrganizationID)
 	}
 
 	trim := strings.TrimSpace
@@ -235,6 +250,26 @@ func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
 		own.Env = "sandbox"
 	}
 	return own
+}
+
+// withDirectSettlement points platform creds at the ISP's own till/paybill
+// when that ISP has direct settlement switched on and a complete destination.
+func withDirectSettlement(c mpesaCreds, orgID uint) mpesaCreds {
+	var org models.Organization
+	if err := config.DB.Select("id", "direct_settlement", "settlement_type", "settlement_till_number",
+		"settlement_paybill_number", "settlement_account_number").First(&org, orgID).Error; err != nil || !org.DirectSettlement {
+		return c
+	}
+	till := strings.TrimSpace(org.SettlementTillNumber)
+	paybill := strings.TrimSpace(org.SettlementPaybillNumber)
+	account := strings.TrimSpace(org.SettlementAccountNumber)
+	switch {
+	case org.SettlementType == "till" && till != "":
+		c.DirectTill = till
+	case org.SettlementType == "paybill" && paybill != "" && account != "":
+		c.DirectPaybill, c.DirectAccount = paybill, account
+	}
+	return c
 }
 
 // OrgForShortcode returns the ISP whose own Daraja app owns the given
@@ -293,6 +328,12 @@ func (s *MpesaService) GetPaybillNumber(zoneID uint) string {
 // must not resolve more than once).
 func (s *MpesaService) GetPaymentInfo(zoneID uint) (billingType, paybill, till string) {
 	creds := s.ResolveMpesaCreds(zoneID)
+	if creds.DirectTill != "" {
+		return "till", "", creds.DirectTill
+	}
+	if creds.DirectPaybill != "" {
+		return "paybill", creds.DirectPaybill, ""
+	}
 	paybill = paybillFor(creds)
 	if creds.BillingType == "till" && creds.TillNumber != "" {
 		return "till", paybill, creds.TillNumber
@@ -505,7 +546,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		}, nil
 	}
 
-	if creds.BillingType != "till" && creds.PaybillNumber != "" && creds.PaybillNumber != shortcode {
+	if !creds.Direct() && creds.BillingType != "till" && creds.PaybillNumber != "" && creds.PaybillNumber != shortcode {
 		log.Printf("[M-Pesa] Zone %d: paybill number %s differs from shortcode %s — STK push settles to the shortcode (Daraja requires PartyB to match it)", zoneID, creds.PaybillNumber, shortcode)
 	}
 
@@ -524,6 +565,9 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	}
 	if creds.PaybillAccount != "" && creds.PaybillAccount != "ZYR_" {
 		accountReference = creds.PaybillAccount
+	}
+	if creds.DirectPaybill != "" {
+		accountReference = creds.DirectAccount // e.g. the ISP's bank account number
 	}
 
 	// Sanitize to Daraja STK Push specification constraints:
@@ -1213,6 +1257,9 @@ func (s *MpesaService) CollectionChannel(zoneID uint, receipt string) string {
 	creds := s.ResolveMpesaCreds(zoneID)
 	if creds.Own {
 		return "own"
+	}
+	if creds.Direct() {
+		return "direct" // paid straight to the ISP — never part of a payout
 	}
 	if strings.ToLower(creds.Env) != "production" {
 		return ""

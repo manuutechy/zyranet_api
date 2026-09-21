@@ -4,11 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
@@ -331,5 +333,72 @@ func TestInitiateSTKPush_OwnDarajaUsesTheISPsCredentialsNotThePlatforms(t *testi
 	pw, _ := base64.StdEncoding.DecodeString(b["Password"].(string))
 	if string(pw) != "600111"+"isp-passkey"+b["Timestamp"].(string) {
 		t.Error("the request was signed with the wrong passkey")
+	}
+}
+
+func directOrgZone(t *testing.T, typ, till, paybill, account string, on bool) uint {
+	t.Helper()
+	org := models.Organization{Name: "D", Slug: fmt.Sprintf("d-%d", time.Now().UnixNano()), SettlementType: typ, SettlementTillNumber: till,
+		SettlementPaybillNumber: paybill, SettlementAccountNumber: account}
+	if err := config.DB.Create(&org).Error; err != nil {
+		t.Fatal(err)
+	}
+	config.DB.Model(&org).Update("direct_settlement", on)
+	z := models.Zone{Name: "Z", Location: "L", RouterName: "r", RouterIP: "1.1.1.1", OrganizationID: org.ID}
+	config.DB.Create(&z)
+	return z.ID
+}
+
+func pushVia(t *testing.T, zoneID uint) map[string]interface{} {
+	t.Helper()
+	srv, cap := fakeDarajaSTK(t)
+	svc := newTestMpesaService()
+	svc.baseURLOverride = srv.URL
+	if _, err := svc.InitiateSTKPush(zoneID, "254712345678", 10, "Cust1", "WiFi"); err != nil {
+		t.Fatal(err)
+	}
+	return cap.body
+}
+
+func TestDirectSettlement_TillAndPaybill(t *testing.T) {
+	setupTestDB(t)
+	setAppEnv(t, "production")
+	productionPlatformSettings(t, "till", "3514722")
+
+	b := pushVia(t, directOrgZone(t, "till", "555666", "", "", true))
+	if b["TransactionType"] != "CustomerBuyGoodsOnline" || b["PartyB"] != "555666" || b["BusinessShortCode"] != "7289306" {
+		t.Errorf("direct till: %v -> %v (signed by %v)", b["TransactionType"], b["PartyB"], b["BusinessShortCode"])
+	}
+
+	InvalidateMpesaCaches()
+	b = pushVia(t, directOrgZone(t, "paybill", "", "880100", "1010676332", true))
+	if b["TransactionType"] != "CustomerPayBillOnline" || b["PartyB"] != "880100" || b["AccountReference"] != "1010676332" {
+		t.Errorf("direct paybill: %v -> %v acct %v", b["TransactionType"], b["PartyB"], b["AccountReference"])
+	}
+
+	// Switched off (the default): money still goes to Zyra's till.
+	InvalidateMpesaCaches()
+	b = pushVia(t, directOrgZone(t, "paybill", "", "880100", "1010676332", false))
+	if b["PartyB"] != "3514722" {
+		t.Errorf("direct settlement off must keep Zyra's till, got %v", b["PartyB"])
+	}
+}
+
+func TestDirectSettlement_NotPayableAndManualNumber(t *testing.T) {
+	setupTestDB(t)
+	setAppEnv(t, "production")
+	productionPlatformSettings(t, "till", "3514722")
+	zone := directOrgZone(t, "till", "555666", "", "", true)
+	svc := newTestMpesaService()
+	if got := svc.CollectionChannel(zone, "RCP1"); got != "direct" {
+		t.Errorf("channel = %q, want direct (never owed via a payout)", got)
+	}
+	if bt, _, till := svc.GetPaymentInfo(zone); bt != "till" || till != "555666" {
+		t.Errorf("manual-pay info = %s %s, want the ISP's own till", bt, till)
+	}
+	// Incomplete destination: fall back to Zyra's till rather than a broken push.
+	InvalidateMpesaCaches()
+	if b := pushVia(t, directOrgZone(t, "paybill", "", "880100", "", true)); b["PartyB"] != "3514722" {
+		t.Errorf("paybill without account must fall back, got %v", b["PartyB"])
 	}
 }

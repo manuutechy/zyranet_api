@@ -488,3 +488,19 @@ func TestPlatform_EditFormBodyWithSubdomainSucceeds(t *testing.T) {
 		t.Errorf("after edit: %v", got)
 	}
 }
+
+func TestPlatform_DirectSettlementNeedsADestination(t *testing.T) {
+	setupTenantTest(t)
+	org, _ := seedTenant(t, "acme", nil, "active")
+	path := fmt.Sprintf("/orgs/%d", org.ID)
+	if st, _ := call(t, "PATCH", path, "", "", `{"direct_settlement":true}`); st != 422 {
+		t.Errorf("no destination: %d, want 422", st)
+	}
+	config.DB.Model(&org).Updates(map[string]interface{}{"settlement_type": "till", "settlement_till_number": "555666"})
+	if st, out := call(t, "PATCH", path, "", "", `{"direct_settlement":true}`); st != 200 || out["data"].(map[string]interface{})["direct_settlement"] != true {
+		t.Errorf("with a till: %d %v", st, out)
+	}
+	if st, _ := call(t, "PATCH", path, "", "", `{"direct_settlement":"yes"}`); st != 422 {
+		t.Errorf("non-boolean: %d, want 422", st)
+	}
+}

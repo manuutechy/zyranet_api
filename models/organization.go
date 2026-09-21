@@ -46,6 +46,12 @@ type Organization struct {
 	SettlementTillNumber    string `gorm:"size:20" json:"settlement_till_number"`
 	SettlementPaybillNumber string `gorm:"size:20" json:"settlement_paybill_number"`
 	SettlementAccountNumber string `gorm:"size:50" json:"settlement_account_number"`
+	// DirectSettlement: on "platform" Daraja mode, send each STK push straight
+	// to the Settlement destination above (Buy Goods to the till, or Pay Bill
+	// to the paybill + account) instead of Zyra Net's own till — so the money
+	// never passes through Zyra Net and no payout is needed. Off by default;
+	// verify with the platform's Test STK Push before relying on it.
+	DirectSettlement bool `gorm:"default:false" json:"direct_settlement"`
 
 	// Captive portal branding — what a connecting hotspot customer sees at
 	// captive.zyranet.co.ke for this ISP's zones. CaptivePortalTheme selects
