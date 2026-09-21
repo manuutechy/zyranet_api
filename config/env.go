@@ -72,6 +72,25 @@ type AppConfig struct {
 	// for local dev; production sets ".zyranet.co.ke" so the cookie set by
 	// the API is also sent to admin./portal.zyranet.co.ke.
 	CookieDomain string
+
+	// ProxyHeader is the request header that carries the real client IP when
+	// the API sits behind a proxy (Cloudflare: CF-Connecting-IP). It is only
+	// honoured for connections coming from TrustedProxies, so a client that
+	// reaches the server directly can't spoof it. Empty disables it.
+	ProxyHeader    string
+	TrustedProxies []string
+
+	// AllowLegacyRouterRequests re-opens the router-facing /public/zones/*
+	// endpoints to requests that carry no provisioning token. It exists only so
+	// routers provisioned before tokens existed keep working while they are
+	// re-provisioned; every such request is recorded on its zone
+	// (Zone.LegacyRequestAt). Leave false: with it on, anyone can read any
+	// zone's setup script by guessing its sequential id.
+	AllowLegacyRouterRequests bool
+
+	// BaseDomain is the parent domain ISPs' subdomains hang off: an ISP with
+	// subdomain "acme" has its staff admin at acme.<BaseDomain>.
+	BaseDomain string
 }
 
 var Config AppConfig
@@ -94,6 +113,13 @@ func Load() {
 		DBName: getEnv("DB_NAME", "zyranet"),
 		DBUser: getEnv("DB_USER", "root"),
 		DBPass: getEnv("DB_PASS", ""),
+
+		AllowLegacyRouterRequests: strings.EqualFold(getEnv("ALLOW_LEGACY_ROUTER_REQUESTS", "false"), "true"),
+
+		ProxyHeader:    strings.TrimSpace(getEnv("PROXY_HEADER", "CF-Connecting-IP")),
+		TrustedProxies: trustedProxies(),
+
+		BaseDomain: strings.ToLower(strings.Trim(strings.TrimSpace(getEnv("BASE_DOMAIN", "zyranet.co.ke")), ".")),
 
 		JWTSecret: getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTExpiry: expiry,
@@ -145,6 +171,38 @@ func Load() {
 // allowedOrigins returns the CORS allow-list. Real production traffic should
 // only ever come from the two known frontends — localhost is only needed
 // when testing a non-production deployment against this API.
+// cloudflareRanges are Cloudflare's published proxy ranges
+// (https://www.cloudflare.com/ips/). Requests from these are the only ones
+// whose CF-Connecting-IP we believe. Cloudflare changes this list rarely; add
+// new ranges without a deploy via TRUSTED_PROXIES.
+var cloudflareRanges = []string{
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+}
+
+// localRanges are loopback and private networks: a reverse proxy or tunnel
+// (nginx, cloudflared) running next to the API connects from one of these and
+// passes Cloudflare's header through.
+var localRanges = []string{
+	"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+}
+
+// trustedProxies is Cloudflare + local proxies + anything in TRUSTED_PROXIES
+// (comma-separated IPs/CIDRs).
+func trustedProxies() []string {
+	out := append(append([]string{}, cloudflareRanges...), localRanges...)
+	for _, p := range strings.Split(getEnv("TRUSTED_PROXIES", ""), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func allowedOrigins(appEnv string) []string {
 	origins := []string{
 		"https://admin.zyranet.co.ke",

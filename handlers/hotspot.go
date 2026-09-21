@@ -3,7 +3,6 @@ package handlers
 import (
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
@@ -185,15 +184,18 @@ func HotspotStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "failed", "message": "Reference is required"})
 	}
 
+	// The reference is the M-Pesa CheckoutRequestID handed only to the payer
+	// who started the push. It must be the *only* accepted key: this endpoint
+	// signs the payer in (session cookie + token) once the payment completes,
+	// so accepting a guessable identifier — the sequential payment id it used
+	// to fall back to — let anyone walk 1,2,3… and take over every paying
+	// customer's session.
 	var payment models.Payment
+	if len(ref) < 8 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
+	}
 	if err := config.DB.Where("mpesa_transaction_id = ?", ref).First(&payment).Error; err != nil {
-		if id, errConv := strconv.ParseUint(ref, 10, 64); errConv == nil {
-			if err := config.DB.First(&payment, id).Error; err != nil {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
-			}
-		} else {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
-		}
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
 	}
 
 	buildPaidResponse := func(p *models.Payment) fiber.Map {

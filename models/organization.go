@@ -11,9 +11,17 @@ import (
 // (customers, packages, payments, vouchers, etc.) derive their tenant
 // through Zone.OrganizationID rather than storing it themselves.
 type Organization struct {
-	ID           uint    `gorm:"primaryKey" json:"id"`
-	Name         string  `gorm:"size:255;not null" json:"name"`
-	Slug         string  `gorm:"size:100;uniqueIndex;not null" json:"slug"`
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"size:255;not null" json:"name"`
+	Slug string `gorm:"size:100;uniqueIndex;not null" json:"slug"`
+	// Subdomain, when set, gives the ISP its own staff-admin host at
+	// <subdomain>.<BASE_DOMAIN>. Staff of this ISP log in there and are locked
+	// to it (see middleware/tenant.go). NULL means the ISP just uses the shared
+	// admin host. A pointer so many ISPs can have NULL under the unique index.
+	Subdomain *string `gorm:"size:63;uniqueIndex" json:"subdomain"`
+	// AdminURL is the ISP's staff-admin URL derived from Subdomain. Computed
+	// by handlers, never stored.
+	AdminURL     string  `gorm:"-" json:"admin_url,omitempty"`
 	ContactEmail string  `gorm:"size:255" json:"contact_email"`
 	ContactPhone *string `gorm:"size:20" json:"contact_phone"`
 	Status       string  `gorm:"size:20;default:active" json:"status"` // active | suspended | trial
@@ -21,6 +29,9 @@ type Organization struct {
 	// (active) customer per invoicing period. Zero means billing hasn't been
 	// configured for this tenant yet — the invoice generator skips it.
 	BillingRatePerCustomer float64 `gorm:"default:0" json:"billing_rate_per_customer"`
+	// CommissionPercent overrides the platform's default_commission_percent for
+	// this ISP's payouts (0-100). NULL = use the platform default.
+	CommissionPercent *float64 `gorm:"type:decimal(5,2)" json:"commission_percent"`
 
 	// Settlement destination for an ISP on "platform" Daraja mode: when its
 	// customers pay into Zyra Net's shared till/paybill, this is where Zyra
@@ -42,12 +53,12 @@ type Organization struct {
 	// override the portal's default copy/colors. Blank fields fall back to
 	// sensible defaults (Name, the platform default color, etc.) at read time
 	// rather than being duplicated here.
-	CaptivePortalTheme         string `gorm:"size:30;default:classic" json:"captive_portal_theme"` // classic | split
-	CaptivePortalCompanyName   string `gorm:"size:255" json:"captive_portal_company_name"`
-	CaptivePortalLogo          string `gorm:"size:255" json:"captive_portal_logo"`
-	CaptivePortalPrimaryColor  string `gorm:"size:20" json:"captive_portal_primary_color"`
-	CaptivePortalTagline       string `gorm:"size:255" json:"captive_portal_tagline"`
-	CaptivePortalSupportPhone  string `gorm:"size:20" json:"captive_portal_support_phone"`
+	CaptivePortalTheme        string `gorm:"size:30;default:classic" json:"captive_portal_theme"` // classic | split
+	CaptivePortalCompanyName  string `gorm:"size:255" json:"captive_portal_company_name"`
+	CaptivePortalLogo         string `gorm:"size:255" json:"captive_portal_logo"`
+	CaptivePortalPrimaryColor string `gorm:"size:20" json:"captive_portal_primary_color"`
+	CaptivePortalTagline      string `gorm:"size:255" json:"captive_portal_tagline"`
+	CaptivePortalSupportPhone string `gorm:"size:20" json:"captive_portal_support_phone"`
 	// CaptivePortalPackageLayout picks how the `customer` app renders its
 	// package/plan list — list | grid | stacked. This is an ISP-wide admin
 	// choice, not something the connecting customer can change themselves.

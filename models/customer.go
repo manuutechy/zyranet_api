@@ -11,17 +11,17 @@ import (
 type Customer struct {
 	ID            uint           `gorm:"primaryKey" json:"id"`
 	Name          string         `gorm:"size:255;not null" json:"name"`
-	Phone         string         `gorm:"size:20;not null" json:"phone"`
+	Phone         string         `gorm:"size:20;not null;index" json:"phone"`
 	Email         *string        `gorm:"size:255" json:"email"`
-	ZoneID        uint           `gorm:"not null" json:"zone_id"`
+	ZoneID        uint           `gorm:"not null;index" json:"zone_id"`
 	PackageID     uint           `gorm:"not null" json:"package_id"`
 	Type          string         `gorm:"size:20;not null" json:"type"` // hotspot | pppoe
-	PPPoEUsername *string        `gorm:"size:255;column:pppoe_username" json:"pppoe_username"`
+	PPPoEUsername *string        `gorm:"size:255;column:pppoe_username;index" json:"pppoe_username"`
 	PPPoEPassword *string        `gorm:"size:255;column:pppoe_password" json:"pppoe_password"`
-	Status        string         `gorm:"size:20;default:active" json:"status"` // active|suspended|expired
+	Status        string         `gorm:"size:20;default:active;index:idx_customer_status_expiry,priority:1" json:"status"` // active|suspended|expired
 	AccountNumber string         `gorm:"size:100;uniqueIndex" json:"account_number"`
 	MacAddress    *string        `gorm:"size:45" json:"mac_address"`
-	ExpiresAt     *time.Time     `json:"expires_at"`
+	ExpiresAt     *time.Time     `gorm:"index:idx_customer_status_expiry,priority:2" json:"expires_at"`
 	CreditBalance float64        `gorm:"type:decimal(10,2);default:0" json:"credit_balance"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`

@@ -23,27 +23,29 @@ import (
 // baked into their provisioning script once at setup time.
 func zoneTokenAuthorized(c *fiber.Ctx, zone *models.Zone) bool {
 	supplied := c.Query("token")
-	if zone.ProvisionToken != "" && supplied != "" {
-		if subtle.ConstantTimeCompare([]byte(supplied), []byte(zone.ProvisionToken)) == 1 {
-			return true
-		}
-	}
-	// Also permit requests if token is omitted (backward compatibility for previously provisioned routers)
-	// or if connecting from the configured WireGuard subnet
-	if supplied == "" {
+	if zone.ProvisionToken != "" && supplied != "" &&
+		subtle.ConstantTimeCompare([]byte(supplied), []byte(zone.ProvisionToken)) == 1 {
 		return true
 	}
-	clientIP := c.Get("CF-Connecting-IP")
-	if clientIP == "" {
-		clientIP = c.Get("X-Forwarded-For")
-	}
-	if clientIP == "" {
-		clientIP = c.IP()
-	}
-	if zone.RouterIP != "" && (clientIP == zone.RouterIP || strings.HasPrefix(clientIP, "10.200.")) {
-		return true
-	}
-	return false
+
+	// No valid token: this is either a router still running a pre-token script
+	// or someone guessing zone ids. Record it against the zone so the platform
+	// can see which routers need re-provisioning, then refuse — unless the
+	// operator has explicitly re-opened the legacy path for a migration window.
+	// (A *wrong* token is never accepted, and neither is a matching source IP:
+	// a token is the only credential.)
+	noteLegacyRouterRequest(zone.ID)
+	return supplied == "" && config.Config.AllowLegacyRouterRequests
+}
+
+// noteLegacyRouterRequest stamps the zone with the time of a token-less or
+// bad-token router request. Throttled to one write per zone per 10 minutes,
+// since a legacy router polls every minute.
+func noteLegacyRouterRequest(zoneID uint) {
+	now := time.Now()
+	config.DB.Model(&models.Zone{}).
+		Where("id = ? AND (legacy_request_at IS NULL OR legacy_request_at < ?)", zoneID, now.Add(-10*time.Minute)).
+		UpdateColumn("legacy_request_at", now)
 }
 
 // MikroTikScriptGenerate generates and downloads a .rsc RouterOS config file (authenticated).

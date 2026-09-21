@@ -95,8 +95,9 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 	}
 
 	paybillNumber := "7289306"
+	billingType, tillNumber := "paybill", ""
 	if mpesaSvcGlobal != nil {
-		paybillNumber = mpesaSvcGlobal.GetPaybillNumber(zone.ID)
+		billingType, paybillNumber, tillNumber = mpesaSvcGlobal.GetPaymentInfo(zone.ID)
 	}
 
 	return utils.SuccessResponse(c, fiber.Map{
@@ -109,6 +110,8 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 		"support_phone":     org.CaptivePortalSupportPhone,
 		"package_layout":    packageLayout,
 		"paybill_number":    paybillNumber,
+		"billing_type":      billingType,
+		"till_number":       tillNumber,
 		"free_tier_package": freeTierData,
 	}, "")
 }

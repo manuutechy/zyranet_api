@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/middleware"
@@ -23,6 +24,9 @@ var daraKeys = []string{
 	"mpesa_billing_type", "mpesa_transaction_type", "mpesa_till_number",
 	"mpesa_paybill_number", "mpesa_paybill_account", "mpesa_bank_name",
 	"mpesa_bank_account",
+	// M-Pesa B2B (payouts to ISPs): the API operator's name and password, and
+	// Safaricom's public certificate the password is encrypted with.
+	"mpesa_b2b_initiator", "mpesa_b2b_password", "mpesa_b2b_cert",
 }
 
 // hostpinnacle_password is deliberately not included here: HostPinnacle's
@@ -66,7 +70,12 @@ func parseSettingsUpdateBody(c *fiber.Ctx) (map[string]string, error) {
 
 // PlatformDarajaShow returns Zyra Net's own shared Daraja app credentials.
 func PlatformDarajaShow(c *fiber.Ctx) error {
-	return utils.SuccessResponse(c, filterSettings(loadAllSettings(), daraKeys), "")
+	result := filterSettings(loadAllSettings(), daraKeys)
+	result["mpesa_billing_type"] = normalizedBillingType(fmt.Sprint(result["mpesa_billing_type"]))
+	// The B2B password is write-only, like an ISP user's password.
+	result["mpesa_b2b_password_set"] = result["mpesa_b2b_password"] != ""
+	delete(result, "mpesa_b2b_password")
+	return utils.SuccessResponse(c, result, "")
 }
 
 // PlatformDarajaUpdate updates Zyra Net's own shared Daraja app credentials.
@@ -75,8 +84,21 @@ func PlatformDarajaUpdate(c *fiber.Ctx) error {
 	if err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	if bt, ok := settingsToUpdate["mpesa_billing_type"]; ok {
+		settingsToUpdate["mpesa_billing_type"] = normalizedBillingType(bt)
+	}
+	// A blank B2B password means "keep the current one", never "erase it".
+	if pw, ok := settingsToUpdate["mpesa_b2b_password"]; ok && strings.TrimSpace(pw) == "" {
+		delete(settingsToUpdate, "mpesa_b2b_password")
+	}
+	// The bank fields belonged to the retired "bank" billing type.
+	delete(settingsToUpdate, "mpesa_bank_name")
+	delete(settingsToUpdate, "mpesa_bank_account")
 	UpsertSettings(settingsToUpdate)
-	return utils.SuccessResponse(c, filterSettings(loadAllSettings(), daraKeys), "Shared Daraja settings updated successfully.")
+	updated := filterSettings(loadAllSettings(), daraKeys)
+	updated["mpesa_b2b_password_set"] = updated["mpesa_b2b_password"] != ""
+	delete(updated, "mpesa_b2b_password")
+	return utils.SuccessResponse(c, updated, "Shared Daraja settings updated successfully.")
 }
 
 // PlatformDarajaRegisterC2B registers C2B Validation and Confirmation URLs with Safaricom Daraja for shared platform config.

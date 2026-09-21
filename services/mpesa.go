@@ -35,6 +35,9 @@ type MpesaService struct {
 
 	// Map to throttle STK status queries per CheckoutRequestID
 	queryThrottles sync.Map
+
+	// baseURLOverride points every Daraja call at another host. Tests only.
+	baseURLOverride string
 }
 
 type cachedToken struct {
@@ -56,9 +59,88 @@ type mpesaCreds struct {
 	TillNumber     string
 	PaybillNumber  string
 	PaybillAccount string
-	BankName       string
-	BankAccount    string
+	// Own is true when these came from an ISP's own Daraja app (mode "own")
+	// rather than Zyra Net's shared one. Own creds are never mixed with the
+	// platform's, and are never allowed to fall back to a mock/simulated
+	// payment outside local dev/test — see mockAllowed.
+	Own bool
 }
+
+// normalizeBillingType maps a stored billing type onto the two collection
+// types Daraja actually supports. "bank" used to be a third option, but an
+// STK push can only settle to the shortcode/till the credentials belong to —
+// a bank is a *settlement* destination, not something a customer can be
+// charged into directly — so legacy "bank" rows collect like "paybill".
+func normalizeBillingType(t string) string {
+	if strings.EqualFold(strings.TrimSpace(t), "till") {
+		return "till"
+	}
+	return "paybill"
+}
+
+// missingFields lists what an own-mode Daraja config still needs before it
+// can collect a payment. Only meaningful for Own creds — the platform's
+// creds are allowed to be blank (mock/demo mode).
+func (c mpesaCreds) missingFields() []string {
+	var missing []string
+	if c.ConsumerKey == "" {
+		missing = append(missing, "consumer key")
+	}
+	if c.ConsumerSecret == "" {
+		missing = append(missing, "consumer secret")
+	}
+	if c.Shortcode == "" {
+		missing = append(missing, "shortcode")
+	}
+	if c.Passkey == "" {
+		missing = append(missing, "passkey")
+	}
+	if c.BillingType == "till" && c.TillNumber == "" {
+		missing = append(missing, "till number")
+	}
+	return missing
+}
+
+// mockAllowed reports whether a payment may be faked instead of sent to
+// Safaricom. Platform creds keep the existing demo behavior. An ISP's own
+// creds must never fake success on a deployed server: if their environment
+// is mis-set or their keys are wrong, the customer would get connected for
+// free while no money moves.
+func (c mpesaCreds) mockAllowed() bool {
+	return !c.Own || config.Config.AppEnv == "local" || config.Config.AppEnv == "test"
+}
+
+// stkRoute is the Daraja routing for one STK push.
+type stkRoute struct {
+	TransactionType string
+	PartyB          string
+}
+
+// route returns where an STK push settles. Paybill: PartyB is the same
+// shortcode the request is signed with. Till (Buy Goods): the request is
+// signed with the store/head-office shortcode and PartyB is the till.
+func (c mpesaCreds) route() stkRoute {
+	if c.BillingType == "till" && c.TillNumber != "" && c.TillNumber != c.Shortcode {
+		return stkRoute{TransactionType: "CustomerBuyGoodsOnline", PartyB: c.TillNumber}
+	}
+	return stkRoute{TransactionType: "CustomerPayBillOnline", PartyB: c.Shortcode}
+}
+
+// c2bShortcode is the number customers pay manually (and the one C2B URLs
+// must be registered against): the till for Buy Goods, otherwise the paybill.
+func (c mpesaCreds) c2bShortcode() string {
+	if c.BillingType == "till" && c.TillNumber != "" {
+		return c.TillNumber
+	}
+	if c.Shortcode != "" {
+		return c.Shortcode
+	}
+	return c.PaybillNumber
+}
+
+// errPaymentsUnavailable is what a customer sees when their ISP's Daraja
+// setup can't take payments. The specifics are logged, not shown.
+var errPaymentsUnavailable = fmt.Errorf("payments are temporarily unavailable on this network — please contact support")
 
 // NewMpesaService constructs an MpesaService with an optimized, connection-pooled HTTP client.
 func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTikService) *MpesaService {
@@ -81,82 +163,94 @@ func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTi
 	}
 }
 
-// resolveMpesaCreds returns the Daraja credentials/billing routing to use
-// for a payment tied to zoneID. If that zone's Organization has configured
-// its own Daraja app (OrganizationMpesaConfig.Mode == "own"), those
-// credentials are used; any field left blank on the org's config still
-// falls back to the platform-wide default for that one field. A zoneID of
-// 0, or an org with no config row (the default), uses the platform-wide
-// credentials unchanged — identical to the single-tenant behavior before
-// per-org Daraja support existed.
+// ResolveMpesaCreds returns the Daraja credentials/billing routing to use
+// for a payment tied to zoneID.
+//
+// If that zone's Organization is in "own" mode, the ISP's own Daraja app is
+// used *exclusively*: a blank field stays blank (and is reported by
+// missingFields) rather than borrowing the platform's value. Mixing them —
+// e.g. an ISP's consumer key with Zyra's passkey/till — either fails at
+// Safaricom or, worse, sends the ISP's customers' money into Zyra's account.
+// The one exception is CallbackURL, which is Zyra's own endpoint, so it
+// defaults to the platform's. A zoneID of 0, or an org with no config row
+// (the default), uses the platform-wide credentials.
 func (s *MpesaService) ResolveMpesaCreds(zoneID uint) mpesaCreds {
-	// Load all mpesa settings in a single SQL query instead of 12 sequential queries
+	if c, ok := cachedCredsFor(zoneID); ok {
+		return c
+	}
+	c := s.resolveMpesaCreds(zoneID)
+	storeCreds(zoneID, c)
+	return c
+}
+
+func (s *MpesaService) resolveMpesaCreds(zoneID uint) mpesaCreds {
 	settingsMap := s.loadMpesaSettingsMap()
 
-	creds := mpesaCreds{
+	platform := mpesaCreds{
 		ConsumerKey:    getSettingFromMap(settingsMap, "mpesa_consumer_key", config.Config.MpesaConsumerKey),
 		ConsumerSecret: getSettingFromMap(settingsMap, "mpesa_consumer_secret", config.Config.MpesaConsumerSecret),
 		Shortcode:      getSettingFromMap(settingsMap, "mpesa_shortcode", config.Config.MpesaShortcode),
 		Passkey:        getSettingFromMap(settingsMap, "mpesa_passkey", config.Config.MpesaPasskey),
 		CallbackURL:    getSettingFromMap(settingsMap, "mpesa_callback_url", config.Config.MpesaCallbackURL),
 		Env:            getSettingFromMap(settingsMap, "mpesa_environment", config.Config.MpesaEnv),
-		BillingType:    getSettingFromMap(settingsMap, "mpesa_billing_type", "paybill"),
+		BillingType:    normalizeBillingType(getSettingFromMap(settingsMap, "mpesa_billing_type", "paybill")),
 		TillNumber:     getSettingFromMap(settingsMap, "mpesa_till_number", ""),
 		PaybillNumber:  getSettingFromMap(settingsMap, "mpesa_paybill_number", ""),
 		PaybillAccount: getSettingFromMap(settingsMap, "mpesa_paybill_account", ""),
-		BankName:       getSettingFromMap(settingsMap, "mpesa_bank_name", ""),
-		BankAccount:    getSettingFromMap(settingsMap, "mpesa_bank_account", ""),
 	}
 	if zoneID == 0 {
-		return creds
+		return platform
 	}
 
 	var zone models.Zone
 	if err := config.DB.Select("organization_id").First(&zone, zoneID).Error; err != nil {
-		return creds
+		return platform
 	}
 	var orgCfg models.OrganizationMpesaConfig
 	if err := config.DB.Where("organization_id = ? AND mode = ?", zone.OrganizationID, "own").First(&orgCfg).Error; err != nil {
-		return creds
+		return platform
 	}
 
-	if orgCfg.ConsumerKey != "" {
-		creds.ConsumerKey = orgCfg.ConsumerKey
+	trim := strings.TrimSpace
+	own := mpesaCreds{
+		Own:            true,
+		ConsumerKey:    trim(orgCfg.ConsumerKey),
+		ConsumerSecret: trim(orgCfg.ConsumerSecret),
+		Shortcode:      trim(orgCfg.Shortcode),
+		Passkey:        trim(orgCfg.Passkey),
+		CallbackURL:    trim(orgCfg.CallbackURL),
+		Env:            trim(orgCfg.Env),
+		BillingType:    normalizeBillingType(orgCfg.BillingType),
+		TillNumber:     trim(orgCfg.TillNumber),
+		PaybillNumber:  trim(orgCfg.PaybillNumber),
+		PaybillAccount: trim(orgCfg.PaybillAccount),
 	}
-	if orgCfg.ConsumerSecret != "" {
-		creds.ConsumerSecret = orgCfg.ConsumerSecret
+	if own.CallbackURL == "" {
+		own.CallbackURL = platform.CallbackURL
 	}
-	if orgCfg.Shortcode != "" {
-		creds.Shortcode = orgCfg.Shortcode
+	if own.Env == "" {
+		own.Env = "sandbox"
 	}
-	if orgCfg.Passkey != "" {
-		creds.Passkey = orgCfg.Passkey
+	return own
+}
+
+// OrgForShortcode returns the ISP whose own Daraja app owns the given
+// shortcode/till/paybill, as seen in a C2B confirmation's BusinessShortCode.
+// ok is false when no ISP in "own" mode claims it — i.e. it's the shared
+// platform paybill (or unknown).
+func OrgForShortcode(code string) (orgID uint, ok bool) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return 0, false
 	}
-	if orgCfg.CallbackURL != "" {
-		creds.CallbackURL = orgCfg.CallbackURL
+	var cfg models.OrganizationMpesaConfig
+	err := config.DB.
+		Where("mode = ? AND (shortcode = ? OR till_number = ? OR paybill_number = ?)", "own", code, code, code).
+		First(&cfg).Error
+	if err != nil {
+		return 0, false
 	}
-	if orgCfg.Env != "" {
-		creds.Env = orgCfg.Env
-	}
-	if orgCfg.BillingType != "" {
-		creds.BillingType = orgCfg.BillingType
-	}
-	if orgCfg.TillNumber != "" {
-		creds.TillNumber = orgCfg.TillNumber
-	}
-	if orgCfg.PaybillNumber != "" {
-		creds.PaybillNumber = orgCfg.PaybillNumber
-	}
-	if orgCfg.PaybillAccount != "" {
-		creds.PaybillAccount = orgCfg.PaybillAccount
-	}
-	if orgCfg.BankName != "" {
-		creds.BankName = orgCfg.BankName
-	}
-	if orgCfg.BankAccount != "" {
-		creds.BankAccount = orgCfg.BankAccount
-	}
-	return creds
+	return cfg.OrganizationID, true
 }
 
 // MpesaSTKResponse is the result of an STK push initiation.
@@ -167,20 +261,47 @@ type MpesaSTKResponse struct {
 	IsMock              bool   `json:"is_mock"`
 }
 
-// GetPaybillNumber returns the resolved Paybill / ShortCode for a zone or system default.
-func (s *MpesaService) GetPaybillNumber(zoneID uint) string {
-	creds := s.ResolveMpesaCreds(zoneID)
+// paybillFor is the paybill/shortcode customers pay manually for the given
+// creds (the STK push settles to the same number). An ISP on its own Daraja
+// app with nothing configured gets "" — never Zyra's paybill, so their
+// customers aren't told to pay someone else. Platform default is the shared
+// paybill.
+func paybillFor(creds mpesaCreds) string {
+	if creds.Shortcode != "" {
+		return creds.Shortcode
+	}
 	if creds.PaybillNumber != "" {
 		return creds.PaybillNumber
 	}
-	if creds.Shortcode != "" {
-		return creds.Shortcode
+	if creds.Own {
+		return ""
 	}
 	return "7289306"
 }
 
+// GetPaybillNumber returns the paybill customers of a zone pay manually.
+func (s *MpesaService) GetPaybillNumber(zoneID uint) string {
+	return paybillFor(s.ResolveMpesaCreds(zoneID))
+}
+
+// GetPaymentInfo returns how customers of a zone pay manually — the billing
+// type ("paybill" | "till"), the paybill number and the till number — from a
+// single credential resolution (this runs on every captive-portal load, so it
+// must not resolve more than once).
+func (s *MpesaService) GetPaymentInfo(zoneID uint) (billingType, paybill, till string) {
+	creds := s.ResolveMpesaCreds(zoneID)
+	paybill = paybillFor(creds)
+	if creds.BillingType == "till" && creds.TillNumber != "" {
+		return "till", paybill, creds.TillNumber
+	}
+	return "paybill", paybill, ""
+}
+
 // getBaseURL returns the Daraja API base URL for the given environment.
 func (s *MpesaService) getBaseURL(env string) string {
+	if s.baseURLOverride != "" {
+		return s.baseURLOverride
+	}
 	if strings.ToLower(env) == "production" {
 		return "https://api.safaricom.co.ke"
 	}
@@ -330,6 +451,12 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	}
 
 	creds := s.ResolveMpesaCreds(zoneID)
+	if creds.Own && !creds.mockAllowed() {
+		if missing := creds.missingFields(); len(missing) > 0 {
+			log.Printf("[M-Pesa] Zone %d: own Daraja config incomplete, refusing STK push (missing: %s)", zoneID, strings.Join(missing, ", "))
+			return nil, errPaymentsUnavailable
+		}
+	}
 	shortcode := creds.Shortcode
 	passkey := creds.Passkey
 	callbackURL := creds.CallbackURL
@@ -342,10 +469,14 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 
 	token, err := s.GetAccessToken(creds)
 	if err != nil {
-		if strings.ToLower(env) != "production" || config.Config.AppEnv == "local" {
+		if creds.mockAllowed() && (strings.ToLower(env) != "production" || config.Config.AppEnv == "local") {
 			log.Printf("[M-Pesa] GetAccessToken failed (%v) — falling back to mock STK Push", err)
 			token = "mock_token"
 		} else {
+			log.Printf("[M-Pesa] Zone %d: Daraja auth failed: %v", zoneID, err)
+			if creds.Own {
+				return nil, errPaymentsUnavailable
+			}
 			return nil, err
 		}
 	}
@@ -357,6 +488,10 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		!strings.HasPrefix(callbackURL, "https://")
 
 	if token == "mock_token" || strings.ToLower(env) == "mock" || (strings.ToLower(env) != "production" && isLocalCallback) {
+		if !creds.mockAllowed() {
+			log.Printf("[M-Pesa] Zone %d: refusing to mock an own-Daraja payment on a deployed server (env=%q callback=%q)", zoneID, env, callbackURL)
+			return nil, errPaymentsUnavailable
+		}
 		checkoutID := fmt.Sprintf("ws_CO_%d_%d", rand.Intn(999999)+100000, time.Now().Unix())
 		log.Printf("[M-Pesa] Mock STK Push: phone=%s amount=%.0f ref=%s", phone, amount, reference)
 		return &MpesaSTKResponse{
@@ -367,11 +502,13 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		}, nil
 	}
 
-	transactionType := "CustomerPayBillOnline"
-	partyB := creds.PaybillNumber
-	if partyB == "" {
-		partyB = shortcode
+	if creds.BillingType != "till" && creds.PaybillNumber != "" && creds.PaybillNumber != shortcode {
+		log.Printf("[M-Pesa] Zone %d: paybill number %s differs from shortcode %s — STK push settles to the shortcode (Daraja requires PartyB to match it)", zoneID, creds.PaybillNumber, shortcode)
 	}
+
+	route := creds.route()
+	transactionType := route.TransactionType
+	partyB := route.PartyB
 	// For Paybill STK prompt, display customer phone (e.g. 0758335592) as AccountReference
 	accountReference := reference
 	if phone != "" {
@@ -384,17 +521,6 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	}
 	if creds.PaybillAccount != "" && creds.PaybillAccount != "ZYR_" {
 		accountReference = creds.PaybillAccount
-	}
-
-	if creds.BillingType == "till" && creds.TillNumber != "" && creds.TillNumber != shortcode {
-		transactionType = "CustomerBuyGoodsOnline"
-		partyB = creds.TillNumber
-	} else if creds.BillingType == "bank" {
-		partyB = bankPaybill(creds.BankName)
-		accountReference = creds.BankAccount
-		if accountReference == "" {
-			accountReference = reference
-		}
 	}
 
 	// Sanitize to Daraja STK Push specification constraints:
@@ -568,6 +694,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			"status":               "completed",
 			"status_reason":        nil,
 			"mpesa_receipt_number": receiptNumber,
+			"collected_via":        s.CollectionChannel(payment.ZoneID, receiptNumber),
 		})
 	if res.RowsAffected == 0 {
 		log.Printf("[M-Pesa] Duplicate/late success callback/query for payment %d ignored (status already %s)", payment.ID, payment.Status)
@@ -852,12 +979,16 @@ func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string)
 	passkey := creds.Passkey
 	env := creds.Env
 
+	if creds.Own && !creds.mockAllowed() && len(creds.missingFields()) > 0 {
+		return nil, errPaymentsUnavailable
+	}
+
 	token, err := s.GetAccessToken(creds)
 	if err != nil {
 		return nil, err
 	}
 
-	if strings.ToLower(env) != "production" && token == "mock_token" {
+	if strings.ToLower(env) != "production" && token == "mock_token" && creds.mockAllowed() {
 		return map[string]interface{}{
 			"ResponseCode": "0",
 			"ResultCode":   "0",
@@ -1065,6 +1196,30 @@ func (s *MpesaService) SimulateCallback(checkoutRequestID string, amount float64
 	}()
 }
 
+// CollectionChannel says where a just-completed M-Pesa payment's money landed,
+// for the payout ledger (see models.Payment.CollectedVia): "platform" for
+// Zyra Net's shared shortcode in production, "own" for an ISP's own Daraja app,
+// and "" for anything that isn't real settled money (mock/sandbox).
+func (s *MpesaService) CollectionChannel(zoneID uint, receipt string) string {
+	if strings.HasPrefix(strings.ToUpper(receipt), "MOCK") {
+		return ""
+	}
+	creds := s.ResolveMpesaCreds(zoneID)
+	if creds.Own {
+		return "own"
+	}
+	if strings.ToLower(creds.Env) != "production" {
+		return ""
+	}
+	return "platform"
+}
+
+// PlatformIsProduction reports whether the shared Daraja app is live (as
+// opposed to sandbox/mock), i.e. whether money on it is real.
+func (s *MpesaService) PlatformIsProduction() bool {
+	return strings.ToLower(s.ResolveMpesaCreds(0).Env) == "production"
+}
+
 // getSetting retrieves a setting from DB, falling back to defaultVal.
 func (s *MpesaService) getSetting(key, defaultVal string) string {
 	var setting models.Setting
@@ -1082,33 +1237,22 @@ func (s *MpesaService) getSetting(key, defaultVal string) string {
 	return strings.TrimSpace(defaultVal)
 }
 
-func bankPaybill(bankName string) string {
-	banks := map[string]string{
-		"Equity Bank":              "247247",
-		"KCB Bank":                 "522522",
-		"Co-operative Bank":        "400200",
-		"NCBA Bank":                "880100",
-		"Absa Bank Kenya":          "303030",
-		"Standard Chartered":       "329329",
-		"Family Bank":              "222111",
-		"I & M Bank":               "542542",
-		"Diamond Trust Bank (DTB)": "516600",
-		"National Bank":            "547700",
-		"Bank of Africa (BOA)":     "972900",
-	}
-	if v, ok := banks[bankName]; ok {
-		return v
-	}
-	return ""
-}
-
 // loadMpesaSettingsMap loads all M-Pesa configuration settings in a single SQL query.
 func (s *MpesaService) loadMpesaSettingsMap() map[string]string {
+	if m, ok := cachedSettings(); ok {
+		return m
+	}
+	m := s.queryMpesaSettingsMap()
+	storeSettings(m)
+	return m
+}
+
+func (s *MpesaService) queryMpesaSettingsMap() map[string]string {
 	keys := []string{
 		"mpesa_consumer_key", "mpesa_consumer_secret", "mpesa_shortcode",
 		"mpesa_passkey", "mpesa_callback_url", "mpesa_environment",
 		"mpesa_billing_type", "mpesa_till_number", "mpesa_paybill_number",
-		"mpesa_paybill_account", "mpesa_bank_name", "mpesa_bank_account",
+		"mpesa_paybill_account",
 	}
 	var settings []models.Setting
 	if err := config.DB.Where("`key` IN ?", keys).Find(&settings).Error; err != nil {
@@ -1185,10 +1329,10 @@ type C2BRegisterResponse struct {
 // RegisterC2BURLs registers the C2B ValidationURL and ConfirmationURL with Safaricom Daraja.
 func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationURL, responseType string) (*C2BRegisterResponse, error) {
 	creds := s.ResolveMpesaCreds(zoneID)
-	shortcode := creds.Shortcode
-	if creds.BillingType == "paybill" && creds.PaybillNumber != "" {
-		shortcode = creds.PaybillNumber
+	if creds.Own && !creds.mockAllowed() && len(creds.missingFields()) > 0 {
+		return nil, fmt.Errorf("your Daraja settings are incomplete (missing: %s)", strings.Join(creds.missingFields(), ", "))
 	}
+	shortcode := creds.c2bShortcode()
 	if shortcode == "" {
 		if strings.ToLower(creds.Env) == "mock" || strings.ToLower(creds.Env) == "sandbox" || creds.Env == "" || config.Config.AppEnv == "test" || config.Config.AppEnv == "local" || config.Config.AppEnv == "" {
 			shortcode = "600000"
@@ -1217,7 +1361,7 @@ func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationU
 
 	token, err := s.GetAccessToken(creds)
 	if err != nil {
-		if strings.ToLower(creds.Env) != "production" || config.Config.AppEnv == "local" || config.Config.AppEnv == "test" {
+		if creds.mockAllowed() && (strings.ToLower(creds.Env) != "production" || config.Config.AppEnv == "local" || config.Config.AppEnv == "test") {
 			token = "mock_token"
 		} else {
 			return nil, fmt.Errorf("failed to obtain Daraja token: %w", err)
@@ -1231,6 +1375,9 @@ func (s *MpesaService) RegisterC2BURLs(zoneID uint, confirmationURL, validationU
 		!strings.HasPrefix(confirmationURL, "https://")
 
 	if token == "mock_token" || strings.ToLower(creds.Env) == "mock" || (strings.ToLower(creds.Env) != "production" && isLocalURL) {
+		if !creds.mockAllowed() {
+			return nil, fmt.Errorf("C2B URL registration was not sent to Safaricom: check your environment is set to production and the URLs are public https")
+		}
 		return &C2BRegisterResponse{
 			OriginatorConversationID: "mock_orig_conv_id",
 			ConversationID:           "mock_conv_id",

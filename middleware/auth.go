@@ -19,6 +19,12 @@ type Claims struct {
 	ZoneID         *uint  `json:"zone_id,omitempty"`
 	OrganizationID uint   `json:"organization_id,omitempty"`
 	Type           string `json:"type"` // "admin", "customer", or "platform"
+	// AuthMethod is "device" for a customer session granted from a MAC address
+	// alone (see handlers.CustomerAuthByDevice). A MAC is visible to anyone on
+	// the same hotspot and trivial to spoof, so such a session is "weak": it
+	// can look at the account but not change or spend from it
+	// (RequireStrongCustomerAuth). Empty for sessions proven by OTP or payment.
+	AuthMethod string `json:"auth_method,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -80,6 +86,12 @@ func AdminAuth() fiber.Handler {
 		}
 		if claims.Type != "admin" {
 			return utils.ErrorResponse(c, "Forbidden.", "Admin access required.", fiber.StatusForbidden)
+		}
+		// On an ISP's own subdomain only that ISP's staff may act. The session
+		// cookie is shared across *.BASE_DOMAIN, so without this a login from
+		// one ISP's host would also work on another's.
+		if sub, orgID, _, ok := TenantFromRequest(c); sub != "" && (!ok || orgID != claims.OrganizationID) {
+			return utils.ErrorResponse(c, "Forbidden.", "This session does not belong to this ISP portal.", fiber.StatusForbidden)
 		}
 		c.Locals("claims", claims)
 		c.Locals("userID", claims.UserID)
@@ -162,6 +174,32 @@ func GenerateCustomerToken(customerID uint) (string, error) {
 		},
 	}
 	return signToken(claims)
+}
+
+// GenerateDeviceCustomerToken creates a customer session that was granted from
+// a recognised MAC address only — a weak session, see Claims.AuthMethod.
+func GenerateDeviceCustomerToken(customerID uint) (string, error) {
+	claims := Claims{
+		CustomerID: customerID,
+		Type:       "customer",
+		AuthMethod: "device",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.Config.JWTExpiry)),
+		},
+	}
+	return signToken(claims)
+}
+
+// RequireStrongCustomerAuth rejects a customer session that came only from
+// MAC-address recognition. Put it after CustomerAuth on anything that changes
+// the account (contact details) or spends from it (credit).
+func RequireStrongCustomerAuth() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if claims, ok := c.Locals("claims").(*Claims); ok && claims.AuthMethod == "device" {
+			return utils.ErrorResponse(c, "Please verify your phone number with a code to do this.", "Verification required.", fiber.StatusForbidden)
+		}
+		return c.Next()
+	}
 }
 
 func signToken(claims Claims) (string, error) {

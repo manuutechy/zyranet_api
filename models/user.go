@@ -23,6 +23,10 @@ type User struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
+	// LoginURL is where this user signs in (their ISP's subdomain, if it has
+	// one). Computed by handlers, never stored.
+	LoginURL string `gorm:"-" json:"login_url,omitempty"`
+
 	Zone         *Zone         `gorm:"foreignKey:ZoneID" json:"zone,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
 }

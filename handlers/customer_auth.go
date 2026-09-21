@@ -430,7 +430,9 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 		}, "Device has no active subscription.")
 	}
 
-	token, err := middleware.GenerateCustomerToken(customer.ID)
+	// Recognised by MAC address alone, so this is a weak session (it can't
+	// change contact details or spend credit — see RequireStrongCustomerAuth).
+	token, err := middleware.GenerateDeviceCustomerToken(customer.ID)
 	if err != nil {
 		return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
 	}

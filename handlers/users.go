@@ -9,6 +9,27 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// validUserRoles are the staff roles the RBAC middleware knows about.
+var validUserRoles = map[string]bool{"super_admin": true, "zone_manager": true, "finance": true, "field_agent": true}
+
+// zoneInOrg reports whether zoneID is a zone of the organization. A staff
+// member's zone_id scopes what they can see, so accepting one from another
+// ISP would hand them that ISP's zone.
+func zoneInOrg(zoneID, orgID uint) bool {
+	var n int64
+	config.DB.Model(&models.Zone{}).Where("id = ? AND organization_id = ?", zoneID, orgID).Count(&n)
+	return n > 0
+}
+
+// orgLoginURL is where staff of an organization sign in, "" if it has no subdomain.
+func orgLoginURL(orgID uint) string {
+	var org models.Organization
+	if err := config.DB.Select("id", "subdomain").First(&org, orgID).Error; err != nil {
+		return ""
+	}
+	return middleware.AdminURL(org.Subdomain)
+}
+
 // UserIndex lists all users (super_admin only).
 func UserIndex(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
@@ -84,6 +105,9 @@ func UserStore(c *fiber.Ctx) error {
 	if body.Role == "" {
 		body.Role = "field_agent"
 	}
+	if !validUserRoles[body.Role] {
+		return utils.ErrorResponse(c, "Unknown role.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
 
 	orgID := claims.OrganizationID
 	if orgID == 0 {
@@ -100,6 +124,10 @@ func UserStore(c *fiber.Ctx) error {
 		}
 	}
 
+	if body.ZoneID != nil && !zoneInOrg(*body.ZoneID, orgID) {
+		return utils.ErrorResponse(c, "That zone does not belong to your organization.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+
 	user := models.User{
 		Name:           body.Name,
 		Email:          body.Email,
@@ -114,6 +142,7 @@ func UserStore(c *fiber.Ctx) error {
 	if err := config.DB.Create(&user).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create user.", fiber.StatusInternalServerError)
 	}
+	user.LoginURL = orgLoginURL(orgID)
 	return utils.SuccessResponse(c, user, "User created successfully.", fiber.StatusCreated)
 }
 
@@ -145,6 +174,17 @@ func UserUpdate(c *fiber.Ctx) error {
 	var body map[string]interface{}
 	c.BodyParser(&body)
 	delete(body, "organization_id") // never allow reassigning a user's tenant via this endpoint
+	delete(body, "login_url")
+
+	if role, ok := body["role"].(string); ok && !validUserRoles[role] {
+		return utils.ErrorResponse(c, "Unknown role.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	if rawZone, present := body["zone_id"]; present && rawZone != nil {
+		zoneFloat, isNum := rawZone.(float64)
+		if !isNum || !zoneInOrg(uint(zoneFloat), claims.OrganizationID) {
+			return utils.ErrorResponse(c, "That zone does not belong to your organization.", "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+	}
 
 	if newEmail, ok := body["email"].(string); ok && newEmail != "" && newEmail != user.Email {
 		var existing models.User

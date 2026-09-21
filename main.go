@@ -39,6 +39,7 @@ func main() {
 		&models.OrganizationMpesaConfig{},
 		&models.OrganizationSmsConfig{},
 		&models.UnmatchedC2BPayment{},
+		&models.Payout{},
 		&models.User{},
 		&models.Zone{},
 		&models.Package{},
@@ -145,12 +146,21 @@ func main() {
 
 	// Inject services into handlers
 	handlers.InitMpesaService(mpesaSvc, smsSvc, mikrotikSvc)
+	handlers.InitPayoutService(services.NewPayoutService(mpesaSvc))
 	handlers.InitVoucherService(voucherSvc, mikrotikSvc)
 	handlers.InitZoneServices(mikrotikSvc, scriptSvc)
 	handlers.InitCustomerAuthSMS(smsSvc)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
+		// Behind Cloudflare every connection comes from a Cloudflare edge IP;
+		// the real client is in CF-Connecting-IP, trusted only from Cloudflare /
+		// local proxies. Without this, c.IP() (used by the rate limiters) is the
+		// edge, so unrelated users share one bucket.
+		ProxyHeader:             config.Config.ProxyHeader,
+		EnableTrustedProxyCheck: config.Config.ProxyHeader != "",
+		TrustedProxies:          config.Config.TrustedProxies,
+		EnableIPValidation:      true,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			msg := err.Error()
@@ -195,7 +205,10 @@ func main() {
 	} else {
 		allowedOrigins := strings.Join(config.Config.AllowedOrigins, ",")
 		app.Use(cors.New(cors.Config{
-			AllowOrigins:     allowedOrigins,
+			AllowOrigins: allowedOrigins,
+			// ISP staff-admin hosts (<subdomain>.<BASE_DOMAIN>) are allowed
+			// dynamically: exactly those subdomains that belong to an ISP.
+			AllowOriginsFunc: middleware.IsTenantOrigin,
 			AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
 			AllowHeaders:     "Origin,Content-Type,Authorization,Accept",
 			AllowCredentials: true,

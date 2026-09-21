@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -239,10 +241,41 @@ func UpsertSettings(settingsToUpdate map[string]string) {
 			config.DB.Where(models.Setting{Key: key}).Assign(models.Setting{Value: &trimmed}).FirstOrCreate(&models.Setting{})
 		}
 	}
+	// Settings feed the cached public settings and Daraja credentials.
+	invalidateAllSettings()
+	services.InvalidateMpesaCaches()
 }
 
-// loadAllSettings merges DB settings with defaults.
+// settingsCache holds the merged settings for a short time: loadAllSettings is
+// hit by every public portal load, and the settings table changes rarely.
+// UpsertSettings clears it in-process, so a save is visible immediately here.
+var (
+	allSettingsMu  sync.Mutex
+	allSettings    map[string]string
+	allSettingsExp time.Time
+)
+
+const allSettingsTTL = 30 * time.Second
+
+func invalidateAllSettings() {
+	allSettingsMu.Lock()
+	allSettings = nil
+	allSettingsMu.Unlock()
+}
+
+// loadAllSettings returns a fresh copy each call (callers delete keys from it).
 func loadAllSettings() map[string]string {
+	allSettingsMu.Lock()
+	if allSettings != nil && time.Now().Before(allSettingsExp) {
+		out := make(map[string]string, len(allSettings))
+		for k, v := range allSettings {
+			out[k] = v
+		}
+		allSettingsMu.Unlock()
+		return out
+	}
+	allSettingsMu.Unlock()
+
 	result := make(map[string]string)
 	for k, v := range settingDefaults {
 		result[k] = v
@@ -254,6 +287,14 @@ func loadAllSettings() map[string]string {
 			result[s.Key] = *s.Value
 		}
 	}
+
+	cp := make(map[string]string, len(result))
+	for k, v := range result {
+		cp[k] = v
+	}
+	allSettingsMu.Lock()
+	allSettings, allSettingsExp = cp, time.Now().Add(allSettingsTTL)
+	allSettingsMu.Unlock()
 	return result
 }
 

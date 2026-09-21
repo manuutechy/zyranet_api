@@ -12,6 +12,13 @@ import (
 
 var platformSettingDefaults = map[string]string{
 	"default_commission_percent": "0",
+	// Master switch for sending payouts through M-Pesa B2B. Off until an
+	// operator has configured B2B and decided to use it.
+	"payouts_enabled": "no",
+	// When "yes", the staff member who created a payout can't also send it.
+	"payouts_require_second_approver": "no",
+	// Smallest payout (KES, whole shillings) worth creating; 0 = no minimum.
+	"payout_min_amount": "0",
 }
 
 // GetPlatformSetting reads a platform-wide setting, falling back to its default.

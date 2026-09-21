@@ -22,6 +22,19 @@ func Login(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Email and password are required.", "Validation failed.", fiber.StatusUnprocessableEntity)
 	}
 
+	// Logging in on an ISP's own subdomain: it must exist and be in good
+	// standing, and only that ISP's staff may sign in there (checked below,
+	// after the password, so the response doesn't reveal who works where).
+	tenantSub, tenantOrgID, tenantStatus, tenantOK := middleware.TenantFromRequest(c)
+	if tenantSub != "" {
+		if !tenantOK {
+			return utils.ErrorResponse(c, "This ISP portal does not exist.", "Unknown portal.", fiber.StatusNotFound)
+		}
+		if tenantStatus == "suspended" {
+			return utils.ErrorResponse(c, "This ISP account is suspended. Please contact Zyra Net support.", "Account suspended.", fiber.StatusForbidden)
+		}
+	}
+
 	var user models.User
 	if err := config.DB.Where("email = ?", body.Email).First(&user).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid login credentials.", "Authentication failed.", fiber.StatusUnauthorized)
@@ -33,6 +46,10 @@ func Login(c *fiber.Ctx) error {
 
 	if user.Status != "active" {
 		return utils.ErrorResponse(c, "Your account is inactive.", "Account disabled.", fiber.StatusForbidden)
+	}
+
+	if tenantSub != "" && user.OrganizationID != tenantOrgID {
+		return utils.ErrorResponse(c, "Invalid login credentials.", "Authentication failed.", fiber.StatusUnauthorized)
 	}
 
 	token, err := middleware.GenerateAdminToken(user.ID, user.Role, user.ZoneID, user.OrganizationID)

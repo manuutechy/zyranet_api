@@ -29,6 +29,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.CustomerDevice{},
 		&models.Ticket{},
 		&models.Payment{},
+		&models.Payout{},
 		&models.Session{},
 		&models.Setting{},
 		&models.Voucher{},
@@ -43,5 +44,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	}
 
 	config.DB = db
+	InvalidateMpesaCaches()
 	return db
 }

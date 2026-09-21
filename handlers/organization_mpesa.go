@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -47,12 +49,10 @@ func OrganizationMpesaShow(c *fiber.Ctx) error {
 		"has_passkey":         cfg.Passkey != "",
 		"callback_url":        cfg.CallbackURL,
 		"env":                 cfg.Env,
-		"billing_type":        cfg.BillingType,
+		"billing_type":        normalizedBillingType(cfg.BillingType),
 		"till_number":         cfg.TillNumber,
 		"paybill_number":      cfg.PaybillNumber,
 		"paybill_account":     cfg.PaybillAccount,
-		"bank_name":           cfg.BankName,
-		"bank_account":        cfg.BankAccount,
 	}
 	for k, v := range settlement {
 		result[k] = v
@@ -83,8 +83,6 @@ func OrganizationMpesaUpdate(c *fiber.Ctx) error {
 		TillNumber     string `json:"till_number"`
 		PaybillNumber  string `json:"paybill_number"`
 		PaybillAccount string `json:"paybill_account"`
-		BankName       string `json:"bank_name"`
-		BankAccount    string `json:"bank_account"`
 
 		// Where Zyra Net should route this ISP's share when they're on
 		// "platform" Daraja mode. Ignored (left untouched) when mode is "own".
@@ -123,27 +121,75 @@ func OrganizationMpesaUpdate(c *fiber.Ctx) error {
 
 	cfg.Mode = body.Mode
 	if body.Mode == "own" {
-		cfg.ConsumerKey = body.ConsumerKey
-		if body.ConsumerSecret != "" {
-			cfg.ConsumerSecret = body.ConsumerSecret
+		// A payment can only settle into the shortcode/till the Daraja app
+		// belongs to, so collection is paybill or till. "bank" (the old third
+		// option) is a settlement destination, not something a customer can be
+		// charged into — treat any stored/legacy "bank" as paybill.
+		billingType := strings.ToLower(strings.TrimSpace(body.BillingType))
+		if billingType == "" || billingType == "bank" {
+			billingType = "paybill"
 		}
-		cfg.Shortcode = body.Shortcode
-		if body.Passkey != "" {
-			cfg.Passkey = body.Passkey
+		if billingType != "paybill" && billingType != "till" {
+			return utils.ErrorResponse(c, "billing_type must be 'paybill' or 'till'.", "", fiber.StatusUnprocessableEntity)
 		}
-		cfg.CallbackURL = body.CallbackURL
-		cfg.Env = body.Env
-		cfg.BillingType = body.BillingType
-		cfg.TillNumber = body.TillNumber
-		cfg.PaybillNumber = body.PaybillNumber
-		cfg.PaybillAccount = body.PaybillAccount
-		cfg.BankName = body.BankName
-		cfg.BankAccount = body.BankAccount
+		env := strings.ToLower(strings.TrimSpace(body.Env))
+		if env == "" {
+			env = "sandbox"
+		}
+		if env != "sandbox" && env != "production" {
+			return utils.ErrorResponse(c, "env must be 'sandbox' or 'production'.", "", fiber.StatusUnprocessableEntity)
+		}
+
+		// Blank secret/passkey keep the stored value, so only complain when
+		// there's neither a new nor a stored one.
+		consumerSecret := cfg.ConsumerSecret
+		if strings.TrimSpace(body.ConsumerSecret) != "" {
+			consumerSecret = strings.TrimSpace(body.ConsumerSecret)
+		}
+		passkey := cfg.Passkey
+		if strings.TrimSpace(body.Passkey) != "" {
+			passkey = strings.TrimSpace(body.Passkey)
+		}
+		var missing []string
+		if strings.TrimSpace(body.ConsumerKey) == "" {
+			missing = append(missing, "consumer key")
+		}
+		if consumerSecret == "" {
+			missing = append(missing, "consumer secret")
+		}
+		if strings.TrimSpace(body.Shortcode) == "" {
+			missing = append(missing, "shortcode")
+		}
+		if passkey == "" {
+			missing = append(missing, "passkey")
+		}
+		if billingType == "till" && strings.TrimSpace(body.TillNumber) == "" {
+			missing = append(missing, "till number")
+		}
+		if len(missing) > 0 {
+			return utils.ErrorResponse(c,
+				"Your own Daraja app needs: "+strings.Join(missing, ", ")+". Fill these in, or switch back to Zyra Net's shared app.",
+				"", fiber.StatusUnprocessableEntity)
+		}
+
+		cfg.ConsumerKey = strings.TrimSpace(body.ConsumerKey)
+		cfg.ConsumerSecret = consumerSecret
+		cfg.Shortcode = strings.TrimSpace(body.Shortcode)
+		cfg.Passkey = passkey
+		cfg.CallbackURL = strings.TrimSpace(body.CallbackURL)
+		cfg.Env = env
+		cfg.BillingType = billingType
+		cfg.TillNumber = strings.TrimSpace(body.TillNumber)
+		cfg.PaybillNumber = strings.TrimSpace(body.PaybillNumber)
+		cfg.PaybillAccount = strings.TrimSpace(body.PaybillAccount)
+		cfg.BankName = ""
+		cfg.BankAccount = ""
 	}
 
 	if err := config.DB.Save(&cfg).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to update M-Pesa settings.", fiber.StatusInternalServerError)
 	}
+	services.InvalidateMpesaCaches()
 
 	return utils.SuccessResponse(c, fiber.Map{"mode": cfg.Mode}, "M-Pesa settings updated successfully.")
 }
@@ -199,4 +245,13 @@ func OrganizationMpesaTest(c *fiber.Ctx) error {
 		"environment": creds.Env,
 		"token_valid": token != "",
 	}, fmt.Sprintf("Daraja OAuth authentication successful on %s environment.", creds.Env))
+}
+
+// normalizedBillingType reports a stored billing type as one of the two
+// collection types the UI offers (legacy "bank" reads back as "paybill").
+func normalizedBillingType(t string) string {
+	if strings.EqualFold(strings.TrimSpace(t), "till") {
+		return "till"
+	}
+	return "paybill"
 }

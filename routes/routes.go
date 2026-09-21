@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -35,6 +37,64 @@ func payLimiter(max int, window time.Duration) fiber.Handler {
 	})
 }
 
+// bodyPhone reads the "phone" field of a JSON body without consuming it.
+func bodyPhone(c *fiber.Ctx) string {
+	var b struct {
+		Phone string `json:"phone"`
+	}
+	_ = json.Unmarshal(c.Body(), &b)
+	return strings.TrimSpace(b.Phone)
+}
+
+// payPhoneLimiter limits STK pushes per (client IP, phone). Every customer at
+// a hotspot reaches the API from the site's one public IP, so an IP-only limit
+// caps a whole site; keying on the phone number as well lets each customer
+// retry a few times a minute while still stopping one phone being hammered.
+// Pair it with payLimiter as a coarse per-IP ceiling against spraying phones.
+func payPhoneLimiter(max int, window time.Duration) fiber.Handler {
+	if config.Config.AppEnv == "local" {
+		return func(c *fiber.Ctx) error { return c.Next() }
+	}
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: window,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP() + "|" + bodyPhone(c)
+		},
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"success": false,
+				"error":   "Too many payment attempts for this number. Please wait a minute and try again.",
+				"message": "Rate limit exceeded.",
+			})
+		},
+	})
+}
+
+// failedLookupLimiter counts only *failed* (4xx/5xx) requests per client IP.
+// It protects endpoints polled constantly by legitimate users (payment status)
+// from being used to guess identifiers, without throttling the polling itself.
+func failedLookupLimiter(max int, window time.Duration) fiber.Handler {
+	if config.Config.AppEnv == "local" {
+		return func(c *fiber.Ctx) error { return c.Next() }
+	}
+	return limiter.New(limiter.Config{
+		Max:                    max,
+		Expiration:             window,
+		SkipSuccessfulRequests: true,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"success": false,
+				"error":   "Too many requests. Please wait a moment and try again.",
+				"message": "Rate limit exceeded.",
+			})
+		},
+	})
+}
+
 // Register mounts all API routes on the Fiber app.
 func Register(app *fiber.App) {
 	v1 := app.Group("/api/v1")
@@ -47,31 +107,37 @@ func Register(app *fiber.App) {
 	// Customer portal auth
 	v1.Get("/customer/auth/device", handlers.CustomerAuthByDevice)
 	v1.Post("/customer/auth/device", handlers.CustomerAuthByDevice)
-	v1.Post("/customer/auth/otp", payLimiter(3, time.Minute), handlers.RequestOtp)
+	// Per-IP only guards against floods; the real per-number cooldown is in
+	// RequestOtp. A tight IP limit would cap a whole hotspot site (shared IP).
+	v1.Post("/customer/auth/otp", payLimiter(15, time.Minute), handlers.RequestOtp)
 	v1.Post("/customer/auth/verify", payLimiter(10, time.Minute), handlers.VerifyOtp)
 	v1.Post("/customer/auth/guest", handlers.CustomerAuthGuest)
 	v1.Post("/customer/auth/logout", handlers.CustomerLogout)
 	v1.Post("/customer/free-tier/claim", handlers.CustomerClaimFreeTier)
 
 	// Public settings & packages
+	v1.Get("/public/tenant", handlers.TenantPublic)
 	v1.Get("/public/settings", handlers.SettingsPublic)
 	v1.Get("/public/packages", handlers.PackagePublic)
 	v1.Get("/public/captive-settings", handlers.CaptivePortalPublicSettings)
 	v1.Post("/public/free-tier/claim", handlers.CustomerClaimFreeTier)
 
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
-	v1.Post("/payments/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
+	v1.Post("/payments/stkpush", payLimiter(60, time.Minute), payPhoneLimiter(5, time.Minute), handlers.MpesaStkPush)
 	v1.Post("/payments/callback", handlers.MpesaCallback)
 	v1.Post("/payments/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/c2b/confirmation", handlers.MpesaC2BConfirmation)
 
 	// Backwards-compatible aliases
-	v1.Post("/mpesa/stkpush", payLimiter(5, time.Minute), handlers.MpesaStkPush)
+	v1.Post("/mpesa/stkpush", payLimiter(60, time.Minute), payPhoneLimiter(5, time.Minute), handlers.MpesaStkPush)
 	v1.Post("/mpesa/callback", handlers.MpesaCallback)
 	v1.Post("/mpesa/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/mpesa/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/mpesa/c2b/confirmation", handlers.MpesaC2BConfirmation)
+	// Safaricom B2B (payout) callbacks — guarded by the shared callback secret
+	v1.Post("/payouts/b2b/result", handlers.PayoutB2BResult)
+	v1.Post("/payouts/b2b/timeout", handlers.PayoutB2BTimeout)
 
 	// Voucher redemption (public captive portal flow)
 	v1.Post("/vouchers/redeem", handlers.VoucherRedeem)
@@ -82,8 +148,8 @@ func Register(app *fiber.App) {
 	v1.Get("/public/tickets/status", handlers.TicketStatusPublic)
 
 	// Hotspot Captive Portal Routes
-	v1.Post("/hotspot/pay", payLimiter(5, time.Minute), handlers.HotspotPay)
-	v1.Get("/hotspot/status/:reference", handlers.HotspotStatus)
+	v1.Post("/hotspot/pay", payLimiter(60, time.Minute), payPhoneLimiter(5, time.Minute), handlers.HotspotPay)
+	v1.Get("/hotspot/status/:reference", failedLookupLimiter(30, time.Minute), handlers.HotspotStatus)
 	v1.Get("/hotspot/session", handlers.HotspotSession)
 	v1.Post("/hotspot/logout", handlers.HotspotLogout)
 
@@ -96,15 +162,16 @@ func Register(app *fiber.App) {
 
 	// ---- CUSTOMER JWT ROUTES ----
 	customerAuth := middleware.CustomerAuth()
+	strongCustomer := middleware.RequireStrongCustomerAuth()
 	v1.Get("/customer/profile", customerAuth, handlers.CustomerProfile)
-	v1.Put("/customer/profile", customerAuth, handlers.CustomerProfileUpdate)
+	v1.Put("/customer/profile", customerAuth, strongCustomer, handlers.CustomerProfileUpdate)
 	v1.Get("/customer/payments", customerAuth, handlers.CustomerAuthPayments)
 	v1.Post("/customer/vouchers/redeem", handlers.VoucherRedeemAuthenticated)
 	v1.Post("/customer/reconnect", handlers.CustomerReconnect)
 	v1.Get("/customer/tickets", customerAuth, handlers.TicketCustomerList)
 	v1.Post("/customer/tickets", customerAuth, handlers.TicketStoreCustomer)
 	v1.Post("/customer/topup", customerAuth, handlers.CustomerTopUp)
-	v1.Post("/customer/purchase-credit", customerAuth, handlers.CustomerPurchaseWithCredit)
+	v1.Post("/customer/purchase-credit", customerAuth, strongCustomer, handlers.CustomerPurchaseWithCredit)
 
 	// ---- ADMIN JWT ROUTES ----
 	// NOTE: AdminAuth is applied per-route (not via Group(prefix, middleware)).
@@ -189,6 +256,7 @@ func Register(app *fiber.App) {
 	admin.Post("/settings", adminAuth, handlers.SettingsUpdate)
 	admin.Post("/settings/upload", adminAuth, handlers.SettingsUploadImage)
 	admin.Post("/settings/test-sms", adminAuth, handlers.TestSms)
+	admin.Get("/payouts", adminAuth, middleware.IsFinanceOrAdmin(), handlers.OrganizationPayoutsIndex)
 	admin.Get("/settings/mpesa", adminAuth, handlers.OrganizationMpesaShow)
 	admin.Post("/settings/mpesa", adminAuth, handlers.OrganizationMpesaUpdate)
 	admin.Post("/settings/mpesa/test", adminAuth, handlers.OrganizationMpesaTest)
@@ -239,6 +307,17 @@ func Register(app *fiber.App) {
 	platform.Post("/sms/test", platformAuth, handlers.PlatformSmsTest)
 
 	platform.Get("/organizations", platformAuth, handlers.OrganizationIndex)
+	platform.Get("/subdomains/check", platformAuth, handlers.OrganizationSubdomainCheck)
+	platform.Get("/routers/legacy", platformAuth, handlers.PlatformLegacyRouters)
+	platform.Get("/payouts/balances", platformAuth, handlers.PlatformPayoutBalances)
+	platform.Post("/payouts/backfill", platformAuth, handlers.PlatformPayoutBackfill)
+	platform.Get("/payouts", platformAuth, handlers.PlatformPayoutIndex)
+	platform.Post("/payouts", platformAuth, handlers.PlatformPayoutStore)
+	platform.Get("/payouts/:id", platformAuth, handlers.PlatformPayoutShow)
+	platform.Post("/payouts/:id/send", platformAuth, handlers.PlatformPayoutSend)
+	platform.Post("/payouts/:id/mark-paid", platformAuth, handlers.PlatformPayoutMarkPaid)
+	platform.Post("/payouts/:id/cancel", platformAuth, handlers.PlatformPayoutCancel)
+	platform.Post("/payouts/:id/fail", platformAuth, handlers.PlatformPayoutFail)
 	platform.Post("/organizations", platformAuth, handlers.OrganizationStore)
 	platform.Get("/organizations/:id", platformAuth, handlers.OrganizationShow)
 	platform.Put("/organizations/:id", platformAuth, handlers.OrganizationUpdate)

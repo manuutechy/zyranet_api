@@ -21,12 +21,14 @@ type OrganizationMpesaConfig struct {
 	Passkey        string    `gorm:"size:255" json:"-"`
 	CallbackURL    string    `gorm:"size:255" json:"callback_url"`
 	Env            string    `gorm:"size:20;default:sandbox" json:"env"`
-	BillingType    string    `gorm:"size:20;default:paybill" json:"billing_type"` // paybill | till | bank
+	BillingType    string    `gorm:"size:20;default:paybill" json:"billing_type"` // paybill | till (legacy "bank" reads as paybill)
 	TillNumber     string    `gorm:"size:20" json:"till_number"`
 	PaybillNumber  string    `gorm:"size:20" json:"paybill_number"`
 	PaybillAccount string    `gorm:"size:50" json:"paybill_account"`
-	BankName       string    `gorm:"size:100" json:"bank_name"`
-	BankAccount    string    `gorm:"size:50" json:"bank_account"`
+	// BankName/BankAccount belonged to the retired "bank" billing type and are
+	// no longer read or written; kept only so existing rows/columns stay valid.
+	BankName    string `gorm:"size:100" json:"-"`
+	BankAccount string `gorm:"size:50" json:"-"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

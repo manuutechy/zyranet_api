@@ -284,11 +284,13 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s", 
 		body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN, body.FirstName, body.MiddleName, body.LastName)
 
-	cleanPhone := utils.FormatPhone(body.MSISDN)
-	phoneSuffix := cleanPhone
-	if len(phoneSuffix) >= 9 {
-		phoneSuffix = phoneSuffix[len(phoneSuffix)-9:]
+	transIDStr := strings.TrimSpace(body.TransID)
+	if transIDStr != "" && c2bAlreadyRecorded(transIDStr) {
+		log.Printf("[C2B Confirmation] TransID %s already recorded — ignoring duplicate delivery", transIDStr)
+		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Success"})
 	}
+
+	cleanPhone := utils.FormatPhone(body.MSISDN)
 
 	// Format Title Case Name from C2B payload
 	nameParts := []string{}
@@ -303,49 +305,24 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 	}
 	payerName := strings.Join(nameParts, " ")
 
+	// Which ISP does this payment belong to? A payment to an ISP's own
+	// shortcode is that ISP's, so only their customers can match. On the
+	// shared platform paybill any ISP's customer could, so a match there must
+	// be unique — otherwise it's queued for manual reconciliation.
+	orgID, scoped := services.OrgForShortcode(body.BusinessShortCode)
+
 	var customer models.Customer
 	foundCustomer := false
-	if body.BillRefNumber != "" {
-		if err := config.DB.Where("account_number = ? OR pppoe_username = ? OR phone LIKE ?", body.BillRefNumber, body.BillRefNumber, "%"+body.BillRefNumber).First(&customer).Error; err == nil {
+	matched, ambiguous := matchC2BCustomer(orgID, scoped, body.BillRefNumber, body.MSISDN)
+	if matched != nil {
+		customer = *matched
+		foundCustomer = true
+	} else if !ambiguous && scoped {
+		if created, ok := autoCreateC2BCustomer(orgID, cleanPhone, payerName, body.TransAmount); ok {
+			customer = *created
 			foundCustomer = true
 		}
 	}
-	if !foundCustomer && phoneSuffix != "" {
-		if err := config.DB.Where("phone LIKE ?", "%"+phoneSuffix).First(&customer).Error; err == nil {
-			foundCustomer = true
-		}
-	}
-
-	// If customer not found by BillRefNumber or phone suffix, look up by full cleanPhone or create for payer
-	if !foundCustomer && cleanPhone != "" {
-		if err := config.DB.Where("phone = ?", cleanPhone).First(&customer).Error; err == nil {
-			foundCustomer = true
-		} else {
-			var zone models.Zone
-			config.DB.First(&zone)
-			var pkg models.Package
-			config.DB.Where("zone_id = ? AND price = ?", zone.ID, body.TransAmount).First(&pkg)
-			if pkg.ID == 0 {
-				config.DB.First(&pkg)
-			}
-			newCustomer := models.Customer{
-				Name:          payerName,
-				Phone:         cleanPhone,
-				AccountNumber: "ZYR#" + cleanPhone,
-				ZoneID:        zone.ID,
-				PackageID:     pkg.ID,
-				Type:          "hotspot",
-				Status:        "active",
-				CreditBalance: 0,
-			}
-			if err := config.DB.Create(&newCustomer).Error; err == nil {
-				customer = newCustomer
-				foundCustomer = true
-			}
-		}
-	}
-
-	transIDStr := body.TransID
 
 	if !foundCustomer {
 		unmatched := models.UnmatchedC2BPayment{
@@ -449,6 +426,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		Status:             "completed",
 		MpesaReceiptNumber: &transIDStr,
 		MpesaTransactionID: &transIDStr,
+		CollectedVia:       c2bCollectionChannel(scoped),
 	}
 	config.DB.Create(&payment)
 
