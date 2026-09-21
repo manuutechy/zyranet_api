@@ -102,6 +102,12 @@ type AppConfig struct {
 	BaseDomain string
 }
 
+// CORSAllowMethods is every HTTP method the API's routes use. A method missing
+// here is blocked by the browser before the request is even sent (the platform
+// app's PATCH calls silently failed for exactly this reason), so
+// routes/cors_test.go checks every registered route against this list.
+const CORSAllowMethods = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+
 var Config AppConfig
 
 // Load reads the .env file (if present) and populates Config.

@@ -71,3 +71,9 @@ func SubdomainFromHost(host, baseDomain string) string {
 	}
 	return sub
 }
+
+// IsReservedSubdomain reports whether label is one of the platform's own
+// reserved names (admin, api, platform, …).
+func IsReservedSubdomain(label string) bool {
+	return reservedSubdomains[strings.ToLower(strings.TrimSpace(label))]
+}

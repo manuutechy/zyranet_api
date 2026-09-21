@@ -198,7 +198,7 @@ func main() {
 				c.Set("Access-Control-Allow-Origin", "*")
 			}
 			c.Set("Access-Control-Allow-Credentials", "true")
-			c.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+			c.Set("Access-Control-Allow-Methods", config.CORSAllowMethods)
 			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept")
 
 			if c.Method() == "OPTIONS" {
@@ -213,7 +213,7 @@ func main() {
 			// ISP staff-admin hosts (<subdomain>.<BASE_DOMAIN>) are allowed
 			// dynamically: exactly those subdomains that belong to an ISP.
 			AllowOriginsFunc: middleware.IsTenantOrigin,
-			AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+			AllowMethods:     config.CORSAllowMethods,
 			AllowHeaders:     "Origin,Content-Type,Authorization,Accept",
 			AllowCredentials: true,
 		}))

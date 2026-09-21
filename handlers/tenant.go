@@ -32,6 +32,12 @@ func validateSubdomain(raw string) (string, error) {
 func TenantPublic(c *fiber.Ctx) error {
 	sub := ""
 	if q := strings.TrimSpace(c.Query("subdomain")); q != "" {
+		// The platform's own sites (admin., bit1., platform., …) are not ISP
+		// portals, but they are not errors either: say so, so the login page
+		// there shows its normal, unbranded form instead of "unknown portal".
+		if utils.IsReservedSubdomain(q) || middleware.IsPlatformLabel(q) {
+			return utils.SuccessResponse(c, fiber.Map{"platform": true}, "")
+		}
 		normalized, err := validateSubdomain(q)
 		if err != nil {
 			return utils.ErrorResponse(c, "This ISP portal does not exist.", "", fiber.StatusNotFound)

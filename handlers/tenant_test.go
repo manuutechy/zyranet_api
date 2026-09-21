@@ -450,3 +450,41 @@ func TestPlatformHostsAreNeverTreatedAsISPSubdomains(t *testing.T) {
 		t.Errorf("onboarding with subdomain bit1: %d, want 422", st)
 	}
 }
+
+// The live admin site (bit1.) and the platform's other sites must be reported
+// as platform hosts — not "unknown ISP" — or the login page there is blocked.
+func TestTenantPublic_PlatformHostsAreNotUnknownPortals(t *testing.T) {
+	setupTenantTest(t)
+	old := config.Config.AllowedOrigins
+	config.Config.AllowedOrigins = []string{"https://bit1.zyranet.co.ke"}
+	t.Cleanup(func() { config.Config.AllowedOrigins = old })
+
+	for _, label := range []string{"bit1", "admin", "platform", "captive", "API"} {
+		st, out := call(t, "GET", "/tenant?subdomain="+label, "", "", "")
+		if st != 200 || out["data"].(map[string]interface{})["platform"] != true {
+			t.Errorf("%q: status %d %v — want 200 with platform:true", label, st, out)
+		}
+	}
+	// A genuinely unknown label is still a 404, and a real ISP still resolves.
+	if st, _ := call(t, "GET", "/tenant?subdomain=typo123", "", "", ""); st != 404 {
+		t.Errorf("unknown label: %d, want 404", st)
+	}
+	seedTenant(t, "acme", strp("acme"), "active")
+	if st, out := call(t, "GET", "/tenant?subdomain=acme", "", "", ""); st != 200 || out["data"].(map[string]interface{})["platform"] == true {
+		t.Errorf("a real ISP must not be reported as a platform host: %d %v", st, out)
+	}
+}
+
+// Editing an organization from the platform app: the exact body its edit form sends.
+func TestPlatform_EditFormBodyWithSubdomainSucceeds(t *testing.T) {
+	setupTenantTest(t)
+	org, _ := seedTenant(t, "acme", nil, "active")
+	body := `{"name":"Acme ISP","subdomain":"acme","contact_email":"ops@acme.test","contact_phone":"","billing_rate_per_customer":0,"commission_percent":null}`
+	st, out := call(t, "PATCH", fmt.Sprintf("/orgs/%d", org.ID), "", "", body)
+	if st != 200 {
+		t.Fatalf("edit form body: %d %v", st, out)
+	}
+	if got := out["data"].(map[string]interface{}); got["subdomain"] != "acme" || got["admin_url"] != "https://acme.zyranet.co.ke" {
+		t.Errorf("after edit: %v", got)
+	}
+}

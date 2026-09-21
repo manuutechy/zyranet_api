@@ -1,7 +1,12 @@
 package services
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -211,5 +216,120 @@ func TestCredsCache_ServesCachedUntilInvalidated(t *testing.T) {
 	InvalidateMpesaCaches()
 	if got := svc.ResolveMpesaCreds(zoneID).Shortcode; got != "222222" {
 		t.Errorf("after invalidation shortcode = %q, want 222222", got)
+	}
+}
+
+// ---- the request that actually reaches Daraja (what "Test STK Push" sends) ----
+
+type capturedSTK struct {
+	body map[string]interface{}
+	hits int
+}
+
+func fakeDarajaSTK(t *testing.T) (*httptest.Server, *capturedSTK) {
+	t.Helper()
+	cap := &capturedSTK{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v1/generate":
+			io.WriteString(w, `{"access_token":"tok","expires_in":"3599"}`)
+		case "/mpesa/stkpush/v1/processrequest":
+			cap.hits++
+			b, _ := io.ReadAll(r.Body)
+			json.Unmarshal(b, &cap.body)
+			io.WriteString(w, `{"ResponseCode":"0","CheckoutRequestID":"ws_CO_test","ResponseDescription":"Success. Request accepted for processing"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, cap
+}
+
+func productionPlatformSettings(t *testing.T, billing, till string) {
+	t.Helper()
+	for k, v := range map[string]string{
+		"mpesa_consumer_key": "ck", "mpesa_consumer_secret": "cs", "mpesa_shortcode": "7289306", "mpesa_passkey": "pk-secret",
+		"mpesa_environment": "production", "mpesa_callback_url": "https://api.zyranet.co.ke/api/v1/payments/callback",
+		"mpesa_billing_type": billing, "mpesa_till_number": till,
+	} {
+		setSetting(t, k, v)
+	}
+}
+
+func TestInitiateSTKPush_TillRequestMatchesTheProductionSetup(t *testing.T) {
+	setupTestDB(t)
+	setAppEnv(t, "production")
+	productionPlatformSettings(t, "till", "3514722") // the live platform config
+	srv, cap := fakeDarajaSTK(t)
+	svc := newTestMpesaService()
+	svc.baseURLOverride = srv.URL
+	zoneID, _ := seedZone(t)
+
+	resp, err := svc.InitiateSTKPush(zoneID, "0712345678", 10, "SA-TEST", "Zyra Net Daraja Test Payment")
+	if err != nil || resp.IsMock || resp.CheckoutRequestID != "ws_CO_test" {
+		t.Fatalf("resp=%+v err=%v — must be a real (non-mock) push", resp, err)
+	}
+	b := cap.body
+	if b["TransactionType"] != "CustomerBuyGoodsOnline" || b["PartyB"] != "3514722" || b["BusinessShortCode"] != "7289306" {
+		t.Errorf("till routing: type=%v partyB=%v shortcode=%v", b["TransactionType"], b["PartyB"], b["BusinessShortCode"])
+	}
+	if b["PartyA"] != "254712345678" || b["PhoneNumber"] != "254712345678" || b["Amount"] != float64(10) {
+		t.Errorf("payer/amount: %v %v %v", b["PartyA"], b["PhoneNumber"], b["Amount"])
+	}
+	if !strings.HasPrefix(b["CallBackURL"].(string), "https://api.zyranet.co.ke/api/v1/payments/callback") {
+		t.Errorf("callback = %v", b["CallBackURL"])
+	}
+	ref, desc := b["AccountReference"].(string), b["TransactionDesc"].(string)
+	if len(ref) > 12 || len(desc) > 13 || strings.ContainsAny(ref+desc, " -_.") {
+		t.Errorf("Daraja limits: reference %q (max 12 alnum), description %q (max 13 alnum)", ref, desc)
+	}
+	// The password is base64(shortcode + passkey + timestamp), as Daraja requires.
+	pw, _ := base64.StdEncoding.DecodeString(b["Password"].(string))
+	ts := b["Timestamp"].(string)
+	if string(pw) != "7289306"+"pk-secret"+ts {
+		t.Errorf("password decodes to %q", pw)
+	}
+}
+
+func TestInitiateSTKPush_PaybillRequest(t *testing.T) {
+	setupTestDB(t)
+	setAppEnv(t, "production")
+	productionPlatformSettings(t, "paybill", "")
+	srv, cap := fakeDarajaSTK(t)
+	svc := newTestMpesaService()
+	svc.baseURLOverride = srv.URL
+	zoneID, _ := seedZone(t)
+
+	if _, err := svc.InitiateSTKPush(zoneID, "254712345678", 5, "Cust1", "WiFi"); err != nil {
+		t.Fatal(err)
+	}
+	if cap.body["TransactionType"] != "CustomerPayBillOnline" || cap.body["PartyB"] != "7289306" || cap.body["BusinessShortCode"] != "7289306" {
+		t.Errorf("paybill routing: %v / %v / %v", cap.body["TransactionType"], cap.body["PartyB"], cap.body["BusinessShortCode"])
+	}
+}
+
+func TestInitiateSTKPush_OwnDarajaUsesTheISPsCredentialsNotThePlatforms(t *testing.T) {
+	setupTestDB(t)
+	setAppEnv(t, "production")
+	productionPlatformSettings(t, "till", "3514722") // platform values that must NOT leak in
+	srv, cap := fakeDarajaSTK(t)
+	svc := newTestMpesaService()
+	svc.baseURLOverride = srv.URL
+	zoneID := seedOwnOrgZone(t, models.OrganizationMpesaConfig{
+		ConsumerKey: "isp-key", ConsumerSecret: "isp-secret", Passkey: "isp-passkey", Shortcode: "600111",
+		Env: "production", CallbackURL: "https://api.zyranet.co.ke/api/v1/payments/callback", BillingType: "paybill",
+	})
+
+	if _, err := svc.InitiateSTKPush(zoneID, "254712345678", 5, "Cust1", "WiFi"); err != nil {
+		t.Fatal(err)
+	}
+	b := cap.body
+	if b["BusinessShortCode"] != "600111" || b["PartyB"] != "600111" || b["TransactionType"] != "CustomerPayBillOnline" {
+		t.Errorf("an own-Daraja ISP's push went to %v/%v (%v) — must be its own shortcode", b["BusinessShortCode"], b["PartyB"], b["TransactionType"])
+	}
+	pw, _ := base64.StdEncoding.DecodeString(b["Password"].(string))
+	if string(pw) != "600111"+"isp-passkey"+b["Timestamp"].(string) {
+		t.Error("the request was signed with the wrong passkey")
 	}
 }
