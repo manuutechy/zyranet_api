@@ -69,6 +69,12 @@ type Organization struct {
 	// package/plan list — list | grid | stacked. This is an ISP-wide admin
 	// choice, not something the connecting customer can change themselves.
 	CaptivePortalPackageLayout string `gorm:"size:20;default:list" json:"captive_portal_package_layout"`
+	// Announcement shown at the top of the captive portal (maintenance, offers,
+	// price changes…). Empty = none. NoticeStyle: info | warning | success.
+	// NoticeUntil, if set, hides it automatically after that moment.
+	CaptivePortalNotice      string     `gorm:"size:500" json:"captive_portal_notice"`
+	CaptivePortalNoticeStyle string     `gorm:"size:10;default:info" json:"captive_portal_notice_style"`
+	CaptivePortalNoticeUntil *time.Time `json:"captive_portal_notice_until"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

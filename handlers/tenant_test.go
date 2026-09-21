@@ -525,3 +525,59 @@ func TestISPSavingDestinationSwitchesOnDirectSettlement(t *testing.T) {
 		t.Errorf("after saving a till: direct=%v till=%q", got.DirectSettlement, got.SettlementTillNumber)
 	}
 }
+
+func TestCaptivePortalNotice(t *testing.T) {
+	setupTenantTest(t)
+	org, _ := seedTenant(t, "acme", nil, "active")
+	zone := models.Zone{Name: "Z", Location: "L", RouterName: "r", RouterIP: "1.1.1.1", OrganizationID: org.ID}
+	config.DB.Create(&zone)
+	app := fiber.New()
+	app.Post("/cp", func(c *fiber.Ctx) error {
+		c.Locals("claims", &middleware.Claims{Role: "super_admin", OrganizationID: org.ID, Type: "admin"})
+		return c.Next()
+	}, CaptivePortalSettingsUpdate)
+	app.Get("/public", CaptivePortalPublicSettings)
+	save := func(body string) int {
+		req := httptest.NewRequest("POST", "/cp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ := app.Test(req, -1)
+		return resp.StatusCode
+	}
+	notice := func() interface{} {
+		resp, _ := app.Test(httptest.NewRequest("GET", fmt.Sprintf("/public?zone_id=%d", zone.ID), nil), -1)
+		var out map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&out)
+		return out["data"].(map[string]interface{})["notice"]
+	}
+	base := `"theme":"classic","package_layout":"list"`
+
+	if st := save(`{` + base + `,"notice":"  Maintenance tonight 10pm  ","notice_style":"warning"}`); st != 200 {
+		t.Fatalf("save: %d", st)
+	}
+	n, _ := notice().(map[string]interface{})
+	if n["text"] != "Maintenance tonight 10pm" || n["style"] != "warning" {
+		t.Errorf("notice = %v", notice())
+	}
+	// Ended yesterday → hidden automatically.
+	save(`{` + base + `,"notice":"Old offer","notice_until":"` + time.Now().In(kenyaTime).AddDate(0, 0, -1).Format("2006-01-02") + `"}`)
+	if notice() != nil {
+		t.Errorf("an expired notice must not be shown: %v", notice())
+	}
+	// Ends today → still shown until the end of the day.
+	save(`{` + base + `,"notice":"Today only","notice_until":"` + time.Now().In(kenyaTime).Format("2006-01-02") + `"}`)
+	if notice() == nil {
+		t.Error("a notice ending today should still show")
+	}
+	// Cleared → none. Unknown style → info. Too long → rejected.
+	save(`{` + base + `,"notice":""}`)
+	if notice() != nil {
+		t.Error("an empty notice must not be shown")
+	}
+	save(`{` + base + `,"notice":"Hi","notice_style":"<script>"}`)
+	if n, _ := notice().(map[string]interface{}); n["style"] != "info" {
+		t.Errorf("unknown style should fall back to info: %v", n)
+	}
+	if st := save(`{` + base + `,"notice":"` + strings.Repeat("x", 281) + `"}`); st != 422 {
+		t.Errorf("281 chars: %d, want 422", st)
+	}
+}

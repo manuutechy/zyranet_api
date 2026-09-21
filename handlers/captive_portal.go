@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -113,6 +115,7 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 		"billing_type":      billingType,
 		"till_number":       tillNumber,
 		"free_tier_package": freeTierData,
+		"notice":            currentNotice(&org),
 	}, "")
 }
 
@@ -136,6 +139,9 @@ func CaptivePortalSettingsShow(c *fiber.Ctx) error {
 		"tagline":         org.CaptivePortalTagline,
 		"support_phone":   org.CaptivePortalSupportPhone,
 		"package_layout":  org.CaptivePortalPackageLayout,
+		"notice":          org.CaptivePortalNotice,
+		"notice_style":    org.CaptivePortalNoticeStyle,
+		"notice_until":    org.CaptivePortalNoticeUntil,
 		"zones":           zones,
 		"themes":          availableCaptiveThemes,
 		"package_layouts": availablePackageLayouts,
@@ -158,6 +164,9 @@ func CaptivePortalSettingsUpdate(c *fiber.Ctx) error {
 		Tagline       string `json:"tagline"`
 		SupportPhone  string `json:"support_phone"`
 		PackageLayout string `json:"package_layout"`
+		Notice        string `json:"notice"`
+		NoticeStyle   string `json:"notice_style"`
+		NoticeUntil   string `json:"notice_until"` // RFC3339 or YYYY-MM-DD, "" = no end
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
@@ -172,7 +181,33 @@ func CaptivePortalSettingsUpdate(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, fmt.Sprintf("package_layout must be one of: %v", availablePackageLayouts), "", fiber.StatusUnprocessableEntity)
 	}
 
+	notice := strings.TrimSpace(body.Notice)
+	if len([]rune(notice)) > 280 {
+		return utils.ErrorResponse(c, "Keep the announcement to 280 characters or fewer.", "", fiber.StatusUnprocessableEntity)
+	}
+	style := body.NoticeStyle
+	if style != "warning" && style != "success" {
+		style = "info"
+	}
+	var until interface{}
+	if u := strings.TrimSpace(body.NoticeUntil); u != "" {
+		t, err := time.Parse(time.RFC3339, u)
+		if err != nil {
+			// A plain date means the end of that day in Kenya, where the
+			// ISPs and their customers are (the server itself runs on UTC).
+			d, derr := time.ParseInLocation("2006-01-02", u, kenyaTime)
+			if derr != nil {
+				return utils.ErrorResponse(c, "notice_until must be a date.", "", fiber.StatusUnprocessableEntity)
+			}
+			t = d.Add(24*time.Hour - time.Second) // through the end of that day
+		}
+		until = t
+	}
+
 	if err := config.DB.Model(&models.Organization{}).Where("id = ?", claims.OrganizationID).Updates(map[string]interface{}{
+		"captive_portal_notice":         notice,
+		"captive_portal_notice_style":   style,
+		"captive_portal_notice_until":   until,
 		"captive_portal_theme":          body.Theme,
 		"captive_portal_company_name":   body.CompanyName,
 		"captive_portal_logo":           body.Logo,
@@ -216,3 +251,21 @@ func ZoneCaptiveLoginHTML(c *fiber.Ctx) error {
 	c.Set("Content-Disposition", `attachment; filename="login.html"`)
 	return c.SendString(html)
 }
+
+// currentNotice is the announcement customers should see now, or nil when
+// there is none or it has passed its end time.
+func currentNotice(org *models.Organization) fiber.Map {
+	text := strings.TrimSpace(org.CaptivePortalNotice)
+	if text == "" || (org.CaptivePortalNoticeUntil != nil && time.Now().After(*org.CaptivePortalNoticeUntil)) {
+		return nil
+	}
+	style := org.CaptivePortalNoticeStyle
+	if style == "" {
+		style = "info"
+	}
+	return fiber.Map{"text": text, "style": style}
+}
+
+// kenyaTime is East Africa Time. Fixed (no DST), so a fixed zone avoids
+// depending on the server having tzdata installed.
+var kenyaTime = time.FixedZone("EAT", 3*60*60)
