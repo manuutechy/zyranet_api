@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -247,7 +248,50 @@ func (s *MikroTikService) ExecCommand(zone *models.Zone, command string) (string
 		return strings.Join(lines, "\n"), nil
 	}
 
-	return fmt.Sprintf("Dispatched REST command '%s' to router %s.", command, zone.RouterIP), nil
+	return s.execCommandREST(zone, command)
+}
+
+// execCommandREST runs a diagnostic command against a REST-connected router.
+// RouterOS 7's REST API mirrors the CLI path (e.g. "/ip/hotspot/active/print"
+// maps to GET /rest/ip/hotspot/active) only for read-only "print" queries —
+// there is no generic REST endpoint for arbitrary CLI syntax (filters like
+// "where …", or write commands such as add/set/remove need their own request
+// shape per menu). Rather than silently doing nothing and reporting success
+// (the previous behaviour), a print command is actually run and its real
+// output returned; anything else is refused so the console is never
+// dishonest about whether it did something.
+func (s *MikroTikService) execCommandREST(zone *models.Zone, command string) (string, error) {
+	segments := strings.Split(strings.Trim(strings.TrimSpace(command), "/"), "/")
+	if len(segments) == 0 || segments[len(segments)-1] != "print" {
+		return "", fmt.Errorf(`this console only supports read-only "print" commands over the REST API (e.g. /ip/hotspot/active/print) — add/set/remove commands aren't supported for REST-connected routers yet`)
+	}
+	path := "/" + strings.Join(segments[:len(segments)-1], "/")
+	if path == "/" {
+		return "", fmt.Errorf("invalid command")
+	}
+
+	rows, err := s.restGet(zone, path)
+	if err != nil {
+		return "", fmt.Errorf("router unreachable at %s: %w", zone.RouterIP, err)
+	}
+	if len(rows) == 0 {
+		return "Command executed cleanly (no results).", nil
+	}
+	var lines []string
+	for i, row := range rows {
+		if len(rows) > 1 {
+			lines = append(lines, fmt.Sprintf("-- [%d] --", i))
+		}
+		keys := make([]string, 0, len(row))
+		for k := range row {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			lines = append(lines, fmt.Sprintf("%s: %v", k, row[k]))
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func (s *MikroTikService) mockOnlineStatus(zone *models.Zone) *RouterStatus {
@@ -1000,10 +1044,10 @@ func (s *MikroTikService) ensurePppProfileREST(zone *models.Zone, pkg *models.Pa
 	rows, _ := s.restGet(zone, "/ppp/profile?name="+profileName)
 	if len(rows) == 0 {
 		s.restPost(zone, "/ppp/profile", map[string]interface{}{ //nolint:errcheck
-			"name":        profileName,
-			"rate-limit":  rateLimit,
+			"name":          profileName,
+			"rate-limit":    rateLimit,
 			"local-address": "10.0.0.1",
-			"dns-server":  "8.8.8.8,8.8.4.4",
+			"dns-server":    "8.8.8.8,8.8.4.4",
 		})
 	}
 }
@@ -1129,4 +1173,3 @@ func parseInt64(s string) int64 {
 	fmt.Sscanf(s, "%d", &v)
 	return v
 }
-
