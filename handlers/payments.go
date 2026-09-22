@@ -200,7 +200,7 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			msg := utils.RenderTemplate(templateActive, map[string]string{
 				"name":    customer.Name,
 				"package": pkg.Name,
-				"expiry":  expiresAt.Format("2006-01-02 15:04"),
+				"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
 			})
 			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
 				go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
@@ -497,7 +497,7 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 		logoImgTag,
 		companyName,
 		payment.ID,
-		payment.CreatedAt.Format("2006-01-02 15:04"),
+		utils.Kenya(payment.CreatedAt).Format("2006-01-02 15:04"),
 		customerName,
 		customerPhone,
 		accountNumber,

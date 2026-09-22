@@ -948,7 +948,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		msg := utils.RenderTemplate(templateActive, map[string]string{
 			"name":    customer.Name,
 			"package": pkg.Name,
-			"expiry":  expiresAt.Format("2006-01-02 15:04"),
+			"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
 		})
 		if s.SMS.GetSetting("sms_enable_active", "yes") != "no" {
 			go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck

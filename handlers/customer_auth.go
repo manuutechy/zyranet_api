@@ -693,7 +693,7 @@ func CustomerReconnect(c *fiber.Ctx) error {
 			var expCust models.Customer
 			if err := config.DB.Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?)", cleanMac, cleanMac).
 				Order("updated_at DESC").First(&expCust).Error; err == nil && expCust.ExpiresAt != nil && expCust.ExpiresAt.Before(now) {
-				return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", expCust.ExpiresAt.Local().Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
+				return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", utils.Kenya(*expCust.ExpiresAt).Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
 			}
 		}
 		return utils.ErrorResponse(c, "No active subscription found for this device. Please purchase a package to connect.", "No Active Subscription", fiber.StatusNotFound)
@@ -703,7 +703,7 @@ func CustomerReconnect(c *fiber.Ctx) error {
 	if customer.ExpiresAt != nil && customer.ExpiresAt.Before(now) {
 		customer.Status = "expired"
 		config.DB.Model(&customer).Update("status", "expired")
-		return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", customer.ExpiresAt.Local().Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
+		return utils.ErrorResponse(c, fmt.Sprintf("Your package expired at %s. Please purchase a new package to continue.", utils.Kenya(*customer.ExpiresAt).Format("15:04")), "Package Expired", fiber.StatusPaymentRequired)
 	}
 
 	// Update device last seen and customer MAC
@@ -1097,7 +1097,7 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 	msg := utils.RenderTemplate(templateActive, map[string]string{
 		"name":    customer.Name,
 		"package": pkg.Name,
-		"expiry":  expiresAt.Format("2006-01-02 15:04"),
+		"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
 	})
 	if GetSetting("sms_enable_active") != "no" {
 		go smsSvcGlobal.SendForZone(pkg.ZoneID, customer.Phone, msg) //nolint:errcheck

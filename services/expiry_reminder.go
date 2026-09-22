@@ -3,10 +3,12 @@ package services
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/utils"
 )
 
 // ExpiryReminderService runs background checks for expiring subscriber accounts
@@ -62,7 +64,7 @@ func (e *ExpiryReminderService) ProcessExpiringSubscribers() {
 
 	// 1. Find PPPoE/Hotspot subscribers expiring in the next 48 hours
 	var customers []models.Customer
-	err := config.DB.Preload("Package").Preload("Zone").
+	err := config.DB.Preload("Package").Preload("Zone.Organization").
 		Where("status = ? AND expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ?", "active", now, in48h).
 		Find(&customers).Error
 	if err != nil {
@@ -72,6 +74,12 @@ func (e *ExpiryReminderService) ProcessExpiringSubscribers() {
 
 	for _, customer := range customers {
 		if customer.Phone == "" || customer.ExpiresAt == nil {
+			continue
+		}
+		// Only plans long enough for a reminder to help: a 15-minute or 1-day
+		// hotspot plan would otherwise get "expires in 24 hours" the moment
+		// it's bought (and every SMS costs money). Guest accounts too.
+		if !worthReminding(customer.Package) || strings.HasPrefix(customer.Phone, "GUEST") {
 			continue
 		}
 
@@ -101,14 +109,16 @@ func (e *ExpiryReminderService) ProcessExpiringSubscribers() {
 			price = customer.Package.Price
 		}
 
-		formattedDate := customer.ExpiresAt.Format("02 Jan 15:04")
+		// Times are stored in UTC; customers read them in Kenya time.
+		formattedDate := utils.Kenya(*customer.ExpiresAt).Format("02 Jan 15:04")
+		brand := ispName(customer.Zone)
 		var message string
 		if is24hWindow {
-			message = fmt.Sprintf("Hello %s, your Zyra Net %s plan (KES %.0f) expires in 24 hours on %s. Pay via Till/Paybill to avoid interruption.",
-				customer.Name, pkgName, price, formattedDate)
+			message = fmt.Sprintf("Hello %s, your %s %s plan (KES %.0f) expires in 24 hours, on %s. Renew on the WiFi portal to stay connected.",
+				customer.Name, brand, pkgName, price, formattedDate)
 		} else {
-			message = fmt.Sprintf("Hello %s, your Zyra Net %s plan expires on %s. Renew early to enjoy continuous high-speed internet.",
-				customer.Name, pkgName, formattedDate)
+			message = fmt.Sprintf("Hello %s, your %s %s plan expires on %s. Renew early on the WiFi portal to stay connected.",
+				customer.Name, brand, pkgName, formattedDate)
 		}
 
 		// Dispatch SMS via Zone SMS Gateway
@@ -124,4 +134,33 @@ func (e *ExpiryReminderService) ProcessExpiringSubscribers() {
 			NewValues: &logMsg,
 		})
 	}
+}
+
+// worthReminding reports whether a plan is long enough (3 days or more) for an
+// expiry reminder to be useful.
+func worthReminding(pkg *models.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+		return *pkg.TimeLimitMinutes >= 3*24*60
+	}
+	switch pkg.BillingCycle {
+	case "weekly", "monthly":
+		return true
+	}
+	return false
+}
+
+// ispName is the name customers know the ISP by.
+func ispName(zone *models.Zone) string {
+	if zone != nil && zone.Organization != nil {
+		if n := strings.TrimSpace(zone.Organization.CaptivePortalCompanyName); n != "" {
+			return n
+		}
+		if n := strings.TrimSpace(zone.Organization.Name); n != "" {
+			return n
+		}
+	}
+	return "internet"
 }
