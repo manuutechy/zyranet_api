@@ -37,7 +37,22 @@ func (Customer) TableName() string { return "customers" }
 func (c *Customer) BeforeCreate(tx *gorm.DB) (err error) {
 	if c.AccountNumber == "" {
 		if c.Phone != "" {
+			// ZYR#<phone>, unless another ISP already has that phone as a
+			// customer (account numbers are unique system-wide): then suffix
+			// the zone so this ISP can still register them.
 			c.AccountNumber = fmt.Sprintf("ZYR#%s", c.Phone)
+			taken := func(n string) bool {
+				var cnt int64
+				tx.Session(&gorm.Session{NewDB: true}).Unscoped().Model(&Customer{}).Where("account_number = ?", n).Count(&cnt)
+				return cnt > 0
+			}
+			if taken(c.AccountNumber) {
+				base := c.AccountNumber
+				c.AccountNumber = fmt.Sprintf("%s-%d", base, c.ZoneID)
+				for i := 2; taken(c.AccountNumber); i++ {
+					c.AccountNumber = fmt.Sprintf("%s-%d-%d", base, c.ZoneID, i)
+				}
+			}
 		} else {
 			var count int64
 			tx.Unscoped().Model(&Customer{}).Where("account_number LIKE ? AND account_number NOT LIKE ?", "ZYR#%", "ZYR#0%").Count(&count)

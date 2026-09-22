@@ -64,20 +64,20 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		cid := cc.CustomerID
 		body.CustomerID = &cid
 	} else if body.CustomerID != nil {
-		var owner models.Customer
-		if err := config.DB.First(&owner, *body.CustomerID).Error; err != nil {
+		// A customer id from the request must belong to the ISP selling this package.
+		if !services.CustomerBelongsToZoneISP(*body.CustomerID, pkg.ZoneID) {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
 	} else if body.CustomerID == nil {
-		var existingCustomer models.Customer
-		if err := config.DB.Where("phone = ?", body.Phone).First(&existingCustomer).Error; err == nil {
-			body.CustomerID = &existingCustomer.ID
-		} else if body.Mac != "" {
-			var dev models.CustomerDevice
-			if err := config.DB.Where("mac_address = ?", body.Mac).First(&dev).Error; err == nil {
-				body.CustomerID = &dev.CustomerID
-			}
+		if cust, ok := services.CustomerByPhoneForZone(pkg.ZoneID, body.Phone); ok {
+			body.CustomerID = &cust.ID
+		} else if cust, ok := services.CustomerByDeviceForZone(pkg.ZoneID, body.Mac); ok {
+			body.CustomerID = &cust.ID
 		}
+	}
+	// A signed-in customer buying on another ISP's WiFi is a new customer there.
+	if body.CustomerID != nil && !services.CustomerBelongsToZoneISP(*body.CustomerID, pkg.ZoneID) {
+		body.CustomerID = nil
 	}
 
 	if body.CustomerID != nil {
@@ -281,7 +281,7 @@ func MpesaC2BConfirmation(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Received"})
 	}
 
-	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s", 
+	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s",
 		body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN, body.FirstName, body.MiddleName, body.LastName)
 
 	transIDStr := strings.TrimSpace(body.TransID)

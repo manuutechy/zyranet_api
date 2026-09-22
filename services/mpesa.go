@@ -822,24 +822,22 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	// 1. Resolve or create customer account
 	if payment.CustomerID != nil {
 		var c models.Customer
-		if err := config.DB.First(&c, *payment.CustomerID).Error; err == nil {
+		if err := config.DB.First(&c, *payment.CustomerID).Error; err == nil && CustomerBelongsToZoneISP(c.ID, payment.ZoneID) {
 			customer = &c
 		}
 	}
 
 	if customer == nil && phone != "" {
-		var c models.Customer
-		if err := config.DB.Where("phone = ?", phone).First(&c).Error; err == nil {
-			customer = &c
+		if c, ok := CustomerByPhoneForZone(payment.ZoneID, phone); ok {
+			customer = c
 			payment.CustomerID = &c.ID
 			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", c.ID)
 		}
 	}
 
 	if customer == nil && payment.MacAddress != "" {
-		var dev models.CustomerDevice
-		if err := config.DB.Preload("Customer").Where("mac_address = ?", payment.MacAddress).First(&dev).Error; err == nil && dev.Customer != nil {
-			customer = dev.Customer
+		if c, ok := CustomerByDeviceForZone(payment.ZoneID, payment.MacAddress); ok {
+			customer = c
 			payment.CustomerID = &customer.ID
 			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", customer.ID)
 		}
@@ -869,6 +867,8 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			customer = &newCust
 			payment.CustomerID = &newCust.ID
 			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", newCust.ID)
+		} else {
+			log.Printf("[M-Pesa] payment %d: could not register customer %s: %v", payment.ID, cleanPhone, err)
 		}
 	}
 

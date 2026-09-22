@@ -112,13 +112,12 @@ func autoCreateC2BCustomer(orgID uint, cleanPhone, payerName string, amount floa
 	}
 
 	c := models.Customer{
-		Name:          payerName,
-		Phone:         cleanPhone,
-		AccountNumber: "ZYR#" + cleanPhone,
-		ZoneID:        zone.ID,
-		PackageID:     pkg.ID,
-		Type:          "hotspot",
-		Status:        "active",
+		Name:      payerName,
+		Phone:     cleanPhone,
+		ZoneID:    zone.ID,
+		PackageID: pkg.ID,
+		Type:      "hotspot",
+		Status:    "active",
 	}
 	if err := config.DB.Create(&c).Error; err != nil {
 		return nil, false

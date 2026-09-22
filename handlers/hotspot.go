@@ -10,6 +10,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -110,14 +111,10 @@ func HotspotPay(c *fiber.Ctx) error {
 	}
 
 	var customerID *uint
-	var existingCustomer models.Customer
-	if err := config.DB.Where("phone = ?", phone).First(&existingCustomer).Error; err == nil {
-		customerID = &existingCustomer.ID
-	} else if body.Mac != "" {
-		var dev models.CustomerDevice
-		if err := config.DB.Where("mac_address = ?", body.Mac).First(&dev).Error; err == nil {
-			customerID = &dev.CustomerID
-		}
+	if cust, ok := services.CustomerByPhoneForZone(zone.ID, phone); ok {
+		customerID = &cust.ID
+	} else if cust, ok := services.CustomerByDeviceForZone(zone.ID, body.Mac); ok {
+		customerID = &cust.ID
 	}
 
 	// Create pending payment record
