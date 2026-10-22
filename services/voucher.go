@@ -24,13 +24,23 @@ func NewVoucherService(sms *SmsService) *VoucherService {
 	return &VoucherService{SMS: sms}
 }
 
+// VoucherStatusVoid marks a voucher that was taken back unsold (an agent
+// returned it). It can never be redeemed.
+const VoucherStatusVoid = "void"
+
 // Generate creates a new unique voucher with an 8-char uppercase code.
 func (s *VoucherService) Generate(zoneID, packageID uint, vType string, usageLimit int) (*models.Voucher, error) {
+	return s.GenerateTx(config.DB, zoneID, packageID, vType, usageLimit)
+}
+
+// GenerateTx is Generate inside the caller's transaction (tx), so a batch of
+// vouchers and the ledger entries that pay for them commit or fail together.
+func (s *VoucherService) GenerateTx(tx *gorm.DB, zoneID, packageID uint, vType string, usageLimit int) (*models.Voucher, error) {
 	if vType == "single_use" {
 		usageLimit = 1
 	}
 
-	code, err := s.uniqueCode()
+	code, err := s.uniqueCode(tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate voucher code: %w", err)
 	}
@@ -45,7 +55,7 @@ func (s *VoucherService) Generate(zoneID, packageID uint, vType string, usageLim
 		Status:     "unused",
 	}
 
-	if err := config.DB.Create(voucher).Error; err != nil {
+	if err := tx.Create(voucher).Error; err != nil {
 		return nil, fmt.Errorf("failed to save voucher: %w", err)
 	}
 	return voucher, nil
@@ -75,7 +85,7 @@ func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, err
 			return fmt.Errorf("voucher code not found")
 		}
 
-		if voucher.Status == "expired" || voucher.Status == "depleted" {
+		if voucher.Status == "expired" || voucher.Status == "depleted" || voucher.Status == VoucherStatusVoid {
 			return fmt.Errorf("voucher code is already expired or depleted")
 		}
 
@@ -144,6 +154,10 @@ func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, err
 		if res.RowsAffected == 0 {
 			return fmt.Errorf("voucher was already redeemed")
 		}
+		// A voucher an agent was holding is now sold (no-op for any other).
+		if err := MarkAgentVoucherSold(tx, voucher.ID); err != nil {
+			return err
+		}
 
 		voucher.UsageCount = newCount
 		voucher.Status = newStatus
@@ -177,7 +191,7 @@ func (s *VoucherService) Redeem(code, phone string) (map[string]interface{}, err
 }
 
 // uniqueCode generates a unique 8-character uppercase alphanumeric code.
-func (s *VoucherService) uniqueCode() (string, error) {
+func (s *VoucherService) uniqueCode(tx *gorm.DB) (string, error) {
 	for i := 0; i < 20; i++ {
 		b := make([]byte, 4)
 		if _, err := rand.Read(b); err != nil {
@@ -185,7 +199,7 @@ func (s *VoucherService) uniqueCode() (string, error) {
 		}
 		code := strings.ToUpper(hex.EncodeToString(b))[:8]
 		var count int64
-		config.DB.Model(&models.Voucher{}).Where("code = ?", code).Count(&count)
+		tx.Model(&models.Voucher{}).Where("code = ?", code).Count(&count)
 		if count == 0 {
 			return code, nil
 		}
