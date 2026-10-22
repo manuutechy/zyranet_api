@@ -237,6 +237,22 @@ var localRanges = []string{
 	"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
 }
 
+// CloudflareProxyRanges returns Cloudflare's ranges plus anything extra in
+// TRUSTED_PROXIES: the hops whose CF-Connecting-IP header is believed.
+func CloudflareProxyRanges() []string {
+	out := append([]string{}, cloudflareRanges...)
+	for _, p := range strings.Split(getEnv("TRUSTED_PROXIES", ""), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// LocalProxyRanges returns loopback/private ranges: a reverse proxy on the
+// same host or network (nginx, cloudflared) connects from one of these.
+func LocalProxyRanges() []string { return append([]string{}, localRanges...) }
+
 // trustedProxies is Cloudflare + local proxies + anything in TRUSTED_PROXIES
 // (comma-separated IPs/CIDRs).
 func trustedProxies() []string {

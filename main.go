@@ -185,6 +185,10 @@ func main() {
 		},
 	})
 
+	// Pin the real visitor IP first (Cloudflare → nginx → API), so the rate
+	// limiters and logs don't see everyone as 127.0.0.1 or a spoofed header.
+	app.Use(middleware.RealIP())
+
 	// Global middleware — Sentry wraps recover so panics (turned into errors
 	// by recover.New) are reported too.
 	app.Use(middleware.SentryMiddleware())
