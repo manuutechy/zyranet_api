@@ -268,6 +268,12 @@ func main() {
 	moneyJobs.Start()
 	defer moneyJobs.Stop()
 
+	// ---- LIVE OPS: owner SMS + in-admin alerts when a router goes down or
+	// comes back (off until an ISP saves alert phones). ----
+	opsAlerts := services.NewOpsAlertService(config.DB, services.NewSmsAlertSender(smsSvc))
+	opsAlerts.Start()
+	defer opsAlerts.Stop()
+
 	// Start Automated Subscriber Expiry SMS Reminders
 	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())
 	expiryReminder.Start()

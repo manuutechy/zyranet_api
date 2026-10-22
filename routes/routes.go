@@ -299,6 +299,9 @@ func Register(app *fiber.App) {
 	admin.Put("/tickets/:id", adminAuth, handlers.TicketUpdate)
 	admin.Delete("/tickets/:id", adminAuth, handlers.TicketDestroy)
 
+	// ---- LIVE OPS (live money view + owner router alerts) ----
+	registerOpsRoutes(admin, adminAuth)
+
 	// ---- PLATFORM (SUPER ADMIN) JWT ROUTES ----
 	// Deliberately separate from the admin/customer groups above — see
 	// middleware.PlatformAuth. A platform credential can only ever reach
