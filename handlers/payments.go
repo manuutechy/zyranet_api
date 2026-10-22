@@ -552,8 +552,12 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 			if body.Mac != "" && payment.Customer != nil {
 				payment.Customer.MacAddress = &body.Mac
 				config.DB.Model(payment.Customer).Update("mac_address", body.Mac)
-				if mikrotikSvcGlobal != nil && payment.Zone != nil && payment.Package != nil {
-					go mikrotikSvcGlobal.WhitelistMAC(payment.Zone, body.Mac, payment.Package)
+				if mpesaSvcGlobal != nil && payment.Zone != nil && payment.Package != nil {
+					pkgID := payment.Package.ID
+					mpesaSvcGlobal.EnqueueRouterAction(models.PendingRouterAction{
+						ZoneID: payment.Zone.ID, PaymentID: &payment.ID, Action: services.RouterActionWhitelistMAC,
+						MacAddress: body.Mac, PackageID: &pkgID,
+					})
 				}
 			}
 			return utils.SuccessResponse(c, payment, "Payment verified successfully.")
