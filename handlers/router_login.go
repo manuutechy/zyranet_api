@@ -29,13 +29,11 @@ func routerLoginError(c *fiber.Ctx, status int, code, msg string) error {
 	return c.Status(status).JSON(fiber.Map{"success": false, "error": msg, "message": msg, "code": code})
 }
 
-// deviceTokenFrom reads the portal's device token from the body value, the
-// device_token query param or the X-Device-Token header.
+// deviceTokenFrom reads the portal's device token from the body value or the
+// X-Device-Token header. Never from the URL: query strings end up in access
+// logs.
 func deviceTokenFrom(c *fiber.Ctx, fromBody string) string {
 	if t := strings.TrimSpace(fromBody); t != "" {
-		return t
-	}
-	if t := strings.TrimSpace(c.Query("device_token")); t != "" {
 		return t
 	}
 	return strings.TrimSpace(c.Get("X-Device-Token"))

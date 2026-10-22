@@ -236,7 +236,9 @@ func TestCustomerAuthByDevice_NeedsDeviceTokenAndIssuesAWeakSession(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err = app.Test(httptest.NewRequest("GET", "/customer/auth/device?mac="+mac+"&device_token="+rl.DeviceToken, nil), -1)
+	req := httptest.NewRequest("GET", "/customer/auth/device?mac="+mac, nil)
+	req.Header.Set("X-Device-Token", rl.DeviceToken)
+	resp, err = app.Test(req, -1)
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("device auth with token failed: %v %v", err, resp)
 	}

@@ -212,7 +212,7 @@ func main() {
 			}
 			c.Set("Access-Control-Allow-Credentials", "true")
 			c.Set("Access-Control-Allow-Methods", config.CORSAllowMethods)
-			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept")
+			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept,X-Device-Token")
 
 			if c.Method() == "OPTIONS" {
 				return c.SendStatus(fiber.StatusNoContent)
@@ -227,7 +227,7 @@ func main() {
 			// dynamically: exactly those subdomains that belong to an ISP.
 			AllowOriginsFunc: middleware.IsTenantOrigin,
 			AllowMethods:     config.CORSAllowMethods,
-			AllowHeaders:     "Origin,Content-Type,Authorization,Accept",
+			AllowHeaders:     "Origin,Content-Type,Authorization,Accept,X-Device-Token",
 			AllowCredentials: true,
 		}))
 	}

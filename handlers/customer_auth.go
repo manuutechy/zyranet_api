@@ -379,7 +379,7 @@ func migrateAnonymousPlan(customer *models.Customer, fromID uint) {
 // WiFi and trivial to spoof).
 func CustomerAuthByDevice(c *fiber.Ctx) error {
 	mac := c.Query("mac")
-	deviceToken := c.Query("device_token")
+	deviceToken := strings.TrimSpace(c.Get("X-Device-Token"))
 	zoneID := c.Query("zone_id", c.Query("zone"))
 	if mac == "" || deviceToken == "" {
 		var body struct {
