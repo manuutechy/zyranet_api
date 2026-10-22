@@ -66,6 +66,12 @@ func main() {
 		&models.HotspotAccessToken{},
 		&models.ZoneOutage{},
 		&models.FreeTrialClaim{},
+		// Agent (reseller) cash ledger — new tables only.
+		&models.Agent{},
+		&models.AgentVoucherBatch{},
+		&models.AgentVoucher{},
+		&models.AgentLedgerEntry{},
+		&models.AgentIdempotencyKey{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
@@ -227,7 +233,7 @@ func main() {
 			// dynamically: exactly those subdomains that belong to an ISP.
 			AllowOriginsFunc: middleware.IsTenantOrigin,
 			AllowMethods:     config.CORSAllowMethods,
-			AllowHeaders:     "Origin,Content-Type,Authorization,Accept,X-Device-Token",
+			AllowHeaders:     "Origin,Content-Type,Authorization,Accept,X-Device-Token,Idempotency-Key",
 			AllowCredentials: true,
 		}))
 	}

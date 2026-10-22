@@ -235,6 +235,23 @@ func Register(app *fiber.App) {
 	admin.Get("/vouchers/:id", adminAuth, handlers.VoucherShow)
 	admin.Delete("/vouchers/:id", adminAuth, handlers.VoucherDestroy)
 
+	// Agents (resellers) and their cash ledger. Role checks are in the
+	// handlers (owner-only money actions, field agents see only themselves).
+	admin.Get("/agents", adminAuth, handlers.AgentIndex)
+	admin.Post("/agents", adminAuth, handlers.AgentStore)
+	admin.Get("/agents/me", adminAuth, handlers.AgentMe)
+	admin.Get("/agents/:id", adminAuth, handlers.AgentShow)
+	admin.Put("/agents/:id", adminAuth, handlers.AgentUpdate)
+	admin.Get("/agents/:id/vouchers", adminAuth, handlers.AgentVouchers)
+	admin.Get("/agents/:id/batches", adminAuth, handlers.AgentBatches)
+	admin.Post("/agents/:id/issue", adminAuth, handlers.AgentIssue)
+	admin.Post("/agents/:id/return", adminAuth, handlers.AgentReturn)
+	admin.Post("/agents/:id/handovers", adminAuth, handlers.AgentHandoverStore)
+	admin.Get("/agents/:id/handovers/:entryId/receipt", adminAuth, handlers.AgentHandoverReceipt)
+	admin.Post("/agents/:id/adjustments", adminAuth, handlers.AgentAdjustmentStore)
+	admin.Post("/agents/:id/entries/:entryId/reverse", adminAuth, handlers.AgentEntryReverse)
+	admin.Get("/agents/:id/statement", adminAuth, handlers.AgentStatementShow)
+
 	// Customers
 	admin.Get("/customers", adminAuth, handlers.CustomerIndex)
 	admin.Post("/customers", adminAuth, handlers.CustomerStore)

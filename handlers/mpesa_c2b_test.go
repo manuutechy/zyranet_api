@@ -27,6 +27,7 @@ func setupC2BTestDB(t *testing.T) {
 		&models.Customer{}, &models.CustomerDevice{}, &models.Payment{}, &models.CreditLog{},
 		&models.UnmatchedC2BPayment{}, &models.Setting{}, &models.User{}, &models.Payout{}, &models.PlatformSetting{}, &models.RadiusAccount{}, &models.SmsLog{}, &models.AuditLog{},
 		&models.C2BTransaction{}, &models.PendingRouterAction{}, &models.Voucher{}, &models.PlatformUser{},
+		&models.Agent{}, &models.AgentVoucherBatch{}, &models.AgentVoucher{}, &models.AgentLedgerEntry{}, &models.AgentIdempotencyKey{},
 	); err != nil {
 		t.Fatal(err)
 	}

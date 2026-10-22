@@ -145,6 +145,13 @@ func VoucherDestroy(c *fiber.Ctx) error {
 	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&voucher, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Voucher not found.", "", fiber.StatusNotFound)
 	}
+	// An agent owes for vouchers they hold: take it back as a return (which
+	// reverses the ledger), never delete it from under the ledger.
+	var held int64
+	config.DB.Model(&models.AgentVoucher{}).Where("voucher_id = ?", voucher.ID).Count(&held)
+	if held > 0 {
+		return utils.ErrorResponse(c, "This voucher was issued to an agent. Return it from the agent's page instead.", "", fiber.StatusConflict)
+	}
 	if err := config.DB.Delete(&models.Voucher{}, voucher.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
@@ -271,7 +278,7 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	if err := config.DB.Preload("Package").Where("code = ?", cleanCode).First(&voucher).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid voucher ticket code.", "Voucher not found.", fiber.StatusBadRequest)
 	}
-	if voucher.Status == "expired" || voucher.Status == "depleted" {
+	if voucher.Status == "expired" || voucher.Status == "depleted" || voucher.Status == services.VoucherStatusVoid {
 		return utils.ErrorResponse(c, "This voucher ticket has already been used or expired.", "", fiber.StatusBadRequest)
 	}
 	if voucher.ExpiresAt != nil && time.Now().UTC().After(*voucher.ExpiresAt) {
