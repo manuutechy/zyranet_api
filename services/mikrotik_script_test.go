@@ -111,7 +111,7 @@ func TestGetStatus_HeartbeatTelemetryFallback(t *testing.T) {
 }
 
 func TestGenerateSyncScript(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupRouterAccessDB(t)
 
 	now := time.Now()
 	expiry := now.Add(24 * time.Hour)
@@ -145,14 +145,17 @@ func TestGenerateSyncScript(t *testing.T) {
 	}
 	db.Create(&cust)
 
+	// The watchdog's reconciler gives the paid device its own login.
+	ReconcileCredentials(time.Time{})
+
 	svc := NewMikroTikScriptService()
 	script, err := svc.GenerateSyncScript(zone.ID)
 	if err != nil {
 		t.Fatalf("GenerateSyncScript failed: %v", err)
 	}
 
-	if !strings.Contains(script, "00:11:22:33:44:55") {
-		t.Errorf("expected script to contain customer MAC 00:11:22:33:44:55, got:\n%s", script)
+	if !strings.Contains(script, "mac-address=00:11:22:33:44:55") {
+		t.Errorf("expected a login bound to the customer MAC 00:11:22:33:44:55, got:\n%s", script)
 	}
 	if !strings.Contains(script, "remove [find type=bypassed]") {
 		t.Errorf("expected script to contain remove bypassed bindings, got:\n%s", script)
@@ -164,7 +167,7 @@ func TestGenerateSyncScript(t *testing.T) {
 
 func scriptFor(t *testing.T, z models.Zone) (full, sync string) {
 	t.Helper()
-	setupTestDB(t)
+	setupRouterAccessDB(t)
 	z.Name, z.Location, z.RouterName, z.RouterIP = "Maseno", "L", "r", "10.200.0.2"
 	if err := config.DB.Create(&z).Error; err != nil {
 		t.Fatal(err)
@@ -209,7 +212,6 @@ func TestGenerateScript_ServiceModes(t *testing.T) {
 func TestGenerateScript_PortsAndWifi(t *testing.T) {
 	full, sync := scriptFor(t, models.Zone{WanPort: "sfp-sfpplus1", LanPorts: "ether1,ether2,wifi1,wlan1", ServiceMode: "hotspot"})
 	for _, want := range []string{
-		"in-interface=sfp-sfpplus1 action=accept", "in-interface=!sfp-sfpplus1 action=drop",
 		"/interface bridge port add bridge=$br interface=ether1",
 		`/interface wifi set [find default-name=wifi1] configuration.ssid="Zyra Net WiFi"`,
 		`/interface wireless set [find default-name=wlan1] ssid="Zyra Net WiFi"`,
@@ -218,8 +220,11 @@ func TestGenerateScript_PortsAndWifi(t *testing.T) {
 			t.Errorf("script missing %q", want)
 		}
 	}
-	if !strings.Contains(sync, "in-interface=sfp-sfpplus1") {
-		t.Error("the sync script must use the zone's internet port too")
+	// Management is locked to the tunnel by source address, whatever the ports.
+	for _, sc := range []string{full, sync} {
+		if !strings.Contains(sc, "src-address-list=zyranet-mgmt action=accept") || !strings.Contains(sc, "src-address-list=!zyranet-mgmt action=drop") {
+			t.Error("management must only be reachable from the Zyra Net tunnel")
+		}
 	}
 	if strings.Contains(full, "in-interface=ether1 ") {
 		t.Error("ether1 is a customer port here and must not be treated as the uplink")

@@ -46,6 +46,18 @@ type Zone struct {
 	// /public/zones/* endpoint without a valid ProvisionToken — i.e. it still
 	// runs a pre-token script and needs re-provisioning. Nil = never seen.
 	LegacyRequestAt *time.Time `json:"legacy_request_at"`
+	// PublicIP is the address the router's last authenticated heartbeat came
+	// from. For WireGuard-managed routers RouterIP stays the tunnel address
+	// (that is what the API dials); PublicIP shows where the site really is.
+	PublicIP string `gorm:"size:45" json:"public_ip"`
+	// LastSyncAt is when the router last fetched its sync script. Logins
+	// created after it reach the router on the next sync.
+	LastSyncAt *time.Time `json:"last_sync_at"`
+	// VerifyTLS makes the router's /tool fetch check the API's HTTPS
+	// certificate (check-certificate=yes). Off by default: it needs a router
+	// with a CA store that trusts our chain, so switch it on per zone once
+	// tested on that router — a router that can't verify stops syncing.
+	VerifyTLS bool `gorm:"default:false" json:"verify_tls"`
 	// AuthMode is how this zone's router authenticates customers: "api" (the
 	// API pushes users/MACs to the router — the original model) or "radius"
 	// (the router asks the RADIUS server; the API keeps the RADIUS tables in

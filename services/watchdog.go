@@ -12,6 +12,9 @@ import (
 type WatchdogService struct {
 	mikrotikSvc *MikroTikService
 	stopChan    chan struct{}
+	// lastReconcile is when device logins were last brought in line with
+	// customers; each run only looks at rows changed since (minus a margin).
+	lastReconcile time.Time
 }
 
 // NewWatchdogService initializes the background watchdog service.
@@ -24,14 +27,23 @@ func NewWatchdogService(mikrotikSvc *MikroTikService) *WatchdogService {
 
 // Start launches the background watchdog loop.
 func (w *WatchdogService) Start() {
+	// Per-device router logins, outage log and trial claims live in their own
+	// tables; create them before anything uses them (additive only).
+	if err := MigrateRouterAccess(config.DB); err != nil {
+		log.Printf("[watchdog] router-access tables migration failed: %v", err)
+	}
 	ticker := time.NewTicker(60 * time.Second)
 	log.Println("[watchdog] Automated Overload & Session Watchdog started (60s interval).")
 
 	go func() {
+		// First run covers everything still paid up (also gives customers
+		// active before per-device logins existed a login for their device).
+		w.runCredentialReconcile()
 		for {
 			select {
 			case <-ticker.C:
 				w.runOverloadProtectionSweep()
+				w.runCredentialReconcile()
 				w.runRouterHealthSweep()
 			case <-w.stopChan:
 				ticker.Stop()
@@ -105,6 +117,21 @@ func (w *WatchdogService) runOverloadProtectionSweep() {
 				}(zoneCopy, target)
 			}
 		}
+	}
+}
+
+// runCredentialReconcile keeps device logins in step with customers that
+// changed since the last run (payments, expiries, admin edits).
+func (w *WatchdogService) runCredentialReconcile() {
+	now := time.Now()
+	since := w.lastReconcile.Add(-2 * time.Minute)
+	if w.lastReconcile.IsZero() {
+		since = time.Time{}
+	}
+	n := ReconcileCredentials(since)
+	w.lastReconcile = now
+	if n > 0 && since.IsZero() {
+		log.Printf("[watchdog] Device logins reconciled for %d customers (startup).", n)
 	}
 }
 

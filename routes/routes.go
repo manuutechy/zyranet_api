@@ -156,6 +156,14 @@ func Register(app *fiber.App) {
 	v1.Get("/hotspot/status/:reference", failedLookupLimiter(30, time.Minute), handlers.HotspotStatus)
 	v1.Get("/hotspot/session", handlers.HotspotSession)
 	v1.Post("/hotspot/logout", handlers.HotspotLogout)
+	// Per-device router logins: proof (one-time ticket / device token) in,
+	// this device's own router username+password out. Failed tries are
+	// rate-limited so tokens can't be guessed.
+	v1.Post("/hotspot/credentials", failedLookupLimiter(30, time.Minute), handlers.HotspotCredentials)
+	// Phone randomised its MAC / lost its sign-in: M-Pesa code + paying phone.
+	v1.Post("/customer/auth/recover", payLimiter(10, time.Minute), failedLookupLimiter(10, time.Minute), handlers.CustomerRecoverByReceipt)
+	// Is this WiFi able to take a payment right now (router checked in < 5 min)?
+	v1.Get("/public/zones/accepting-payments", handlers.ZoneAcceptingPaymentsPublic)
 
 	// Public MikroTik Router Endpoints (for /tool fetch 1-line auto-provision & heartbeat)
 	v1.Get("/public/zones/setup/:id", handlers.PublicZoneSetupScript)

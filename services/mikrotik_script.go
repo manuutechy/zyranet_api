@@ -2,6 +2,9 @@ package services
 
 import (
 	"fmt"
+	"net"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,9 +28,6 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 
 	var packages []models.Package
 	config.DB.Where("zone_id = ? AND status = ?", zoneID, "active").Find(&packages)
-
-	var vouchers []models.Voucher
-	config.DB.Preload("Package").Where("zone_id = ? AND status IN ?", zoneID, []string{"unused", "active"}).Find(&vouchers)
 
 	var customers []models.Customer
 	config.DB.Preload("Package").Where("zone_id = ? AND type = ? AND status = ?", zoneID, "pppoe", "active").Find(&customers)
@@ -163,28 +163,14 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString("# --- Firewall NAT (Internet Access Masquerade) ---\n")
 	sb.WriteString(":if ([:len [/ip firewall nat find comment=\"Zyra Net Internet Access NAT\"]] = 0) do={ /ip firewall nat add chain=srcnat action=masquerade comment=\"Zyra Net Internet Access NAT\" }\n\n")
 
-	// Remote Management (WebFig, WinBox, API, and MikroTik Cloud DDNS)
-	sb.WriteString("# --- Remote Management (WebFig, WinBox, API & MikroTik Cloud DDNS) ---\n")
-	sb.WriteString(":do { /ip service set www disabled=no port=80 } on-error={}\n")
-	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
-	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
-	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
-	// Management ports (WebFig/WinBox/API) are only ever needed from ether1
-	// (WAN/VPN uplink) for remote admin, never from the hotspot LAN bridge
-	// where every connecting guest device sits. Scoping the accept rule to
-	// in-interface=ether1 (instead of every interface, with no source
-	// restriction) keeps these off the open hotspot network while still
-	// reachable over the WAN/VPN path admins actually use.
-	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=" + wanPort + " action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n")
-	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Block Hotspot Management\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=!" + wanPort + " action=drop comment=\"Zyra Net Block Hotspot Management\" place-before=1 }\n\n")
+	// Remote management: tunnel only (see writeManagementAccess)
+	writeManagementAccess(&sb)
 
 	if doHotspot {
 		// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
 		sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
-		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" mode=https } on-error={}\n", zone.ID))
-		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
 
 	}
 
@@ -195,7 +181,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	// in handlers/mikrotik_script.go) on this same token.
 	sb.WriteString("# --- Live Health & Status Telemetry Heartbeat (1-Min Interval) ---\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-heartbeat\"] } on-error={}\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" comment=\"Zyra Net Cloud Sync & Telemetry\" } on-error={}\n", zone.ID, zone.ProvisionToken, zone.ID, zone.ProvisionToken))
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-heartbeat source=\"%s\" comment=\"Zyra Net Cloud Sync & Telemetry\" } on-error={}\n", heartbeatSource(&zone)))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-heartbeat-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-heartbeat-sched interval=1m on-event=zyranet-heartbeat comment=\"Zyra Net Cloud Telemetry Scheduler\" } on-error={}\n\n")
 
@@ -211,53 +197,18 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	sb.WriteString(":do { /system scheduler add name=zyranet-memprotect-sched interval=2m on-event=zyranet-memprotect comment=\"Zyra Net Overload Scheduler\" } on-error={}\n\n")
 
 	if doHotspot {
-		// Hotspot User Profiles & Instant Auto-Connect Users
-		sb.WriteString("# --- Hotspot User Profiles & Auto-Connect Users ---\n")
-		for _, pkg := range packages {
-			if pkg.Type != "hotspot" {
+		// Plan profiles only. Logins are per device (own username/password,
+		// bound to the device MAC) and arrive with the 1-minute sync; shared
+		// pkg-<id> / free / voucher-code users are never created any more.
+		sb.WriteString("# --- Hotspot Plan Profiles ---\n")
+		for i := range packages {
+			if packages[i].Type != "hotspot" {
 				continue
 			}
-			profileName := sanitizeProfileName(pkg.Name)
-			pkgTag := fmt.Sprintf("pkg-%d", pkg.ID)
-			rateLimit := formatRateLimitWithBurst(pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
-			timeout := "0s"
-			if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
-				timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
-			}
-			sharedUsers := 500
-			if pkg.DeviceLimit > 1 {
-				sharedUsers = 500 * pkg.DeviceLimit
-			}
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no }\n",
-				profileName, profileName, rateLimit, timeout, sharedUsers, profileName, rateLimit, timeout, sharedUsers,
-			))
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" }\n",
-				pkgTag, pkgTag, pkgTag, profileName, pkgTag, pkgTag, profileName,
-			))
+			writeHotspotProfile(&sb, &packages[i])
 		}
 		sb.WriteString("\n")
-
-		// Free Tier Instant Auto-Connect User & Profile (with 20Mbps Burst, no MAC cookie bypass)
-		sb.WriteString("# --- Free Tier Auto-Connect User & Profile (20Mbps Burst) ---\n")
-		sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no }\n")
-		sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
-
-		// Hotspot Users (from vouchers)
-		sb.WriteString("# --- Hotspot Users (Vouchers) ---\n")
-		for _, v := range vouchers {
-			if v.Package == nil {
-				continue
-			}
-			profileName := sanitizeProfileName(v.Package.Name)
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" }\n",
-				v.Code, v.Code, v.Code, profileName, profileName, v.Code, v.Code, profileName, profileName,
-			))
-		}
-		sb.WriteString("\n")
-
+		writeLegacyLoginCleanup(&sb)
 	}
 
 	if doPPPoE {
@@ -342,13 +293,19 @@ func formatRateLimitWithBurst(upKbps, downKbps int) string {
 	return fmt.Sprintf("%dk/%dk %dk/%dk %dk/%dk 15/15 8", upKbps, downKbps, burstUp, burstDown, threshUp, threshDown)
 }
 
-// GenerateSyncScript generates dynamic RouterOS commands for 1-minute heartbeat sync.
-// It ensures:
-// 1. Hotspot profile login-by includes mac,http-pap,http-chap
-// 2. All hotspot package user profiles and pkg-<id> auto-connect users exist
-// 3. Free tier user profile and free user exist
-// 4. All active paid customers are bypassed in IP-Binding (instant internet) AND added to Hotspot Users
-// 5. Expired customer sessions and bindings are decommissioned
+// GenerateSyncScript generates the RouterOS commands the router imports every
+// minute (it fetches them from /public/zones/sync/:id with its token). It:
+//  1. keeps the hotspot login methods and the redirect page current;
+//  2. removes the old shared logins (pkg-<id>, free, MAC=password users and
+//     raw voucher-code users) that let anyone browse for free;
+//  3. makes sure every paid-up device of this ISP has its own router login
+//     (random username/password, bound to its MAC, limit-uptime = paid time)
+//     and updates logins that changed recently;
+//  4. removes logins that expired or were retired since the router last
+//     synced, and ends their sessions;
+//  5. keeps router management reachable only from the Zyra Net tunnel.
+//
+// It only reads the database: expiring customers is the watchdog's job.
 func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) {
 	var zone models.Zone
 	if err := config.DB.First(&zone, zoneID).Error; err != nil {
@@ -356,23 +313,6 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	}
 
 	now := time.Now()
-
-	var packages []models.Package
-	config.DB.Where("(zone_id = ? OR zone_id = 0) AND status = ? AND type = ?", zone.ID, "active", "hotspot").Find(&packages)
-
-	var activeCustomers []models.Customer
-	config.DB.Preload("Package").
-		Where("(zone_id = ? OR zone_id = 0 OR zone_id IN (SELECT id FROM zones WHERE organization_id = ?)) AND status = ? AND expires_at IS NOT NULL AND expires_at > ?", zone.ID, zone.OrganizationID, "active", now).
-		Find(&activeCustomers)
-
-	var expiredCustomers []models.Customer
-	config.DB.Where("(zone_id = ? OR zone_id IN (SELECT id FROM zones WHERE organization_id = ?)) AND ((status = 'expired') OR (expires_at IS NOT NULL AND expires_at < ? AND status = 'active'))", zone.ID, zone.OrganizationID, now).
-		Find(&expiredCustomers)
-
-	wanPort, _, perr := utils.NormalizeRouterPorts(zone.WanPort, zone.LanPorts)
-	if perr != nil {
-		wanPort = "ether1"
-	}
 	doHotspot, _ := serviceModes(zone.ServiceMode)
 
 	var sb strings.Builder
@@ -385,171 +325,240 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		// Ensure hotspot redirect.html points to destination, not captive portal
-		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" mode=https } on-error={}\n\n", zone.ID))
-
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
 	}
 
 	// Auto-upgrade heartbeat script to push real live telemetry metrics
 	sb.WriteString("# --- Auto-Upgrade Live Telemetry Heartbeat ---\n")
-	sb.WriteString(fmt.Sprintf(":do { /system script set [find name=\"zyranet-heartbeat\"] source=\"/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" mode=https; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) mode=https keep-result=no\" } on-error={}\n\n", zone.ID, zone.ProvisionToken, zone.ID, zone.ProvisionToken))
+	sb.WriteString(fmt.Sprintf(":do { /system script set [find name=\"zyranet-heartbeat\"] source=\"%s\" } on-error={}\n\n", heartbeatSource(&zone)))
 
-	activeBinds := make(map[string]string) // mac -> profileName
 	if doHotspot {
-		// Ensure package profiles & auto-connect users
-		sb.WriteString("# --- Hotspot Package Profiles & Auto-Connect Users ---\n")
-		for _, pkg := range packages {
-			profileName := sanitizeProfileName(pkg.Name)
-			pkgTag := fmt.Sprintf("pkg-%d", pkg.ID)
-			rateLimit := formatRateLimitWithBurst(pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
-			timeout := "0s"
-			if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
-				timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
-			}
-			sharedUsers := 500
-			if pkg.DeviceLimit > 1 {
-				sharedUsers = 500 * pkg.DeviceLimit
-			}
+		writeLegacyLoginCleanup(&sb)
 
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=%d add-mac-cookie=no }\n",
-				profileName, profileName, rateLimit, timeout, sharedUsers, profileName, rateLimit, timeout, sharedUsers,
-			))
-
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"Zyra Net Package Auto-Connect\" }\n",
-				pkgTag, pkgTag, pkgTag, profileName, pkgTag, pkgTag, profileName,
-			))
+		// Logins changed since a little before the router's previous sync are
+		// (re)written; older unchanged ones are only added if missing.
+		windowStart := now.Add(-syncWindow)
+		if zone.LastSyncAt != nil && zone.LastSyncAt.Add(-syncWindow).Before(windowStart) {
+			windowStart = zone.LastSyncAt.Add(-syncWindow)
+		}
+		if windowStart.Before(now.Add(-maxSyncLookback)) {
+			windowStart = now.Add(-maxSyncLookback)
 		}
 
-		// Free tier user & profile
-		sb.WriteString(":if ([:len [/ip hotspot user profile find name=\"free-tier\"]] = 0) do={ /ip hotspot user profile add name=\"free-tier\" rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"free-tier\"] rate-limit=\"3M/3M 20M/20M 2M/2M 15/15 8\" session-timeout=30m idle-timeout=3m keepalive-timeout=1m shared-users=200 add-mac-cookie=no }\n")
-		sb.WriteString(":if ([:len [/ip hotspot user find name=\"free\"]] = 0) do={ /ip hotspot user add name=\"free\" password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" } else={ /ip hotspot user set [find name=\"free\"] password=\"free\" profile=\"free-tier\" comment=\"Zyra Net Free Tier Auto-Connect\" }\n\n")
+		var active []models.HotspotCredential
+		config.DB.Where("organization_id = ? AND status = ? AND expires_at > ?", zone.OrganizationID, "active", now).
+			Order("id").Find(&active)
+		var gone []models.HotspotCredential
+		config.DB.Where("organization_id = ? AND updated_at > ? AND (status <> ? OR expires_at <= ?)", zone.OrganizationID, windowStart, "active", now).
+			Order("id").Find(&gone)
 
-		// Collect all active MAC bindings
-		// (declared above: the decommissioner below reads it in every mode)
-		for _, cust := range activeCustomers {
-			profileName := "default"
-			if cust.Package != nil {
-				profileName = sanitizeProfileName(cust.Package.Name)
-			}
-			if cust.MacAddress != nil && *cust.MacAddress != "" {
-				mac := strings.ToUpper(strings.TrimSpace(*cust.MacAddress))
-				mac = strings.ReplaceAll(mac, "-", ":")
-				if len(mac) == 17 {
-					activeBinds[mac] = profileName
-				}
-			}
-
-			var devices []models.CustomerDevice
-			config.DB.Where("customer_id = ?", cust.ID).Find(&devices)
-			for _, dev := range devices {
-				mac := strings.ToUpper(strings.TrimSpace(dev.MacAddress))
-				mac = strings.ReplaceAll(mac, "-", ":")
-				if len(mac) == 17 {
-					activeBinds[mac] = profileName
-				}
-			}
+		// Profiles: this zone's plans plus any plan a login uses.
+		pkgIDs := map[uint]bool{}
+		for _, c := range active {
+			pkgIDs[c.PackageID] = true
 		}
-
-		// Also check recent completed payments with valid unexpired packages
-		var recentPayments []models.Payment
-		config.DB.Preload("Package").
-			Where("(zone_id = ? OR zone_id IN (SELECT id FROM zones WHERE organization_id = ?)) AND status = 'completed' AND mac_address != '' AND created_at > ?", zone.ID, zone.OrganizationID, now.Add(-30*24*time.Hour)).
-			Find(&recentPayments)
-
-		for _, p := range recentPayments {
-			if p.Package != nil {
-				expiry := utils.CalculateExpiry(p.Package.BillingCycle, &p.CreatedAt, p.Package.TimeLimitMinutes)
-				if expiry.After(now) {
-					mac := strings.ToUpper(strings.TrimSpace(p.MacAddress))
-					mac = strings.ReplaceAll(mac, "-", ":")
-					if len(mac) == 17 {
-						activeBinds[mac] = sanitizeProfileName(p.Package.Name)
-					}
-				}
+		var packages []models.Package
+		q := config.DB.Where("(zone_id = ? AND status = ? AND type = ?)", zone.ID, "active", "hotspot")
+		if len(pkgIDs) > 0 {
+			ids := make([]uint, 0, len(pkgIDs))
+			for id := range pkgIDs {
+				ids = append(ids, id)
 			}
+			q = q.Or("id IN ?", ids)
 		}
-
-		// Clean up any bypassed bindings so all devices must select/authenticate a plan
-		sb.WriteString("# --- Revert All Devices to Captive Portal Plans (Remove Bypasses) ---\n")
-		sb.WriteString(":do { /ip hotspot ip-binding remove [find comment~\"ZyraNet\"] } on-error={}\n")
-		sb.WriteString(":do { /ip hotspot ip-binding remove [find type=bypassed] } on-error={}\n\n")
-
-		// Active paid customers: authenticate through hotspot user profiles with bandwidth limits
-		sb.WriteString("# --- Hotspot Plan Users (Controlled by Package Profiles) ---\n")
-		for mac, profileName := range activeBinds {
-			macUpper := strings.ToUpper(mac)
-			macLower := strings.ToLower(mac)
-			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", macUpper))
-			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", macUpper, macUpper, profileName))
-			if macLower != macUpper {
-				sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", macLower))
-				sb.WriteString(fmt.Sprintf(":do { /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"ZyraNet Paid Plan\" } on-error={}\n", macLower, macLower, profileName))
-			}
+		q.Order("id").Find(&packages)
+		pkgByID := map[uint]*models.Package{}
+		sb.WriteString("# --- Hotspot Plan Profiles (one login per device) ---\n")
+		for i := range packages {
+			pkgByID[packages[i].ID] = &packages[i]
+			writeHotspotProfile(&sb, &packages[i])
 		}
 		sb.WriteString("\n")
 
-		// Active/Unused Hotspot Vouchers
-		var unusedVouchers []models.Voucher
-		config.DB.Preload("Package").Where("zone_id = ? AND status = 'unused'", zone.ID).Find(&unusedVouchers)
-		sb.WriteString("# --- Hotspot Users (Vouchers) ---\n")
-		for _, v := range unusedVouchers {
-			if v.Package == nil {
+		sb.WriteString("# --- Device Logins (own username/password, bound to the device MAC) ---\n")
+		for i := range active {
+			c := &active[i]
+			pkg := pkgByID[c.PackageID]
+			if pkg == nil {
 				continue
 			}
-			profileName := sanitizeProfileName(v.Package.Name)
-			sb.WriteString(fmt.Sprintf(
-				":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" } else={ /ip hotspot user set [find name=\"%s\"] password=\"%s\" profile=\"%s\" comment=\"pkg:%s\" }\n",
-				v.Code, v.Code, v.Code, profileName, profileName, v.Code, v.Code, profileName, profileName,
-			))
+			writeCredentialUser(&sb, c, pkg, c.UpdatedAt.After(windowStart), c.ActivatedAt.After(windowStart))
 		}
 		sb.WriteString("\n")
 
-		// Depleted / Expired Vouchers Cleanup
-		var oldVouchers []models.Voucher
-		config.DB.Where("zone_id = ? AND status IN ('depleted', 'expired')", zone.ID).Find(&oldVouchers)
-		sb.WriteString("# --- Depleted / Expired Vouchers Cleanup ---\n")
-		for _, v := range oldVouchers {
-			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", v.Code))
+		sb.WriteString("# --- Expired / Retired Device Logins ---\n")
+		for i := range gone {
+			writeCredentialRemoval(&sb, &gone[i])
 		}
 		sb.WriteString("\n")
-
 	}
 
-	// Expired customers: decommission
-	sb.WriteString("# --- Expired Customer Sessions Decommissioner ---\n")
-	for _, cust := range expiredCustomers {
-		config.DB.Model(&cust).Update("status", "expired")
-		if cust.MacAddress != nil && *cust.MacAddress != "" {
-			mac := strings.ToUpper(strings.TrimSpace(*cust.MacAddress))
-			mac = strings.ReplaceAll(mac, "-", ":")
-			if len(mac) == 17 {
-				if _, stillActive := activeBinds[mac]; !stillActive {
-					sb.WriteString(fmt.Sprintf(":do { /ip hotspot ip-binding remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-					sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-					sb.WriteString(fmt.Sprintf(":do { /ip hotspot host remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-					sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find mac-address=\"%s\"] } on-error={}\n", mac))
-					sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", mac))
-				}
-			}
-		}
-	}
-
-	// Maintain Remote Management & Cloud DDNS
-	sb.WriteString("# --- Maintain Remote Access (WebFig, WinBox, API & Cloud DDNS) ---\n")
-	sb.WriteString(":do { /ip service set www disabled=no port=80 } on-error={}\n")
-	sb.WriteString(":do { /ip service set winbox disabled=no port=8291 } on-error={}\n")
-	sb.WriteString(":do { /ip service set api disabled=no port=8728 } on-error={}\n")
-	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
-	// Management ports must only ever be reachable from ether1 (WAN/VPN
-	// uplink), never from the open hotspot LAN where every guest device
-	// sits — see the matching pair of rules in GenerateScript.
-	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=" + wanPort + " action=accept comment=\"Zyra Net Remote Access\" place-before=0 }\n")
-	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find comment=\"Zyra Net Block Hotspot Management\"]] = 0) do={ /ip firewall filter add chain=input protocol=tcp dst-port=80,8291,8728 in-interface=!" + wanPort + " action=drop comment=\"Zyra Net Block Hotspot Management\" place-before=1 }\n\n")
-
+	writeManagementAccess(&sb)
 	return sb.String(), nil
+}
+
+const (
+	// syncWindow: changes this recent are always re-sent (covers a missed or
+	// failed import between two syncs).
+	syncWindow = 10 * time.Minute
+	// maxSyncLookback bounds how far back removals are looked up for a router
+	// that has been offline a long time. Longer than that, the login's own
+	// limit-uptime has long run out on the router anyway.
+	maxSyncLookback = 30 * 24 * time.Hour
+)
+
+// fetchSecurity is the /tool fetch options for calls to our API: https, and
+// certificate checking when the zone has it switched on (Zone.VerifyTLS).
+func fetchSecurity(zone *models.Zone) string {
+	if zone.VerifyTLS {
+		return "mode=https check-certificate=yes"
+	}
+	return "mode=https"
+}
+
+// heartbeatSource is the body of the router's zyranet-heartbeat script (already
+// escaped for a double-quoted RouterOS string): fetch + import the sync
+// script, then report telemetry. Both URLs carry the zone's token.
+func heartbeatSource(zone *models.Zone) string {
+	sec := fetchSecurity(zone)
+	return fmt.Sprintf("/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" %s; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) %s keep-result=no",
+		zone.ID, zone.ProvisionToken, sec, zone.ID, zone.ProvisionToken, sec)
+}
+
+// writeLegacyLoginCleanup removes the shared router logins earlier scripts
+// created, and ends sessions that used them. Idempotent: a no-op once clean.
+func writeLegacyLoginCleanup(sb *strings.Builder) {
+	sb.WriteString("# --- Remove old shared logins (pkg-<id>, free, MAC=password, voucher codes) ---\n")
+	sb.WriteString(":do { /ip hotspot active remove [find user~\"^pkg-\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot active remove [find user=\"free\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find comment=\"Zyra Net Package Auto-Connect\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find name~\"^pkg-\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find comment=\"Zyra Net Free Tier Auto-Connect\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find name=\"free\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find comment=\"ZyraNet Paid Plan\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot user remove [find comment~\"^pkg:\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot ip-binding remove [find comment~\"ZyraNet\"] } on-error={}\n")
+	sb.WriteString(":do { /ip hotspot ip-binding remove [find type=bypassed] } on-error={}\n\n")
+}
+
+// writeHotspotProfile writes a plan's user profile. shared-users=1: every
+// device has its own login, so one login is one device.
+func writeHotspotProfile(sb *strings.Builder, pkg *models.Package) {
+	profileName := sanitizeProfileName(pkg.Name)
+	rateLimit := formatRateLimitWithBurst(pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
+	timeout := "0s"
+	if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+		timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
+	}
+	sb.WriteString(fmt.Sprintf(
+		":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 add-mac-cookie=no }\n",
+		profileName, profileName, rateLimit, timeout, profileName, rateLimit, timeout,
+	))
+}
+
+// writeCredentialUser makes sure a device login exists on the router. A login
+// changed recently is also rewritten (new expiry/plan); one (re)activated
+// recently gets its uptime counter reset so limit-uptime counts from now.
+func writeCredentialUser(sb *strings.Builder, c *models.HotspotCredential, pkg *models.Package, changed, reactivated bool) {
+	mac, ok := NormalizeMAC(c.MacAddress)
+	if !ok || !credNameRe.MatchString(c.Username) || !credPassRe.MatchString(c.Password) {
+		sb.WriteString(fmt.Sprintf("# skipped login %d: invalid stored values\n", c.ID))
+		return
+	}
+	attrs := fmt.Sprintf("password=\"%s\" mac-address=%s profile=\"%s\" limit-uptime=%s", c.Password, mac, sanitizeProfileName(pkg.Name), credentialLimitUptime(c))
+	if pkg.DataLimitMB != nil && *pkg.DataLimitMB > 0 {
+		attrs += fmt.Sprintf(" limit-bytes-total=%d", int64(*pkg.DataLimitMB)*1024*1024)
+	}
+	attrs += fmt.Sprintf(" comment=\"%s\"", credentialComment(c))
+	if changed {
+		sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" %s } else={ /ip hotspot user set [find name=\"%s\"] %s }\n", c.Username, c.Username, attrs, c.Username, attrs))
+		if reactivated {
+			sb.WriteString(fmt.Sprintf(":do { /ip hotspot user reset-counters [find name=\"%s\"] } on-error={}\n", c.Username))
+		}
+		return
+	}
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot user find name=\"%s\"]] = 0) do={ /ip hotspot user add name=\"%s\" %s }\n", c.Username, c.Username, attrs))
+}
+
+// writeCredentialRemoval takes an expired/retired login off the router and
+// ends its session.
+func writeCredentialRemoval(sb *strings.Builder, c *models.HotspotCredential) {
+	if !credNameRe.MatchString(c.Username) {
+		return
+	}
+	sb.WriteString(fmt.Sprintf(":do { /ip hotspot active remove [find user=\"%s\"] } on-error={}\n", c.Username))
+	sb.WriteString(fmt.Sprintf(":do { /ip hotspot cookie remove [find user=\"%s\"] } on-error={}\n", c.Username))
+	sb.WriteString(fmt.Sprintf(":do { /ip hotspot user remove [find name=\"%s\"] } on-error={}\n", c.Username))
+}
+
+var (
+	credNameRe = regexp.MustCompile(`^zn[a-z0-9]{8}$`)
+	credPassRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
+)
+
+// managementSources is who may reach WebFig/WinBox/REST on a router: the
+// Zyra Net WireGuard subnet, plus anything in ROUTER_MGMT_ALLOWED
+// (comma-separated IPs/CIDRs, e.g. the API server's public IP for routers
+// managed without the tunnel).
+func managementSources() []string {
+	return addressList("10.200.0.0/24", os.Getenv("ROUTER_MGMT_ALLOWED"))
+}
+
+// apiSources is who may use the RouterOS API: the API server only — its
+// tunnel address (RADIUS_SERVER_ADDR, default 10.200.0.1) plus
+// ROUTER_API_ALLOWED.
+func apiSources() []string {
+	server := strings.TrimSpace(config.Config.RadiusServerAddr)
+	if net.ParseIP(server) == nil {
+		server = "10.200.0.1"
+	}
+	return addressList(server+"/32", os.Getenv("ROUTER_API_ALLOWED"))
+}
+
+// addressList returns base plus the valid IPs/CIDRs in extra (invalid entries
+// are dropped so nothing odd reaches a router command).
+func addressList(base, extra string) []string {
+	out := []string{base}
+	for _, e := range strings.Split(extra, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if ip := net.ParseIP(e); ip != nil {
+			if ip.To4() != nil {
+				out = append(out, e+"/32")
+			}
+			continue
+		}
+		if ip, _, err := net.ParseCIDR(e); err == nil && ip.To4() != nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// writeManagementAccess keeps WebFig/WinBox/REST reachable only from the
+// management sources and the RouterOS API (plain and TLS) only from the API
+// server; everyone else — the internet and the hotspot guests — is dropped.
+func writeManagementAccess(sb *strings.Builder) {
+	mgmt := strings.Join(managementSources(), ",")
+	api := strings.Join(apiSources(), ",")
+	sb.WriteString("# --- Remote management: only over the Zyra Net tunnel (API: the Zyra Net server only) ---\n")
+	sb.WriteString(":do { /ip firewall address-list remove [find list=\"zyranet-mgmt\"] } on-error={}\n")
+	for _, a := range append(managementSources(), apiSources()...) {
+		sb.WriteString(fmt.Sprintf(":do { /ip firewall address-list add list=zyranet-mgmt address=%s comment=\"Zyra Net management\" } on-error={}\n", a))
+	}
+	sb.WriteString(fmt.Sprintf(":do { /ip service set www disabled=no port=80 address=%s } on-error={}\n", mgmt))
+	sb.WriteString(fmt.Sprintf(":do { /ip service set www-ssl address=%s } on-error={}\n", mgmt))
+	sb.WriteString(fmt.Sprintf(":do { /ip service set winbox disabled=no port=8291 address=%s } on-error={}\n", mgmt))
+	sb.WriteString(fmt.Sprintf(":do { /ip service set api disabled=no port=8728 address=%s } on-error={}\n", api))
+	sb.WriteString(fmt.Sprintf(":do { /ip service set api-ssl disabled=no port=8729 address=%s } on-error={}\n", api))
+	sb.WriteString(":do { /ip cloud set ddns-enabled=yes update-time=yes } on-error={}\n")
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
+	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Management\"] } on-error={}\n")
+	sb.WriteString(":if ([:len [/ip firewall filter find]] > 0) do={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" place-before=0 } on-error={} } else={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" } on-error={} }\n")
+	sb.WriteString(":do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" place-before=1 } on-error={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" } on-error={} }\n\n")
 }
 
 // rosEscape makes a value safe inside a double-quoted RouterOS string: it

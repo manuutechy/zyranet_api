@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -57,11 +58,20 @@ func HotspotPay(c *fiber.Ctx) error {
 
 	phone := utils.FormatPhone(body.Phone)
 
-	zonePtr, err := resolveHotspotZone(c, body.ZoneID)
-	if err != nil {
-		return utils.ErrorResponse(c, "No zone configured on the server.", "", fiber.StatusInternalServerError)
+	// The zone must be the one the router sent the device from — never a
+	// fallback (that could charge for another ISP's WiFi).
+	zonePtr := zoneByID(body.ZoneID)
+	if zonePtr == nil {
+		zonePtr = zoneByID(c.Query("zone_id"))
+	}
+	if zonePtr == nil {
+		return utils.ErrorResponse(c, "Open this page from the WiFi login screen to pay.", "", fiber.StatusBadRequest)
 	}
 	zone := *zonePtr
+	// Don't take money for WiFi that can't connect anyone right now.
+	if ok, msg := services.ZoneAcceptingPayments(zone.ID); !ok {
+		return zoneOfflineResponse(c, msg)
+	}
 
 	// Map plan_id to package details
 	var price float64
@@ -195,46 +205,53 @@ func HotspotStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "failed", "message": "Payment record not found"})
 	}
 
-	buildPaidResponse := func(p *models.Payment) fiber.Map {
+	buildPaidResponse := func(p *models.Payment) (fiber.Map, bool) {
 		resp := fiber.Map{"status": "paid"}
-		pkgID := uint(0)
 		if p.PackageID != nil {
-			pkgID = *p.PackageID
+			var pkg models.Package
+			if config.DB.First(&pkg, *p.PackageID).Error == nil {
+				resp["plan_name"] = pkg.Name
+				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
+			}
 		}
-		var pkg models.Package
-		if pkgID > 0 && config.DB.First(&pkg, pkgID).Error == nil {
-			if pkg.IsFreeTier || pkg.Price == 0 {
-				resp["plan_name"] = pkg.Name
-				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
-				resp["username"] = "free"
-				resp["password"] = "free"
+		if p.CustomerID == nil || *p.CustomerID == 0 {
+			// The payment completes before the customer is attached; keep the
+			// portal polling for a little while.
+			if time.Since(p.UpdatedAt) < 2*time.Minute {
+				return nil, false
+			}
+			resp["message"] = "Payment received. Sign in with your phone number to connect."
+			return resp, true
+		}
+		token, _ := middleware.GenerateCustomerToken(*p.CustomerID)
+		middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
+		resp["token"] = token
+		resp["customer_id"] = *p.CustomerID
+
+		// The device that paid gets its own router login. The reference is
+		// the proof: only the payer's session holds the CheckoutRequestID.
+		// Never a shared pkg-<id> / free login.
+		if _, ok := services.NormalizeMAC(p.MacAddress); ok {
+			rl, _, err := grantRouterLogin(*p.CustomerID, p.MacAddress, zoneByID(fmt.Sprint(p.ZoneID)), "paid", true)
+			if err == nil {
+				resp["router_login"] = rl
+			} else if errors.Is(err, services.ErrNoActivePlan) && time.Since(p.UpdatedAt) < 2*time.Minute {
+				return nil, false // plan still being activated
 			} else {
-				resp["plan_name"] = pkg.Name
-				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
-				// WhitelistMAC creates the MikroTik hotspot user with name=MAC / password=MAC.
-				// We MUST return the MAC as credentials so the captive portal login form
-				// submits the correct username/password to the router.
-				// Fall back to pkg-N only when there is no MAC (which means whitelist
-				// also could not have used the MAC, so consistency is preserved).
-				pkgTag := fmt.Sprintf("pkg-%d", pkgID)
-				resp["username"] = pkgTag
-				resp["password"] = pkgTag
+				log.Printf("[Hotspot] payment %d: no router login: %v", p.ID, err)
+				resp["message"] = "Payment received. Sign in with your phone number to connect."
 			}
 		} else {
-			resp["username"] = "pkg-1"
-			resp["password"] = "pkg-1"
+			resp["message"] = "Payment received. Connect to the WiFi and sign in with your phone number."
 		}
-		if p.CustomerID != nil && *p.CustomerID > 0 {
-			token, _ := middleware.GenerateCustomerToken(*p.CustomerID)
-			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
-			resp["token"] = token
-			resp["customer_id"] = *p.CustomerID
-		}
-		return resp
+		return resp, true
 	}
 
 	if payment.Status == "completed" {
-		return c.JSON(buildPaidResponse(&payment))
+		if resp, ok := buildPaidResponse(&payment); ok {
+			return c.JSON(resp)
+		}
+		return c.JSON(fiber.Map{"status": "pending"})
 	} else if payment.Status == "failed" {
 		msg := "Payment failed"
 		if payment.StatusReason != nil {
@@ -248,7 +265,11 @@ func HotspotStatus(c *fiber.Ctx) error {
 		newStatus, err := mpesaSvcGlobal.QueryAndUpdateSTKStatus(&payment)
 		if err == nil {
 			if newStatus == "completed" {
-				return c.JSON(buildPaidResponse(&payment))
+				config.DB.First(&payment, payment.ID)
+				if resp, ok := buildPaidResponse(&payment); ok {
+					return c.JSON(resp)
+				}
+				return c.JSON(fiber.Map{"status": "pending"})
 			} else if newStatus == "failed" {
 				msg := "Payment failed"
 				if payment.StatusReason != nil {
@@ -264,133 +285,94 @@ func HotspotStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "pending"})
 }
 
-// HotspotSession returns the active session stats for a MAC address.
-func HotspotSession(c *fiber.Ctx) error {
-	mac := c.Query("mac")
-	if mac == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"active": false, "error": "mac is required"})
-	}
-
-	cleanMac := strings.ToLower(strings.TrimSpace(mac))
-	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
-	now := time.Now()
-
-	// 1. Check Customer in DB for active unexpired subscription matching this MAC
-	var customer models.Customer
-	foundCustomer := false
-
-	// Try finding by direct MAC address
-	if err := config.DB.Preload("Package").Preload("Zone").
-		Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ? AND expires_at > ?", cleanMac, cleanMac, "active", now).
-		Order("expires_at DESC").First(&customer).Error; err == nil {
-		foundCustomer = true
-	}
-
-	// Also check through CustomerDevice
-	if !foundCustomer {
-		var dev models.CustomerDevice
-		if err := config.DB.Preload("Customer.Package").Preload("Customer.Zone").
-			Where("LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?", cleanMac, cleanMac).
-			Order("last_seen_at DESC").First(&dev).Error; err == nil && dev.Customer != nil {
-			if dev.Customer.Status == "active" && dev.Customer.ExpiresAt != nil && dev.Customer.ExpiresAt.After(now) {
-				customer = *dev.Customer
-				foundCustomer = true
-			}
-		}
-	}
-
-	// Also check if customer is authenticated via session cookie
-	if !foundCustomer {
-		if claims := middleware.OptionalCustomerClaims(c); claims != nil && claims.CustomerID > 0 {
-			if err := config.DB.Preload("Package").Preload("Zone").
-				Where("id = ? AND status = ? AND expires_at > ?", claims.CustomerID, "active", now).
-				First(&customer).Error; err == nil {
-				foundCustomer = true
-			}
-		}
-	}
-
-	// Also check recent completed payment for this MAC
-	if !foundCustomer {
-		var payment models.Payment
-		if err := config.DB.Preload("Package").Preload("Zone").
-			Where("(LOWER(mac_address) = ? OR REPLACE(LOWER(mac_address), '-', ':') = ?) AND status = ?", cleanMac, cleanMac, "completed").
-			Order("created_at DESC").First(&payment).Error; err == nil && payment.Package != nil {
-			validUntil := utils.CalculateExpiry(payment.Package.BillingCycle, &payment.CreatedAt, payment.Package.TimeLimitMinutes)
-			if validUntil.After(now) {
-				timeLeft := int64(time.Until(validUntil).Seconds())
-				speed := fmt.Sprintf("%.0f Mbps", float64(payment.Package.SpeedDownloadKbps)/1024)
-				return c.JSON(fiber.Map{
-					"active":     true,
-					"plan_name":  payment.Package.Name,
-					"speed":      speed,
-					"time_left":  timeLeft,
-					"expires_at": validUntil,
-					"bytes_in":   104857600,
-					"bytes_out":  20971520,
-				})
-			}
-		}
-	}
-
-	if foundCustomer && customer.Package != nil && customer.ExpiresAt != nil && customer.ExpiresAt.After(now) {
-		timeLeft := int64(time.Until(*customer.ExpiresAt).Seconds())
-		speed := fmt.Sprintf("%.0f Mbps", float64(customer.Package.SpeedDownloadKbps)/1024)
-		return c.JSON(fiber.Map{
-			"active":     true,
-			"plan_name":  customer.Package.Name,
-			"speed":      speed,
-			"time_left":  timeLeft,
-			"expires_at": *customer.ExpiresAt,
-			"bytes_in":   104857600,
-			"bytes_out":  20971520,
-		})
-	}
-
-	zone, err := resolveHotspotZone(c, "")
-	if err == nil && mikrotikSvc != nil {
-		sessions, err := mikrotikSvc.GetActiveSessions(zone)
-		if err == nil {
-			for _, s := range sessions {
-				if strings.EqualFold(s.MAC, cleanMac) || strings.EqualFold(s.MAC, mac) {
-					return c.JSON(fiber.Map{
-						"active":    true,
-						"plan_name": "Standard",
-						"speed":     "5 Mbps",
-						"time_left": 86400,
-						"bytes_in":  s.BytesIn,
-						"bytes_out": s.BytesOut,
-					})
+// sessionCustomer finds whose session a portal request is asking about,
+// from proof only: the device token (bound to this MAC) or a customer
+// session cookie.
+func sessionCustomer(c *fiber.Ctx, mac, deviceToken string) (*models.Customer, *models.HotspotCredential) {
+	if tok := deviceTokenFrom(c, deviceToken); tok != "" {
+		if cred, err := services.CredentialByDeviceToken(tok); err == nil {
+			if m, ok := services.NormalizeMAC(mac); !ok || m == cred.MacAddress {
+				var cust models.Customer
+				if config.DB.Preload("Package").First(&cust, cred.CustomerID).Error == nil {
+					return &cust, cred
 				}
 			}
 		}
 	}
-
-	return c.JSON(fiber.Map{"active": false})
+	if claims := middleware.OptionalCustomerClaims(c); claims != nil && claims.CustomerID > 0 {
+		var cust models.Customer
+		if config.DB.Preload("Package").First(&cust, claims.CustomerID).Error == nil {
+			return &cust, nil
+		}
+	}
+	return nil, nil
 }
 
-// HotspotLogout disconnects a client by MAC.
+// HotspotSession returns the active plan for this device. It needs the
+// device token or a customer session: a MAC alone tells nothing.
+func HotspotSession(c *fiber.Ctx) error {
+	cust, _ := sessionCustomer(c, c.Query("mac"), "")
+	now := time.Now()
+	if cust == nil || cust.Package == nil || cust.Status != "active" || cust.ExpiresAt == nil || !cust.ExpiresAt.After(now) {
+		return c.JSON(fiber.Map{"active": false})
+	}
+	return c.JSON(fiber.Map{
+		"active":     true,
+		"plan_name":  cust.Package.Name,
+		"speed":      fmt.Sprintf("%.0f Mbps", float64(cust.Package.SpeedDownloadKbps)/1024),
+		"time_left":  int64(time.Until(*cust.ExpiresAt).Seconds()),
+		"expires_at": *cust.ExpiresAt,
+	})
+}
+
+// HotspotLogout ends this device's own router session. It needs proof that
+// the caller is that device (device token, or a customer session holding a
+// login for this MAC) — otherwise anyone could kick anyone off.
 func HotspotLogout(c *fiber.Ctx) error {
 	var body struct {
-		Mac    string `json:"mac"`
-		ZoneID string `json:"zone_id"`
+		Mac         string `json:"mac"`
+		ZoneID      string `json:"zone_id"`
+		DeviceToken string `json:"device_token"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Mac == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "mac is required"})
 	}
-
-	zone, err := resolveHotspotZone(c, body.ZoneID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No zones configured"})
+	mac, ok := services.NormalizeMAC(body.Mac)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "mac is required"})
+	}
+	zone := zoneByID(body.ZoneID)
+	if zone == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "zone_id is required"})
 	}
 
-	if err := mikrotikSvc.DisconnectClient(zone, body.Mac); err != nil {
-		log.Printf("[Hotspot] Failed to disconnect client %s: %v", body.Mac, err)
+	allowed := false
+	if tok := deviceTokenFrom(c, body.DeviceToken); tok != "" {
+		if cred, err := services.CredentialByDeviceToken(tok); err == nil && cred.MacAddress == mac && cred.OrganizationID == zone.OrganizationID {
+			allowed = true
+		}
+	}
+	if !allowed {
+		if claims := strongCustomerClaims(c); claims != nil &&
+			services.CustomerHoldsMAC(zone.OrganizationID, claims.CustomerID, mac) {
+			allowed = true
+		}
+	}
+	if !allowed {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"success": false, "code": "proof_required", "error": "Sign in on this device to log it out."})
+	}
+
+	svc := routerSvc()
+	if svc == nil {
+		return c.JSON(fiber.Map{"success": true})
+	}
+	if err := svc.DisconnectClient(zone, mac); err != nil {
+		log.Printf("[Hotspot] Failed to disconnect client %s: %v", mac, err)
 		if config.Config.AppEnv == "local" {
 			log.Printf("[Hotspot] Dev mode: bypassing disconnect failure.")
 			return c.JSON(fiber.Map{"success": true})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "Could not reach the router. Try again in a moment."})
 	}
 
 	return c.JSON(fiber.Map{"success": true})
