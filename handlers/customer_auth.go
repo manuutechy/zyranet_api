@@ -477,40 +477,18 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 	}, "Device recognized.")
 }
 
-// CustomerAuthGuest authenticates the customer as a guest. If this device's
-// MAC address already has a guest account from a previous visit, that
-// account is reused (so a returning guest keeps their credit balance /
-// active subscription) instead of minting a new throwaway record every
-// time. The lookup is deliberately scoped to guest accounts only
-// (account_number LIKE 'ZYR#GUEST#%') — a MAC address is easy to spoof, so
-// it must never be sufficient on its own to log in as a real subscriber.
+// CustomerAuthGuest creates a fresh guest account for browsing plans. An
+// existing account is never handed out because a device's MAC matches it: a
+// MAC is visible to everyone on the WiFi and trivial to spoof, so it gets no
+// session for anyone else's (or its own earlier) account. A returning device
+// proves itself with its device token (CustomerAuthByDevice), OTP, or its
+// M-Pesa code + phone instead.
 func CustomerAuthGuest(c *fiber.Ctx) error {
 	var body struct {
 		Mac string `json:"mac"`
 		IP  string `json:"ip"`
 	}
 	c.BodyParser(&body) // mac/ip are optional; an empty body just skips device-binding
-
-	if body.Mac != "" {
-		var existing models.Customer
-		err := config.DB.
-			Where("mac_address = ? AND account_number LIKE ?", body.Mac, "ZYR#GUEST#%").
-			Order("created_at DESC").
-			First(&existing).Error
-		if err == nil {
-			// Recognised by MAC alone: a device session only (it can't spend,
-			// change details, or get a router login without proof).
-			token, err := middleware.GenerateDeviceCustomerToken(existing.ID)
-			if err != nil {
-				return utils.ErrorResponse(c, "Token generation failed.", "", fiber.StatusInternalServerError)
-			}
-			middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
-			return utils.SuccessResponse(c, fiber.Map{
-				"token":    token,
-				"customer": buildCustomerProfile(&existing),
-			}, "Welcome back.")
-		}
-	}
 
 	// Find guest package and zone
 	var zone models.Zone
@@ -664,11 +642,9 @@ func CustomerReconnect(c *fiber.Ctx) error {
 		}
 	}
 	if customerID == 0 {
+		// Only a session proven by OTP / payment counts. A device (weak)
+		// session can't mint router logins: it may have come from a MAC.
 		if cl := strongCustomerClaims(c); cl != nil {
-			customerID = cl.CustomerID
-		} else if cl := middleware.OptionalCustomerClaims(c); cl != nil && cl.CustomerID > 0 && zone != nil &&
-			services.CustomerHoldsMAC(zone.OrganizationID, cl.CustomerID, cleanMac) {
-			// A device session may reconnect the device it was issued for.
 			customerID = cl.CustomerID
 		}
 	}

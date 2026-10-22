@@ -353,7 +353,7 @@ func HotspotLogout(c *fiber.Ctx) error {
 		}
 	}
 	if !allowed {
-		if claims := middleware.OptionalCustomerClaims(c); claims != nil && claims.CustomerID > 0 &&
+		if claims := strongCustomerClaims(c); claims != nil &&
 			services.CustomerHoldsMAC(zone.OrganizationID, claims.CustomerID, mac) {
 			allowed = true
 		}

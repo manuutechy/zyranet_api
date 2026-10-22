@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
+	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/services"
 )
@@ -324,5 +325,54 @@ func TestHotspotStatus_PaidGivesTicketNotSharedLogin(t *testing.T) {
 	rl, ok := out["router_login"].(map[string]interface{})
 	if !ok || rl["login_ticket"] == "" {
 		t.Fatalf("paid status should carry a one-time login ticket: %v", out["_raw"])
+	}
+}
+
+// Security review: a session recognised from a MAC (guest / device session)
+// is never proof — it can't reconnect or get a router login, and guest
+// login never hands out an existing account by MAC.
+func TestWeakOrGuestSession_CannotGetRouterLogin(t *testing.T) {
+	setupRouterAccessHandlers(t)
+	a := seedISP(t, "isp", "", 1)
+	victimMAC := "aa:bb:cc:dd:ee:01"
+	victim := paidCustomer(t, a.ZoneID, "254711000001", victimMAC)
+	config.DB.Model(&victim).Update("account_number", "ZYR#GUEST#10001") // a paid guest account
+	if _, err := services.EnsureCredential(victim.ID, victimMAC, "paid"); err != nil {
+		t.Fatal(err)
+	}
+	app := routerAccessApp()
+	app.Post("/customer/auth/guest", CustomerAuthGuest)
+	zid := fmt.Sprint(a.ZoneID)
+
+	// Guest login with the victim's MAC must not land on the victim's account.
+	st, out := doJSON(t, app, "POST", "/customer/auth/guest", map[string]string{"mac": victimMAC})
+	if st != 200 {
+		t.Fatalf("guest: %d %v", st, out["_raw"])
+	}
+	data, _ := out["data"].(map[string]interface{})
+	cust, _ := data["customer"].(map[string]interface{})
+	if cust == nil || uint(cust["id"].(float64)) == victim.ID {
+		t.Fatal("guest login handed out an existing account recognised by MAC")
+	}
+
+	// A weak (device) session for the victim, from the victim's MAC or a new one.
+	weak, _ := middleware.GenerateDeviceCustomerToken(victim.ID)
+	for _, mac := range []string{victimMAC, "aa:bb:cc:dd:ee:66"} {
+		b, _ := json.Marshal(map[string]string{"mac": mac, "zone_id": zid})
+		req := httptest.NewRequest("POST", "/customer/reconnect", strings.NewReader(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+weak)
+		resp, err := app.Test(req, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 401 {
+			t.Errorf("weak session reconnect on %s: %d, want 401", mac, resp.StatusCode)
+		}
+	}
+	var tokens int64
+	config.DB.Model(&models.HotspotAccessToken{}).Count(&tokens)
+	if tokens != 0 {
+		t.Errorf("%d router-login tokens minted without proof", tokens)
 	}
 }
