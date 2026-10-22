@@ -11,15 +11,24 @@ import "time"
 // misattributing revenue to the wrong tenant (which is what defaulting to
 // "the first zone" used to do).
 type UnmatchedC2BPayment struct {
-	ID                       uint       `gorm:"primaryKey" json:"id"`
-	TransID                  string     `gorm:"size:255;uniqueIndex;not null" json:"trans_id"`
-	Phone                    string     `gorm:"size:20" json:"phone"`
-	Amount                   float64    `gorm:"type:decimal(10,2)" json:"amount"`
-	BillRefNumber            string     `gorm:"size:100" json:"bill_ref_number"`
-	BusinessShortCode        string     `gorm:"size:20" json:"business_short_code"`
-	FirstName                string     `gorm:"size:100" json:"first_name"`
-	LastName                 string     `gorm:"size:100" json:"last_name"`
-	Status                   string     `gorm:"size:20;default:pending" json:"status"` // pending | resolved
+	ID                uint    `gorm:"primaryKey" json:"id"`
+	TransID           string  `gorm:"size:255;uniqueIndex;not null" json:"trans_id"`
+	Phone             string  `gorm:"size:20" json:"phone"`
+	Amount            float64 `gorm:"type:decimal(10,2)" json:"amount"`
+	BillRefNumber     string  `gorm:"size:100" json:"bill_ref_number"`
+	BusinessShortCode string  `gorm:"size:20" json:"business_short_code"`
+	FirstName         string  `gorm:"size:100" json:"first_name"`
+	LastName          string  `gorm:"size:100" json:"last_name"`
+	Status            string  `gorm:"size:20;default:pending" json:"status"` // pending | resolved
+	// Verification says whether Safaricom has vouched for this payment:
+	// "verified" (callback token or Transaction Status query matched) or
+	// "unverified" (could not be checked, or the check didn't match — Note
+	// says why). Rows from before this existed are "" and count as
+	// unverified. Only verified payments may be self-claimed by a customer
+	// (PaymentVerifyCode); unverified ones need staff to check the M-Pesa
+	// statement first.
+	Verification             string     `gorm:"size:20" json:"verification"`
+	Note                     string     `gorm:"size:500" json:"note"`
 	ResolvedZoneID           *uint      `json:"resolved_zone_id"`
 	ResolvedCustomerID       *uint      `json:"resolved_customer_id"`
 	ResolvedPaymentID        *uint      `json:"resolved_payment_id"`

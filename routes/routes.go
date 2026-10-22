@@ -128,6 +128,10 @@ func Register(app *fiber.App) {
 	v1.Post("/payments/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/c2b/confirmation", handlers.MpesaC2BConfirmation)
+	// Safaricom's answer to our Transaction Status check of a tokenless
+	// paybill confirmation — guarded by the shared callback secret
+	v1.Post("/c2b/verify/result", handlers.MpesaC2BVerifyResult)
+	v1.Post("/c2b/verify/timeout", handlers.MpesaC2BVerifyTimeout)
 
 	// Backwards-compatible aliases
 	v1.Post("/mpesa/stkpush", payLimiter(60, time.Minute), payPhoneLimiter(5, time.Minute), handlers.MpesaStkPush)

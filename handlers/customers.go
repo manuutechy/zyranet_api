@@ -11,7 +11,9 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // parseCustomerDateTime attempts to parse user-provided date/time strings.
@@ -355,8 +357,12 @@ func CustomerSessions(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, sessions, "")
 }
 
-// CustomerAddCredit adjusts a customer's credit balance.
+// CustomerAddCredit adjusts a customer's credit balance. Credit is money, so
+// only the ISP's owner (super_admin) may mint or remove it by hand.
 func CustomerAddCredit(c *fiber.Ctx) error {
+	if claims := middleware.GetClaims(c); claims == nil || claims.Role != "super_admin" {
+		return utils.ErrorResponse(c, "Only the account owner can adjust credit balances.", "Forbidden.", fiber.StatusForbidden)
+	}
 	customer, err := findCustomerOrFail(c)
 	if err != nil {
 		return err
@@ -376,29 +382,40 @@ func CustomerAddCredit(c *fiber.Ctx) error {
 	if body.Type != "credit" && body.Type != "debit" {
 		return utils.ErrorResponse(c, "Type must be 'credit' or 'debit'.", "", fiber.StatusUnprocessableEntity)
 	}
-	if body.Type == "debit" && customer.CreditBalance < body.Amount {
+	// One atomic UPDATE (and the log row) in a transaction: concurrent
+	// adjustments can't overwrite each other, and a debit can't overdraw.
+	delta := body.Amount
+	if body.Type == "debit" {
+		delta = -body.Amount
+	}
+	claims := middleware.GetClaims(c)
+	errInsufficient := fmt.Errorf("insufficient")
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		ok, err := services.AdjustCredit(tx, customer.ID, delta)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errInsufficient
+		}
+		note := body.Note
+		return tx.Create(&models.CreditLog{
+			CustomerID: customer.ID,
+			Amount:     body.Amount,
+			Type:       body.Type,
+			Note:       &note,
+			AddedBy:    &claims.UserID,
+		}).Error
+	})
+	if err == errInsufficient {
 		return utils.ErrorResponse(c, "Insufficient credit balance for debit.", "", fiber.StatusUnprocessableEntity)
 	}
-
-	if body.Type == "credit" {
-		customer.CreditBalance += body.Amount
-	} else {
-		customer.CreditBalance -= body.Amount
+	if err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Failed to adjust credit.", fiber.StatusInternalServerError)
 	}
-	config.DB.Save(customer)
-
-	claims := middleware.GetClaims(c)
-	note := body.Note
-	config.DB.Create(&models.CreditLog{
-		CustomerID: customer.ID,
-		Amount:     body.Amount,
-		Type:       body.Type,
-		Note:       &note,
-		AddedBy:    &claims.UserID,
-	})
 
 	return utils.SuccessResponse(c, fiber.Map{
-		"credit_balance": customer.CreditBalance,
+		"credit_balance": services.CreditBalanceOf(config.DB, customer.ID),
 	}, "Credit "+body.Type+" applied successfully.")
 }
 
@@ -427,16 +444,35 @@ func CustomerCreditLogs(c *fiber.Ctx) error {
 
 // PurgeInactiveCustomers cleans up abandoned guest/voucher test accounts older than 7 days.
 // Genuine customers (even with expired plans) are retained so their accounts, history, and device sessions remain valid upon renewal.
+// The startup sweep covers every ISP; PurgeInactiveCustomersInZones limits it
+// to one ISP's zones.
 func PurgeInactiveCustomers() (int64, error) {
+	return purgeInactiveCustomers(nil, false)
+}
+
+// PurgeInactiveCustomersInZones is PurgeInactiveCustomers restricted to the
+// given zones (an ISP's own), so one ISP's admin can never delete another's
+// customers.
+func PurgeInactiveCustomersInZones(zoneIDs []uint) (int64, error) {
+	return purgeInactiveCustomers(zoneIDs, true)
+}
+
+func purgeInactiveCustomers(zoneIDs []uint, scoped bool) (int64, error) {
 	if config.DB == nil {
+		return 0, nil
+	}
+	if scoped && len(zoneIDs) == 0 {
 		return 0, nil
 	}
 	now := time.Now()
 	cutoff := now.Add(-7 * 24 * time.Hour)
 	var inactiveIDs []uint
-	err := config.DB.Model(&models.Customer{}).
-		Where("(phone LIKE 'GUEST%' OR phone LIKE 'VCHR%' OR account_number LIKE 'ZYR#GUEST%' OR account_number LIKE 'ZYR#VCHR%') AND status != 'active' AND created_at < ?", cutoff).
-		Pluck("id", &inactiveIDs).Error
+	q := config.DB.Model(&models.Customer{}).
+		Where("(phone LIKE 'GUEST%' OR phone LIKE 'VCHR%' OR account_number LIKE 'ZYR#GUEST%' OR account_number LIKE 'ZYR#VCHR%') AND status != 'active' AND created_at < ?", cutoff)
+	if scoped {
+		q = q.Where("zone_id IN ?", zoneIDs)
+	}
+	err := q.Pluck("id", &inactiveIDs).Error
 	if err != nil {
 		log.Printf("[PurgeInactiveCustomers] Error querying inactive customers: %v", err)
 		return 0, err
@@ -462,9 +498,17 @@ func PurgeInactiveCustomers() (int64, error) {
 	return int64(len(inactiveIDs)), nil
 }
 
-// CustomerCleanupInactive is an HTTP endpoint for super_admins to purge all inactive customer records.
+// CustomerCleanupInactive lets an ISP's owner (super_admin) purge their own
+// abandoned guest/voucher accounts — never another ISP's.
 func CustomerCleanupInactive(c *fiber.Ctx) error {
-	deleted, err := PurgeInactiveCustomers()
+	if claims := middleware.GetClaims(c); claims == nil || claims.Role != "super_admin" {
+		return utils.ErrorResponse(c, "Only the account owner can clean up customers.", "Forbidden.", fiber.StatusForbidden)
+	}
+	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	if err != nil {
+		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
+	}
+	deleted, err := PurgeInactiveCustomersInZones(orgZoneIDs)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to purge inactive customers: "+err.Error(), "", fiber.StatusInternalServerError)
 	}

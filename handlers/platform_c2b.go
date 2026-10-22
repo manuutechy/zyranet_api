@@ -1,14 +1,18 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // PlatformC2BUnmatchedIndex lists C2B payments Safaricom confirmed on the
@@ -74,63 +78,83 @@ func PlatformC2BUnmatchedResolve(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusUnprocessableEntity)
 	}
 
-	var packageID *uint
+	var customer *models.Customer
 	if body.CustomerID != nil {
-		var customer models.Customer
-		if err := config.DB.Where("zone_id = ?", zone.ID).First(&customer, *body.CustomerID).Error; err != nil {
+		var cst models.Customer
+		if err := config.DB.Where("zone_id = ?", zone.ID).First(&cst, *body.CustomerID).Error; err != nil {
 			return utils.ErrorResponse(c, "Customer not found in that zone.", "", fiber.StatusUnprocessableEntity)
 		}
-
-		customer.CreditBalance += unmatched.Amount
-		config.DB.Model(&customer).Update("credit_balance", customer.CreditBalance)
-
-		// AddedBy is left nil rather than set to claims.PlatformUserID: it's a
-		// foreign key into `users` (ISP staff), and platform staff have no
-		// row there — the platform user ID is recorded in the note instead.
-		noteStr := fmt.Sprintf("M-Pesa C2B Paybill %s (manually reconciled by platform staff #%d)", unmatched.TransID, claims.PlatformUserID)
-		config.DB.Create(&models.CreditLog{
-			CustomerID: customer.ID,
-			Amount:     unmatched.Amount,
-			Type:       "credit",
-			Note:       &noteStr,
-		})
-
-		if customer.PackageID > 0 {
-			packageID = &customer.PackageID
-		}
-
-		if smsSvcGlobal != nil && customer.Phone != "" {
-			msg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", unmatched.Amount, unmatched.TransID, customer.CreditBalance)
-			go smsSvcGlobal.Send(zone.OrganizationID, customer.Phone, msg)
-		}
+		customer = &cst
 	}
 
-	transIDStr := unmatched.TransID
-	payment := models.Payment{
-		CustomerID:         body.CustomerID,
-		ZoneID:             zone.ID,
-		PackageID:          packageID,
-		Phone:              unmatched.Phone,
-		Amount:             unmatched.Amount,
-		Currency:           "KES",
-		Method:             "mpesa_c2b",
-		Status:             "completed",
-		MpesaReceiptNumber: &transIDStr,
-		MpesaTransactionID: &transIDStr,
+	var payment models.Payment
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		// Claim it first: a double-click or two staff at once resolve it once.
+		claim := tx.Model(&models.UnmatchedC2BPayment{}).
+			Where("id = ? AND status = ?", unmatched.ID, "pending").
+			Updates(map[string]interface{}{"status": "resolved", "resolved_at": time.Now()})
+		if claim.Error != nil {
+			return claim.Error
+		}
+		if claim.RowsAffected == 0 {
+			return errAlreadyResolved
+		}
+
+		var packageID *uint
+		if customer != nil {
+			if _, err := services.AdjustCredit(tx, customer.ID, unmatched.Amount); err != nil {
+				return err
+			}
+			// AddedBy is left nil rather than set to claims.PlatformUserID: it's a
+			// foreign key into `users` (ISP staff), and platform staff have no
+			// row there — the platform user ID is recorded in the note instead.
+			noteStr := fmt.Sprintf("M-Pesa C2B Paybill %s (manually reconciled by platform staff #%d)", unmatched.TransID, claims.PlatformUserID)
+			if err := tx.Create(&models.CreditLog{CustomerID: customer.ID, Amount: unmatched.Amount, Type: "credit", Note: &noteStr}).Error; err != nil {
+				return err
+			}
+			if customer.PackageID > 0 {
+				packageID = &customer.PackageID
+			}
+		}
+
+		transIDStr := unmatched.TransID
+		payment = models.Payment{
+			CustomerID:         body.CustomerID,
+			ZoneID:             zone.ID,
+			PackageID:          packageID,
+			Phone:              unmatched.Phone,
+			Amount:             unmatched.Amount,
+			Currency:           "KES",
+			Method:             "mpesa_c2b",
+			Status:             "completed",
+			MpesaReceiptNumber: &transIDStr,
+			MpesaTransactionID: &transIDStr,
+		}
+		if err := tx.Create(&payment).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.UnmatchedC2BPayment{}).Where("id = ?", unmatched.ID).Updates(map[string]interface{}{
+			"resolved_zone_id":             zone.ID,
+			"resolved_customer_id":         body.CustomerID,
+			"resolved_payment_id":          payment.ID,
+			"resolved_by_platform_user_id": claims.PlatformUserID,
+		}).Error
+	})
+	if err == errAlreadyResolved {
+		return utils.ErrorResponse(c, "This payment has already been resolved.", "", fiber.StatusConflict)
 	}
-	if err := config.DB.Create(&payment).Error; err != nil {
+	if err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to record payment.", fiber.StatusInternalServerError)
 	}
+	log.Printf("[C2B] %s (KES %.2f, verification=%q) resolved by platform user %d to zone %d customer %v",
+		unmatched.TransID, unmatched.Amount, unmatched.Verification, claims.PlatformUserID, zone.ID, body.CustomerID)
 
-	now := time.Now()
-	config.DB.Model(&unmatched).Updates(map[string]interface{}{
-		"status":                       "resolved",
-		"resolved_zone_id":             zone.ID,
-		"resolved_customer_id":         body.CustomerID,
-		"resolved_payment_id":          payment.ID,
-		"resolved_by_platform_user_id": claims.PlatformUserID,
-		"resolved_at":                  now,
-	})
+	if customer != nil && smsSvcGlobal != nil && customer.Phone != "" {
+		msg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", unmatched.Amount, unmatched.TransID, services.CreditBalanceOf(config.DB, customer.ID))
+		go smsSvcGlobal.Send(zone.OrganizationID, customer.Phone, msg)
+	}
 
 	return utils.SuccessResponse(c, payment, "Payment reconciled successfully.")
 }
+
+var errAlreadyResolved = errors.New("already resolved")

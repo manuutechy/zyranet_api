@@ -35,10 +35,11 @@ type AppConfig struct {
 	MpesaPasskey        string
 	MpesaCallbackURL    string
 	MpesaEnv            string
-	// MpesaCallbackSecret, when set, must be supplied as a `?token=` query
-	// parameter on inbound STK callback / C2B validation / C2B confirmation
-	// requests (see handlers/mpesa.go mpesaCallbackAuthorized). Append it to
-	// the CallBackURL/ValidationURL/ConfirmationURL you register with Daraja.
+	// MpesaCallbackSecret must be supplied as a `?token=` query parameter on
+	// inbound STK callbacks and B2B/transaction-status results (see
+	// handlers/mpesa.go mpesaCallbackAuthorized). STK pushes append it to
+	// their CallBackURL automatically. Required outside local/test — the
+	// server refuses to start without it (see CallbackSecretProblem).
 	MpesaCallbackSecret string
 
 	// MikroTik router connection safety toggles — see services/mikrotik.go.
@@ -184,6 +185,33 @@ func Load() {
 
 	fmt.Printf("[config] Loaded — env=%s port=%s db=%s@%s/%s\n",
 		Config.AppEnv, Config.AppPort, Config.DBUser, Config.DBHost, Config.DBName)
+}
+
+// IsDevEnv reports whether APP_ENV names a local/test setup. Anything else —
+// including a typo'd or blank value — is treated as a real deployment.
+func IsDevEnv(appEnv string) bool {
+	switch strings.ToLower(strings.TrimSpace(appEnv)) {
+	case "local", "test", "testing", "development", "dev":
+		return true
+	}
+	return false
+}
+
+// CallbackSecretProblem returns why MPESA_CALLBACK_SECRET is unusable on a
+// deployed server, or "" when it's fine. Without the secret anyone who knows
+// the callback URL can POST a forged "payment succeeded" and get WiFi for
+// free, so main refuses to start rather than run with the door open.
+func CallbackSecretProblem(c AppConfig) string {
+	if IsDevEnv(c.AppEnv) {
+		return ""
+	}
+	if strings.TrimSpace(c.MpesaCallbackSecret) == "" {
+		return "MPESA_CALLBACK_SECRET is not set"
+	}
+	if len(c.MpesaCallbackSecret) < 16 {
+		return "MPESA_CALLBACK_SECRET is shorter than 16 characters"
+	}
+	return ""
 }
 
 // allowedOrigins returns the CORS allow-list. Real production traffic should

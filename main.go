@@ -23,6 +23,9 @@ import (
 func main() {
 	// Load configuration and connect database
 	config.Load()
+	if problem := config.CallbackSecretProblem(config.Config); problem != "" {
+		log.Fatalf("[config] %s — refusing to start: M-Pesa callbacks would accept forged payments. Set a long random MPESA_CALLBACK_SECRET (openssl rand -hex 32); STK pushes add it to their callback URL automatically.", problem)
+	}
 	middleware.InitSentry()
 	defer middleware.FlushSentry()
 	config.ConnectDatabase()
@@ -57,6 +60,8 @@ func main() {
 		&models.ZoneAlert{},
 		&models.ZoneStat{},
 		&models.OtpCode{},
+		&models.C2BTransaction{},
+		&models.PendingRouterAction{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
@@ -248,6 +253,12 @@ func main() {
 	// RADIUS are touched; a no-op until FreeRADIUS is installed).
 	radiusSvc.Start()
 	defer radiusSvc.Stop()
+
+	// Resolve STK pushes whose callback never came, retry router updates owed
+	// to paying customers, and park paybill payments whose check never returned.
+	moneyJobs := services.NewMoneyJobs(mpesaSvc)
+	moneyJobs.Start()
+	defer moneyJobs.Stop()
 
 	// Start Automated Subscriber Expiry SMS Reminders
 	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())

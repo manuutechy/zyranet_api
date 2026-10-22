@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var mpesaSvcGlobal *services.MpesaService
@@ -46,6 +49,24 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	var pkg models.Package
 	if err := config.DB.First(&pkg, body.PackageID).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
+	}
+
+	// TODO(router-access branch): refuse checkout while the zone's router is
+	// offline, once services.ZoneAcceptingPayments lands:
+	//   if ok, why := services.ZoneAcceptingPayments(pkg.ZoneID); !ok { return utils.ErrorResponse(c, why, "", fiber.StatusServiceUnavailable) }
+
+	// One prompt at a time per phone: a second tap within 90s (same phone, or
+	// same device on the same zone) gets the prompt already on their phone
+	// instead of a new one — two prompts risk paying twice.
+	unlock := mpesaSvcGlobal.LockSTKPhone(body.Phone)
+	defer unlock()
+	if existing, ok := services.RecentPendingSTK(body.Phone, body.Mac, pkg.ZoneID, 90*time.Second); ok {
+		return utils.SuccessResponse(c, fiber.Map{
+			"payment_id":     existing.ID,
+			"transaction_id": *existing.MpesaTransactionID,
+			"message":        "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying.",
+			"reused":         true,
+		}, "STK Push already in progress.")
 	}
 
 	// This endpoint is intentionally public — it also serves the anonymous
@@ -98,15 +119,17 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		config.DB.Model(&models.Customer{}).Where("id = ?", *body.CustomerID).Update("name", trimmedName)
 	}
 
-	var voucherID *uint = body.VoucherID
-
-	// Auto-generate voucher if neither customer nor voucher specified
-	if body.CustomerID == nil && body.VoucherID == nil {
-		voucher, err := voucherSvcGlobal.Generate(pkg.ZoneID, pkg.ID, "single_use", 1)
-		if err != nil {
-			return utils.ErrorResponse(c, err.Error(), "Failed to prepare voucher.", fiber.StatusBadRequest)
+	// No voucher is made here any more: an anonymous purchase gets its
+	// voucher in ProcessPaymentSuccess, once the money has actually arrived,
+	// so abandoned/failed pushes don't leave redeemable codes behind. A
+	// client-supplied voucher is only accepted for this exact zone + package
+	// (success re-enables it, so any other voucher would be a free reset).
+	var voucherID *uint
+	if body.VoucherID != nil {
+		var v models.Voucher
+		if err := config.DB.Where("zone_id = ? AND package_id = ?", pkg.ZoneID, pkg.ID).First(&v, *body.VoucherID).Error; err == nil {
+			voucherID = &v.ID
 		}
-		voucherID = &voucher.ID
 	}
 
 	// Create pending payment
@@ -171,7 +194,7 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	return utils.ErrorResponse(c, reason, "", fiber.StatusBadRequest)
 }
 
-// mpesaCallbackAuthorized guards the public Daraja callback/C2B endpoints.
+// mpesaCallbackAuthorized guards the public Daraja callback endpoints.
 //
 // These routes must stay unauthenticated (Safaricom calls them directly,
 // with no way for us to hand it a JWT), but that also means anyone who
@@ -183,21 +206,25 @@ func MpesaStkPush(c *fiber.Ctx) error {
 // that STK push from replaying/forging their own "it succeeded" callback
 // before actually paying.
 //
-// The simplest robust fix that doesn't require IP allowlisting (Safaricom's
-// published callback IP ranges change and aren't guaranteed stable, and
-// Railway/most PaaS deployments sit behind a proxy that complicates trusting
-// c.IP() anyway) is a shared secret embedded in the callback URL itself:
-// operators append `?token=<MPESA_CALLBACK_SECRET>` to the CallBackURL /
-// ValidationURL / ConfirmationURL they register with Daraja. That token is
-// never returned to the payer in any API response, so it can't be derived
-// from the STK-push flow the way CheckoutRequestID can.
+// The fix is a shared secret embedded in the callback URL itself:
+// InitiateSTKPush appends `?token=<MPESA_CALLBACK_SECRET>` to every
+// CallBackURL it hands Daraja, and B2B/transaction-status results carry it
+// too. That token is never returned to the payer, so it can't be derived from
+// the STK-push flow the way CheckoutRequestID can. With no secret configured
+// everything is rejected (and the server refuses to start outside local/test —
+// see config.CallbackSecretProblem).
+//
+// C2B paybill confirmations are the exception: the live paybill's URLs were
+// registered with Safaricom without a token, so a confirmation is accepted
+// either way and, without the token, verified with Safaricom before anything
+// is credited (see MpesaC2BConfirmation).
 func mpesaCallbackAuthorized(c *fiber.Ctx) bool {
 	secret := config.Config.MpesaCallbackSecret
 	if secret == "" {
-		log.Printf("[M-Pesa] WARNING: MPESA_CALLBACK_SECRET is not set — callback/C2B endpoints accept requests from anyone. Set MPESA_CALLBACK_SECRET and append ?token=<secret> to your Daraja CallBackURL/ValidationURL/ConfirmationURL.")
-		return true
+		log.Printf("[M-Pesa] MPESA_CALLBACK_SECRET is not set — rejecting unauthenticated callback on %s", c.Path())
+		return false
 	}
-	return c.Query("token") == secret
+	return subtle.ConstantTimeCompare([]byte(c.Query("token")), []byte(secret)) == 1
 }
 
 // MpesaCallback handles the async Daraja payment notification (PUBLIC, but
@@ -223,13 +250,11 @@ func MpesaCallback(c *fiber.Ctx) error {
 }
 
 // MpesaC2BValidation handles M-Pesa C2B Paybill validation requests from
-// Safaricom (PUBLIC, but see mpesaCallbackAuthorized).
+// Safaricom (PUBLIC). It always accepts: validation moves no money (crediting
+// happens only on confirmation, after verification), and rejecting a
+// tokenless request here would make Safaricom decline real customers'
+// payments on the live paybill, whose URLs carry no token.
 func MpesaC2BValidation(c *fiber.Ctx) error {
-	if !mpesaCallbackAuthorized(c) {
-		log.Printf("[C2B Validation] Rejected request with missing/invalid token from %s", c.IP())
-		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Rejected"})
-	}
-
 	var body struct {
 		TransactionType   string  `json:"TransactionType"`
 		TransID           string  `json:"TransID"`
@@ -251,191 +276,352 @@ func MpesaC2BValidation(c *fiber.Ctx) error {
 	})
 }
 
-// MpesaC2BConfirmation handles M-Pesa C2B Paybill confirmation notifications
-// from Safaricom (PUBLIC, but see mpesaCallbackAuthorized). This endpoint
-// credits customer.CreditBalance directly off unauthenticated POST body
-// fields, so the shared-secret check is the only thing standing between a
-// forged request and free credit — there is no equivalent of the
-// "matching pending Payment row" check MpesaCallback has, since a C2B
-// payment isn't tied to a payment we initiated.
-func MpesaC2BConfirmation(c *fiber.Ctx) error {
-	if !mpesaCallbackAuthorized(c) {
-		log.Printf("[C2B Confirmation] Rejected request with missing/invalid token from %s", c.IP())
-		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Rejected"})
-	}
+// c2bConfirmation is the body Safaricom POSTs to the confirmation URL.
+type c2bConfirmation struct {
+	TransactionType   string  `json:"TransactionType"`
+	TransID           string  `json:"TransID"`
+	TransTime         string  `json:"TransTime"`
+	TransAmount       float64 `json:"TransAmount,string"`
+	BusinessShortCode string  `json:"BusinessShortCode"`
+	BillRefNumber     string  `json:"BillRefNumber"`
+	MSISDN            string  `json:"MSISDN"`
+	FirstName         string  `json:"FirstName"`
+	MiddleName        string  `json:"MiddleName"`
+	LastName          string  `json:"LastName"`
+}
 
-	var body struct {
-		TransactionType   string  `json:"TransactionType"`
-		TransID           string  `json:"TransID"`
-		TransTime         string  `json:"TransTime"`
-		TransAmount       float64 `json:"TransAmount,string"`
-		BusinessShortCode string  `json:"BusinessShortCode"`
-		BillRefNumber     string  `json:"BillRefNumber"`
-		MSISDN            string  `json:"MSISDN"`
-		FirstName         string  `json:"FirstName"`
-		MiddleName        string  `json:"MiddleName"`
-		LastName          string  `json:"LastName"`
-	}
+// c2bVerifyAsync runs the Safaricom status check in the background so the
+// confirmation is acknowledged quickly. Tests turn it off.
+var c2bVerifyAsync = true
+
+// MpesaC2BConfirmation handles M-Pesa C2B Paybill confirmation notifications
+// from Safaricom (PUBLIC).
+//
+// Nothing here is credited on the request's word alone:
+//
+//   - Every TransID is first claimed in the c2b_transactions ledger (unique
+//     key), so a re-delivered or replayed confirmation is a no-op — even two
+//     racing deliveries can't both credit.
+//   - With a valid ?token= (URLs registered with the secret) the request is
+//     trusted like an STK callback and credited at once.
+//   - Without it (the live paybill's URLs carry no token) Safaricom is asked
+//     for its own record of the TransID (Transaction Status) and the money is
+//     credited only when that answer matches — see MpesaC2BVerifyResult. If
+//     the check can't be made, the payment is parked in unmatched_c2b_payments
+//     for staff to confirm against the M-Pesa statement.
+func MpesaC2BConfirmation(c *fiber.Ctx) error {
+	ack := func() error { return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Success"}) }
+
+	var body c2bConfirmation
 	if err := c.BodyParser(&body); err != nil {
 		log.Printf("[C2B Confirmation] Failed to parse payload: %v", err)
 		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Received"})
 	}
 
-	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s",
-		body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN, body.FirstName, body.MiddleName, body.LastName)
+	tokenOK := mpesaCallbackAuthorized(c)
+	log.Printf("[C2B Confirmation] TransID: %s | Amount: KES %.2f | Account: %s | Phone: %s | Name: %s %s %s | token=%v",
+		body.TransID, body.TransAmount, body.BillRefNumber, body.MSISDN, body.FirstName, body.MiddleName, body.LastName, tokenOK)
 
 	transIDStr := strings.TrimSpace(body.TransID)
-	if transIDStr != "" && c2bAlreadyRecorded(transIDStr) {
+	if transIDStr == "" || body.TransAmount <= 0 {
+		log.Printf("[C2B Confirmation] Ignoring confirmation without a TransID/amount")
+		return ack()
+	}
+	// Transactions recorded before the ledger existed.
+	if c2bAlreadyRecorded(transIDStr) {
 		log.Printf("[C2B Confirmation] TransID %s already recorded — ignoring duplicate delivery", transIDStr)
-		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Success"})
+		return ack()
 	}
 
-	cleanPhone := utils.FormatPhone(body.MSISDN)
+	ledger := models.C2BTransaction{
+		TransID:           transIDStr,
+		TransTime:         body.TransTime,
+		Amount:            body.TransAmount,
+		BusinessShortCode: strings.TrimSpace(body.BusinessShortCode),
+		BillRefNumber:     body.BillRefNumber,
+		MSISDN:            body.MSISDN,
+		FirstName:         body.FirstName,
+		MiddleName:        body.MiddleName,
+		LastName:          body.LastName,
+		Status:            "received",
+	}
+	res := config.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&ledger)
+	if res.Error != nil {
+		// Not acknowledging makes Safaricom retry later, rather than losing it.
+		log.Printf("[C2B Confirmation] Could not record TransID %s: %v", transIDStr, res.Error)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Try again"})
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("[C2B Confirmation] TransID %s already received — ignoring duplicate delivery", transIDStr)
+		return ack()
+	}
 
-	// Format Title Case Name from C2B payload
-	nameParts := []string{}
-	if body.FirstName != "" {
-		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.FirstName))))
+	if tokenOK {
+		ledger.Verification = "token"
+		creditC2B(&ledger)
+		return ack()
 	}
-	if body.MiddleName != "" {
-		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.MiddleName))))
+
+	if c2bVerifyAsync {
+		go startC2BVerification(ledger)
+	} else {
+		startC2BVerification(ledger)
 	}
-	if body.LastName != "" {
-		nameParts = append(nameParts, strings.Title(strings.ToLower(strings.TrimSpace(body.LastName))))
+	return ack()
+}
+
+// startC2BVerification asks Safaricom to confirm a tokenless confirmation, or
+// parks it for manual review when that can't be done.
+func startC2BVerification(l models.C2BTransaction) {
+	if mpesaSvcGlobal == nil {
+		services.ParkC2B(&l, "Not verified: the M-Pesa service is not available")
+		return
 	}
-	payerName := strings.Join(nameParts, " ")
+	convID, err := mpesaSvcGlobal.RequestC2BVerification(l.TransID, l.BusinessShortCode)
+	if err != nil {
+		services.ParkC2B(&l, "Not verified with Safaricom ("+err.Error()+") — check the M-Pesa statement before crediting")
+		return
+	}
+	config.DB.Model(&models.C2BTransaction{}).
+		Where("id = ? AND status = ?", l.ID, "received").
+		Updates(map[string]interface{}{"status": "verifying", "verify_conversation_id": convID})
+	log.Printf("[C2B] %s sent to Safaricom for verification (conversation %s)", l.TransID, convID)
+}
+
+// MpesaC2BVerifyResult receives Safaricom's Transaction Status answer for a
+// tokenless paybill confirmation (PUBLIC, token required — we built this URL
+// ourselves, with the secret). A match credits exactly as a trusted
+// confirmation would; anything else parks the payment for staff.
+func MpesaC2BVerifyResult(c *fiber.Ctx) error {
+	if !mpesaCallbackAuthorized(c) {
+		log.Printf("[C2B Verify] Rejected result with missing/invalid token from %s", c.IP())
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Unauthorized"})
+	}
+	var payload map[string]interface{}
+	if err := c.BodyParser(&payload); err != nil {
+		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Parse error"})
+	}
+	result, err := services.ParseTransactionStatusResult(payload)
+	if err != nil || result.OriginatorConversationID == "" {
+		log.Printf("[C2B Verify] Unusable result: %v", err)
+		return c.JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Invalid result"})
+	}
+
+	var ledger models.C2BTransaction
+	if err := config.DB.Where("verify_conversation_id = ? AND status = ?", result.OriginatorConversationID, "verifying").
+		First(&ledger).Error; err != nil {
+		log.Printf("[C2B Verify] No confirmation awaiting conversation %s (duplicate or unknown)", result.OriginatorConversationID)
+		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Accepted"})
+	}
+
+	if ok, why := result.Matches(&ledger); !ok {
+		services.ParkC2B(&ledger, "Safaricom's record did not match the confirmation: "+why)
+		return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Accepted"})
+	}
+	ledger.Verification = "status_query"
+	creditC2B(&ledger)
+	return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Accepted"})
+}
+
+// MpesaC2BVerifyTimeout is Safaricom saying the status check timed out in its
+// queue. The payment is parked for manual review.
+func MpesaC2BVerifyTimeout(c *fiber.Ctx) error {
+	if !mpesaCallbackAuthorized(c) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"ResultCode": 1, "ResultDesc": "Unauthorized"})
+	}
+	var payload map[string]interface{}
+	_ = c.BodyParser(&payload)
+	result, _ := payload["Result"].(map[string]interface{})
+	conv, _ := result["OriginatorConversationID"].(string)
+	var ledger models.C2BTransaction
+	if conv != "" && config.DB.Where("verify_conversation_id = ? AND status = ?", conv, "verifying").First(&ledger).Error == nil {
+		services.ParkC2B(&ledger, "Safaricom's status check timed out — check the M-Pesa statement before crediting")
+	}
+	return c.JSON(fiber.Map{"ResultCode": 0, "ResultDesc": "Accepted"})
+}
+
+// c2bPayerName builds "Jane Wanjiku Doe" from the confirmation's name parts.
+func c2bPayerName(l *models.C2BTransaction) string {
+	var parts []string
+	for _, p := range []string{l.FirstName, l.MiddleName, l.LastName} {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, strings.Title(strings.ToLower(p)))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// creditC2B applies a paybill payment that is proven genuine (callback token
+// or Safaricom's own status check). The ledger row is moved to "credited" in
+// the same transaction as the balance change, so it happens at most once.
+func creditC2B(l *models.C2BTransaction) {
+	cleanPhone := utils.FormatPhone(l.MSISDN)
+	payerName := c2bPayerName(l)
 
 	// Which ISP does this payment belong to? A payment to an ISP's own
 	// shortcode is that ISP's, so only their customers can match. On the
 	// shared platform paybill any ISP's customer could, so a match there must
 	// be unique — otherwise it's queued for manual reconciliation.
-	orgID, scoped := services.OrgForShortcode(body.BusinessShortCode)
+	orgID, scoped := services.OrgForShortcode(l.BusinessShortCode)
 
-	var customer models.Customer
-	foundCustomer := false
-	matched, ambiguous := matchC2BCustomer(orgID, scoped, body.BillRefNumber, body.MSISDN)
+	var customer *models.Customer
+	matched, ambiguous := matchC2BCustomer(orgID, scoped, l.BillRefNumber, l.MSISDN)
 	if matched != nil {
-		customer = *matched
-		foundCustomer = true
+		customer = matched
 	} else if !ambiguous && scoped {
-		if created, ok := autoCreateC2BCustomer(orgID, cleanPhone, payerName, body.TransAmount); ok {
-			customer = *created
-			foundCustomer = true
+		if created, ok := autoCreateC2BCustomer(orgID, cleanPhone, payerName, l.Amount); ok {
+			customer = created
 		}
 	}
 
-	if !foundCustomer {
-		unmatched := models.UnmatchedC2BPayment{
-			TransID:           transIDStr,
-			Phone:             cleanPhone,
-			Amount:            body.TransAmount,
-			BillRefNumber:     body.BillRefNumber,
-			BusinessShortCode: body.BusinessShortCode,
-			FirstName:         body.FirstName,
-			LastName:          strings.TrimSpace(body.MiddleName + " " + body.LastName),
-			Status:            "pending",
-		}
-		if err := config.DB.Create(&unmatched).Error; err != nil {
-			log.Printf("[C2B Confirmation] Failed to queue unmatched payment %s: %v", transIDStr, err)
-		}
-		return c.JSON(fiber.Map{
-			"ResultCode": 0,
-			"ResultDesc": "Success",
+	claim := func(tx *gorm.DB) (bool, error) {
+		res := tx.Model(&models.C2BTransaction{}).
+			Where("id = ? AND status IN ?", l.ID, []string{"received", "verifying"}).
+			Updates(map[string]interface{}{"status": "credited", "verification": l.Verification})
+		return res.RowsAffected == 1, res.Error
+	}
+
+	if customer == nil {
+		// Genuine money we can't place: queue it (as verified) for staff.
+		err := config.DB.Transaction(func(tx *gorm.DB) error {
+			if ok, err := claim(tx); err != nil || !ok {
+				return err
+			}
+			return tx.Create(&models.UnmatchedC2BPayment{
+				TransID:           l.TransID,
+				Phone:             cleanPhone,
+				Amount:            l.Amount,
+				BillRefNumber:     l.BillRefNumber,
+				BusinessShortCode: l.BusinessShortCode,
+				FirstName:         l.FirstName,
+				LastName:          strings.TrimSpace(l.MiddleName + " " + l.LastName),
+				Status:            "pending",
+				Verification:      "verified",
+				Note:              "Verified by " + l.Verification + "; no unique customer match",
+			}).Error
 		})
+		if err != nil {
+			log.Printf("[C2B Confirmation] Failed to queue unmatched payment %s: %v", l.TransID, err)
+		}
+		return
 	}
-
-	customerID := &customer.ID
-	zoneID := customer.ZoneID
-	pkgID := customer.PackageID
-	packageID := &pkgID
 
 	// Always update customer name from official M-Pesa C2B legal names
 	if payerName != "" {
 		customer.Name = payerName
-		config.DB.Model(&customer).Update("name", payerName)
+		config.DB.Model(customer).Update("name", payerName)
 	}
 
-	{
-		customer.CreditBalance += body.TransAmount
-		config.DB.Model(&customer).Update("credit_balance", customer.CreditBalance)
-
-		noteStr := fmt.Sprintf("M-Pesa C2B Paybill %s", body.TransID)
-		config.DB.Create(&models.CreditLog{
-			CustomerID: customer.ID,
-			Amount:     body.TransAmount,
-			Type:       "credit",
-			Note:       &noteStr,
-		})
-
-		var pkg models.Package
-		// 1. Try to find a package in this zone matching the exact transaction amount (e.g. KES 5)
-		if err := config.DB.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, body.TransAmount).First(&pkg).Error; err != nil {
-			// 2. Otherwise try matching against customer's assigned PackageID
-			config.DB.First(&pkg, customer.PackageID)
+	var (
+		pkg     models.Package
+		renewed bool
+		payment models.Payment
+		done    bool
+		via     = c2bCollectionChannel(scoped) // reads settings: keep it out of the transaction
+	)
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		ok, err := claim(tx)
+		if err != nil || !ok {
+			return err
+		}
+		if _, err := services.AdjustCredit(tx, customer.ID, l.Amount); err != nil {
+			return err
+		}
+		noteStr := fmt.Sprintf("M-Pesa C2B Paybill %s", l.TransID)
+		if err := tx.Create(&models.CreditLog{CustomerID: customer.ID, Amount: l.Amount, Type: "credit", Note: &noteStr}).Error; err != nil {
+			return err
 		}
 
-		if pkg.ID > 0 && customer.CreditBalance >= pkg.Price {
-			customer.PackageID = pkg.ID
-			customer.CreditBalance -= pkg.Price
-			durationMinutes := 30 * 24 * 60
-			if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
-				durationMinutes = *pkg.TimeLimitMinutes
-			} else if pkg.BillingCycle == "hourly" {
-				durationMinutes = 60
-			} else if pkg.BillingCycle == "daily" {
-				durationMinutes = 24 * 60
-			} else if pkg.BillingCycle == "weekly" {
-				durationMinutes = 7 * 24 * 60
+		// 1. A package in this zone priced exactly at the amount paid (e.g.
+		// KES 5), 2. otherwise the customer's assigned package.
+		if err := tx.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, l.Amount).First(&pkg).Error; err != nil {
+			tx.First(&pkg, customer.PackageID)
+		}
+		if pkg.ID > 0 && pkg.Price > 0 {
+			// Debit only if the balance (read by the database, not from a
+			// stale copy) covers it.
+			paid, err := services.AdjustCredit(tx, customer.ID, -pkg.Price)
+			if err != nil {
+				return err
 			}
-
-			newExpiry := time.Now().Add(time.Duration(durationMinutes) * time.Minute)
-			if customer.ExpiresAt != nil && customer.ExpiresAt.After(time.Now()) {
-				newExpiry = customer.ExpiresAt.Add(time.Duration(durationMinutes) * time.Minute)
-			}
-			config.DB.Model(&customer).Updates(map[string]interface{}{
-				"package_id":     pkg.ID,
-				"credit_balance": customer.CreditBalance,
-				"expires_at":     newExpiry,
-				"status":         "active",
-			})
-
-			// Instant MikroTik Auto-Reconnect Push (unblocks PPPoE secret or Hotspot MAC)
-			if mikrotikSvcGlobal != nil && customer.ZoneID > 0 {
-				var zone models.Zone
-				if err := config.DB.First(&zone, customer.ZoneID).Error; err == nil {
-					customer.Package = &pkg
-					go mikrotikSvcGlobal.ReactivateCustomer(&zone, &customer)
+			if paid {
+				var fresh models.Customer
+				tx.Select("id", "expires_at").First(&fresh, customer.ID)
+				newExpiry := c2bNewExpiry(&pkg, fresh.ExpiresAt)
+				if err := tx.Model(&models.Customer{}).Where("id = ?", customer.ID).Updates(map[string]interface{}{
+					"package_id": pkg.ID,
+					"expires_at": newExpiry,
+					"status":     "active",
+				}).Error; err != nil {
+					return err
 				}
+				renewed = true
 			}
 		}
 
-		if smsSvcGlobal != nil && customer.Phone != "" {
-			smsMsg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", body.TransAmount, body.TransID, customer.CreditBalance)
-			go smsSvcGlobal.SendForZone(customer.ZoneID, customer.Phone, smsMsg)
+		packageID := customer.PackageID
+		if renewed {
+			packageID = pkg.ID
 		}
+		transID := l.TransID
+		payment = models.Payment{
+			CustomerID:         &customer.ID,
+			ZoneID:             customer.ZoneID,
+			PackageID:          &packageID,
+			Phone:              cleanPhone,
+			Amount:             l.Amount,
+			Currency:           "KES",
+			Method:             "mpesa_c2b",
+			Status:             "completed",
+			MpesaReceiptNumber: &transID,
+			MpesaTransactionID: &transID,
+			CollectedVia:       via,
+		}
+		if err := tx.Create(&payment).Error; err != nil {
+			return err
+		}
+		done = true
+		return tx.Model(&models.C2BTransaction{}).Where("id = ?", l.ID).Update("payment_id", payment.ID).Error
+	})
+	if err != nil {
+		log.Printf("[C2B Confirmation] NOT CREDITED %s (KES %.2f) for customer %d: %v", l.TransID, l.Amount, customer.ID, err)
+		return
+	}
+	if !done {
+		return // another delivery got there first
 	}
 
-	payment := models.Payment{
-		CustomerID:         customerID,
-		ZoneID:             zoneID,
-		PackageID:          packageID,
-		Phone:              cleanPhone,
-		Amount:             body.TransAmount,
-		Currency:           "KES",
-		Method:             "mpesa_c2b",
-		Status:             "completed",
-		MpesaReceiptNumber: &transIDStr,
-		MpesaTransactionID: &transIDStr,
-		CollectedVia:       c2bCollectionChannel(scoped),
+	if renewed && mpesaSvcGlobal != nil && customer.ZoneID > 0 {
+		// Unblock the PPPoE secret / hotspot MAC — persisted and retried.
+		cid := customer.ID
+		mpesaSvcGlobal.EnqueueRouterAction(models.PendingRouterAction{
+			ZoneID: customer.ZoneID, PaymentID: &payment.ID, Action: services.RouterActionReactivate, CustomerID: &cid,
+		})
 	}
-	config.DB.Create(&payment)
-
+	if smsSvcGlobal != nil && customer.Phone != "" {
+		smsMsg := fmt.Sprintf("Payment Received: KES %.2f via M-Pesa (%s). Account balance: KES %.2f.", l.Amount, l.TransID, services.CreditBalanceOf(config.DB, customer.ID))
+		go smsSvcGlobal.SendForZone(customer.ZoneID, customer.Phone, smsMsg)
+	}
 	if radiusSvcGlobal != nil {
 		radiusSvcGlobal.SyncCustomerAsync(customer.ID)
 	}
+}
 
-	return c.JSON(fiber.Map{
-		"ResultCode": 0,
-		"ResultDesc": "Success",
-	})
+// c2bNewExpiry extends an unexpired subscription, or starts a new one now.
+func c2bNewExpiry(pkg *models.Package, current *time.Time) time.Time {
+	durationMinutes := 30 * 24 * 60
+	if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+		durationMinutes = *pkg.TimeLimitMinutes
+	} else if pkg.BillingCycle == "hourly" {
+		durationMinutes = 60
+	} else if pkg.BillingCycle == "daily" {
+		durationMinutes = 24 * 60
+	} else if pkg.BillingCycle == "weekly" {
+		durationMinutes = 7 * 24 * 60
+	}
+	d := time.Duration(durationMinutes) * time.Minute
+	if current != nil && current.After(time.Now()) {
+		return current.Add(d)
+	}
+	return time.Now().Add(d)
 }

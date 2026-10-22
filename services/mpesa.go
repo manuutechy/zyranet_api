@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // MpesaService handles Safaricom Daraja STK Push payments.
@@ -26,6 +28,13 @@ type MpesaService struct {
 	// Radius, when set, is told about a customer as soon as they pay so a
 	// reconnecting device is accepted without waiting for the next reconcile.
 	Radius *RadiusService
+	// Router, when set, replaces MikroTik for queued router actions (see
+	// router_actions.go). Tests only.
+	Router RouterPusher
+
+	// stkLocks serialises STK pushes per phone so two taps can't both fire a
+	// prompt (see LockSTKPhone).
+	stkLocks sync.Map
 
 	httpClient *http.Client
 
@@ -728,9 +737,128 @@ func (s *MpesaService) HandleCallback(payload map[string]interface{}) error {
 			}
 		}
 	}
-	_ = amount
+	// The STK push asked for int(payment.Amount) (Daraja takes whole
+	// shillings), so that's what a genuine callback reports.
+	requested := math.Floor(payment.Amount)
+	if amount <= 0 {
+		// Every real success callback carries the amount. Without it we can't
+		// tell what was paid, so leave the payment pending: the reconciler
+		// confirms it with Safaricom's STK query instead.
+		log.Printf("[M-Pesa] Success callback for payment %d has no Amount — leaving it for the status query to confirm", payment.ID)
+		return nil
+	}
+	if amount+0.001 < requested {
+		return s.ProcessUnderpayment(&payment, amount, receiptNumber, phone)
+	}
 
 	return s.ProcessPaymentSuccess(&payment, receiptNumber, phone)
+}
+
+// ProcessUnderpayment handles a success callback that paid less than the
+// package costs. The package is NOT granted. The money did arrive, so the
+// payment is completed for the amount actually paid, and that amount goes on
+// the customer's credit balance (usable towards a package) when we can tell
+// whose it is; otherwise it's flagged on the payment for staff.
+func (s *MpesaService) ProcessUnderpayment(payment *models.Payment, paid float64, receiptNumber, phone string) error {
+	pkgName := "the package"
+	if payment.PackageID != nil {
+		var pkg models.Package
+		if config.DB.Select("name").First(&pkg, *payment.PackageID).Error == nil && pkg.Name != "" {
+			pkgName = pkg.Name
+		}
+	}
+	reason := fmt.Sprintf("Underpaid: KES %.2f received for %s (KES %.2f). Package not granted.", paid, pkgName, payment.Amount)
+
+	customer := s.payerFor(payment, phone)
+	if customer != nil {
+		reason += " Amount added to the customer's credit balance."
+	} else {
+		reason += " No customer account to credit — needs staff follow-up."
+	}
+
+	var credited bool
+	via := s.CollectionChannel(payment.ZoneID, receiptNumber)
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.Payment{}).
+			Where("id = ? AND status != ?", payment.ID, "completed").
+			Updates(map[string]interface{}{
+				"status":               "completed",
+				"status_reason":        reason,
+				"amount":               paid,
+				"package_id":           nil,
+				"mpesa_receipt_number": receiptNumber,
+				"collected_via":        via,
+			})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		if customer == nil {
+			return nil
+		}
+		tx.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", customer.ID)
+		if _, err := AdjustCredit(tx, customer.ID, paid); err != nil {
+			return err
+		}
+		note := fmt.Sprintf("Underpaid M-Pesa payment %s: KES %.2f of KES %.2f for %s — kept as credit", receiptNumber, paid, payment.Amount, pkgName)
+		credited = true
+		return tx.Create(&models.CreditLog{CustomerID: customer.ID, Amount: paid, Type: "credit", Note: &note}).Error
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("[M-Pesa] UNDERPAID payment %d (receipt %s): paid KES %.2f, expected KES %.2f — package not granted, credited=%v", payment.ID, receiptNumber, paid, payment.Amount, credited)
+	if credited && s.SMS != nil && s.SMS.GetSetting("sms_enable_credit", "yes") != "no" {
+		msg := fmt.Sprintf("We received KES %.0f but %s costs KES %.0f, so it was not activated. KES %.0f has been added to your balance (now KES %.0f) — top up the difference to buy it.",
+			paid, pkgName, payment.Amount, paid, CreditBalanceOf(config.DB, customer.ID))
+		go s.SMS.SendForZone(payment.ZoneID, phone, msg) //nolint:errcheck
+	}
+	return nil
+}
+
+// payerFor finds the existing customer a payment belongs to — the one it was
+// made for, else by phone, else by device — within the paying zone's ISP.
+func (s *MpesaService) payerFor(payment *models.Payment, phone string) *models.Customer {
+	if payment.CustomerID != nil {
+		var c models.Customer
+		if err := config.DB.First(&c, *payment.CustomerID).Error; err == nil && CustomerBelongsToZoneISP(c.ID, payment.ZoneID) {
+			return &c
+		}
+	}
+	for _, p := range []string{phone, payment.Phone} {
+		if p == "" {
+			continue
+		}
+		if c, ok := CustomerByPhoneForZone(payment.ZoneID, p); ok {
+			return c
+		}
+	}
+	if payment.MacAddress != "" {
+		if c, ok := CustomerByDeviceForZone(payment.ZoneID, payment.MacAddress); ok {
+			return c
+		}
+	}
+	return nil
+}
+
+// UseDarajaBaseURL points every Daraja call at another host. Tests only.
+func (s *MpesaService) UseDarajaBaseURL(u string) { s.baseURLOverride = u }
+
+// upgradePlaceholderReceipt replaces a QRY_<checkout id> placeholder — written
+// when the STK status query completed a payment before Safaricom's callback
+// (the query reply carries no receipt) — with the real M-Pesa receipt once the
+// callback does arrive, so statements reconcile.
+func (s *MpesaService) upgradePlaceholderReceipt(paymentID uint, receipt string) bool {
+	if receipt == "" || strings.HasPrefix(receipt, "QRY_") {
+		return false
+	}
+	res := config.DB.Model(&models.Payment{}).
+		Where("id = ? AND status = ? AND mpesa_receipt_number LIKE ? ESCAPE '!'", paymentID, "completed", "QRY!_%").
+		Update("mpesa_receipt_number", receipt)
+	if res.RowsAffected > 0 {
+		log.Printf("[M-Pesa] Payment %d: placeholder receipt replaced with real receipt %s", paymentID, receipt)
+		return true
+	}
+	return false
 }
 
 // ProcessPaymentSuccess handles database and network/side-effects for a successful STK payment.
@@ -744,7 +872,11 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			"collected_via":        s.CollectionChannel(payment.ZoneID, receiptNumber),
 		})
 	if res.RowsAffected == 0 {
-		log.Printf("[M-Pesa] Duplicate/late success callback/query for payment %d ignored (status already %s)", payment.ID, payment.Status)
+		// Already completed. If the status query got there first it stored a
+		// QRY_ placeholder; a late real callback carries the true receipt.
+		if !s.upgradePlaceholderReceipt(payment.ID, receiptNumber) {
+			log.Printf("[M-Pesa] Duplicate/late success callback/query for payment %d ignored (status already %s)", payment.ID, payment.Status)
+		}
 		return nil
 	}
 
@@ -756,16 +888,27 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		if payment.CustomerID != nil {
 			var customer models.Customer
 			if err := config.DB.First(&customer, *payment.CustomerID).Error; err == nil {
-				newBalance := customer.CreditBalance + payment.Amount
-				config.DB.Model(&customer).Update("credit_balance", newBalance)
-
-				note := fmt.Sprintf("M-Pesa top-up (Receipt: %s)", receiptNumber)
-				config.DB.Create(&models.CreditLog{
-					CustomerID: customer.ID,
-					Amount:     payment.Amount,
-					Type:       "credit",
-					Note:       &note,
+				var newBalance float64
+				err := config.DB.Transaction(func(tx *gorm.DB) error {
+					if _, err := AdjustCredit(tx, customer.ID, payment.Amount); err != nil {
+						return err
+					}
+					note := fmt.Sprintf("M-Pesa top-up (Receipt: %s)", receiptNumber)
+					if err := tx.Create(&models.CreditLog{
+						CustomerID: customer.ID,
+						Amount:     payment.Amount,
+						Type:       "credit",
+						Note:       &note,
+					}).Error; err != nil {
+						return err
+					}
+					newBalance = CreditBalanceOf(tx, customer.ID)
+					return nil
 				})
+				if err != nil {
+					log.Printf("[M-Pesa] TOP-UP NOT CREDITED for payment %d (receipt %s, KES %.2f): %v — credit it manually", payment.ID, receiptNumber, payment.Amount, err)
+					return err
+				}
 
 				template := s.SMS.GetSetting("sms_template_credit", "Hi {name}, KES {amount} credited to your account. Your new balance is KES {balance}. Enjoy browsing!")
 				msg := utils.RenderTemplate(template, map[string]string{
@@ -787,7 +930,10 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		return nil
 	}
 
-	// Load voucher (if any) up front so it's available as a router-login fallback
+	// Voucher (router-login fallback for a device we have no MAC for). A
+	// voucher made before payment (legacy /hotspot/pay) is released now; an
+	// anonymous purchase gets its voucher only now that the money is in, so
+	// an abandoned or failed push never leaves a redeemable code behind.
 	var voucher *models.Voucher
 	if payment.VoucherID != nil {
 		var v models.Voucher
@@ -795,26 +941,28 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			config.DB.Model(&v).Update("status", "unused")
 			voucher = &v
 		}
+	} else if payment.CustomerID == nil && s.Voucher != nil {
+		if v, err := s.Voucher.Generate(payment.ZoneID, pkg.ID, "single_use", 1); err == nil {
+			voucher = v
+			payment.VoucherID = &v.ID
+			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("voucher_id", v.ID)
+		} else {
+			log.Printf("[M-Pesa] payment %d: could not create voucher after payment: %v", payment.ID, err)
+		}
 	}
 
-	// Load Zone to run MikroTik commands
-	var zone models.Zone
-	if err := config.DB.First(&zone, payment.ZoneID).Error; err == nil {
-		if payment.MacAddress != "" {
-			normalizedMac := strings.ToUpper(strings.ReplaceAll(payment.MacAddress, "-", ":"))
-			go func() {
-				err := s.whitelistWithRetry(&zone, normalizedMac, &pkg, 1)
-				if err != nil {
-					log.Printf("[M-Pesa] Async WhitelistMAC failed for %s (normal for routers behind NAT): %v", normalizedMac, err)
-				} else {
-					log.Printf("[M-Pesa] Successfully whitelisted MAC %s on router", normalizedMac)
-				}
-			}()
-		} else if voucher != nil {
-			go func() {
-				_, _ = s.MikroTik.PushHotspotUsers(&zone, []models.Voucher{*voucher})
-			}()
-		}
+	// Tell the router — persisted and retried with backoff (router_actions.go).
+	pkgID := pkg.ID
+	if payment.MacAddress != "" {
+		s.EnqueueRouterAction(models.PendingRouterAction{
+			ZoneID: payment.ZoneID, PaymentID: &payment.ID, Action: RouterActionWhitelistMAC,
+			MacAddress: payment.MacAddress, PackageID: &pkgID,
+		})
+	} else if voucher != nil {
+		vID := voucher.ID
+		s.EnqueueRouterAction(models.PendingRouterAction{
+			ZoneID: payment.ZoneID, PaymentID: &payment.ID, Action: RouterActionPushVoucher, VoucherID: &vID,
+		})
 	}
 
 	var customer *models.Customer
@@ -968,7 +1116,17 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	return nil
 }
 
-// ProcessPaymentFailure handles database updates for a failed STK payment.
+// Customer-facing reasons shared by the callback, the status query and the
+// pending-payment reconciler.
+const (
+	// STKNoResponseReason: 1037 (DS timeout / phone unreachable) and 1038
+	// (no response from the user) — the prompt was never answered.
+	STKNoResponseReason = "You didn't respond to the M-Pesa prompt. Please try again and enter your PIN when it pops up."
+	// STKUnconfirmedReason: 4999/2029 ("still under processing" / "unresolved
+	// reason") that never settled into a real answer.
+	STKUnconfirmedReason = "M-Pesa didn't confirm this payment. If money left your M-Pesa, contact support with the M-Pesa message; otherwise please try again."
+)
+
 // friendlySTKFailureReason maps a Daraja STK push ResultCode to a short,
 // actionable message for the customer. Safaricom's own ResultDesc strings
 // are internal/inconsistent wording (e.g. "DS timeout user cannot be
@@ -980,15 +1138,17 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 func friendlySTKFailureReason(resultCode float64, resultDesc string) string {
 	switch resultCode {
 	case 1:
-		return "Payment failed: insufficient M-Pesa balance."
+		return "Payment failed: not enough money in your M-Pesa account. Top up M-Pesa and try again."
 	case 1032:
 		return "Payment cancelled. You closed the M-Pesa prompt before approving it."
-	case 1037:
-		return "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
+	case 1037, 1038:
+		return STKNoResponseReason
+	case 4999, 2029:
+		return STKUnconfirmedReason
 	case 1025, 9999:
 		return "We couldn't process this payment. Please try again."
 	case 2001:
-		return "Payment failed: wrong M-Pesa PIN entered."
+		return "Payment failed: wrong M-Pesa PIN entered. Please try again with the correct PIN."
 	case 1001:
 		return "Payment failed: you have another M-Pesa transaction in progress. Please finish or cancel it, then try again."
 	case 1019:
@@ -1185,8 +1345,10 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 		if time.Since(payment.CreatedAt) < 150*time.Second {
 			return "pending", nil
 		}
-		reason := "Payment timed out. You didn't enter your M-Pesa PIN in time — please try again."
-		if err := s.ProcessPaymentFailure(payment, reason); err != nil {
+		// Still unresolved after 2.5 minutes. If it does go through later,
+		// the callback/reconciler still completes it (a late success
+		// overrides a failure — see ProcessPaymentSuccess).
+		if err := s.ProcessPaymentFailure(payment, STKUnconfirmedReason); err != nil {
 			return "pending", err
 		}
 		return "failed", nil
@@ -1201,20 +1363,42 @@ func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string,
 	return "failed", nil
 }
 
-// whitelistWithRetry attempts to whitelist a MAC address on the router,
-// retrying with a short backoff since router calls can fail transiently.
-func (s *MpesaService) whitelistWithRetry(zone *models.Zone, mac string, pkg *models.Package, attempts int) error {
-	var err error
-	for i := 0; i < attempts; i++ {
-		if err = s.MikroTik.WhitelistMAC(zone, mac, pkg); err == nil {
-			return nil
-		}
-		log.Printf("[M-Pesa] WhitelistMAC attempt %d/%d failed for %s: %v", i+1, attempts, mac, err)
-		if i < attempts-1 {
-			time.Sleep(time.Duration(i+1) * 2 * time.Second)
-		}
+// LockSTKPhone serialises STK pushes for one phone number: the caller holds
+// the returned unlock while it checks for an in-flight push and starts a new
+// one, so two quick taps can't both pass the "nothing pending" check and fire
+// two prompts.
+func (s *MpesaService) LockSTKPhone(phone string) (unlock func()) {
+	key := utils.FormatPhone(phone)
+	v, _ := s.stkLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// RecentPendingSTK returns an STK push still awaiting the customer that was
+// started in the last `within` for the same phone, or for the same device in
+// the same zone — so a second tap reuses the prompt already on their phone
+// instead of firing another (and risking a double charge).
+func RecentPendingSTK(phone, mac string, zoneID uint, within time.Duration) (*models.Payment, bool) {
+	since := time.Now().Add(-within)
+	q := config.DB.Model(&models.Payment{}).
+		Where("method = ? AND status = ? AND created_at >= ? AND mpesa_transaction_id IS NOT NULL AND mpesa_transaction_id <> ''", "mpesa", "pending", since)
+	// Payment.Phone holds whatever the client sent (07…, 2547…, +2547…).
+	phones := []string{phone}
+	if f := utils.FormatPhone(phone); len(f) == 12 {
+		phones = append(phones, f, "+"+f, "0"+f[3:])
 	}
-	return err
+	mac = strings.TrimSpace(mac)
+	if mac != "" {
+		q = q.Where("(phone IN ? OR (mac_address = ? AND zone_id = ?))", phones, mac, zoneID)
+	} else {
+		q = q.Where("phone IN ?", phones)
+	}
+	var p models.Payment
+	if err := q.Order("id DESC").First(&p).Error; err != nil {
+		return nil, false
+	}
+	return &p, true
 }
 
 // SimulateCallback simulates a successful M-Pesa callback for mock/testing mode.

@@ -26,6 +26,7 @@ func setupC2BTestDB(t *testing.T) {
 		&models.Organization{}, &models.OrganizationMpesaConfig{}, &models.Zone{}, &models.Package{},
 		&models.Customer{}, &models.CustomerDevice{}, &models.Payment{}, &models.CreditLog{},
 		&models.UnmatchedC2BPayment{}, &models.Setting{}, &models.User{}, &models.Payout{}, &models.PlatformSetting{}, &models.RadiusAccount{}, &models.SmsLog{}, &models.AuditLog{},
+		&models.C2BTransaction{}, &models.PendingRouterAction{}, &models.Voucher{}, &models.PlatformUser{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -33,9 +34,13 @@ func setupC2BTestDB(t *testing.T) {
 	invalidateAllSettings()
 	services.InvalidateMpesaCaches()
 	old := config.Config.MpesaCallbackSecret
-	config.Config.MpesaCallbackSecret = ""
-	t.Cleanup(func() { config.Config.MpesaCallbackSecret = old })
+	config.Config.MpesaCallbackSecret = testCallbackSecret
+	oldAsync := c2bVerifyAsync
+	c2bVerifyAsync = false
+	t.Cleanup(func() { config.Config.MpesaCallbackSecret = old; c2bVerifyAsync = oldAsync })
 }
+
+const testCallbackSecret = "test-callback-secret-0123456789"
 
 type isp struct {
 	OrgID  uint
@@ -83,16 +88,23 @@ func seedCustomer(t *testing.T, zoneID uint, name, phone, account string) models
 	return c
 }
 
-// postC2B delivers a C2B confirmation the way Safaricom does. Amounts stay
-// below the KES 100 package price so the credit is left on the account
-// balance and easy to assert on.
+// postC2B delivers a C2B confirmation the way Safaricom does, to a URL
+// registered with the callback token. Amounts stay below the KES 100 package
+// price so the credit is left on the account balance and easy to assert on.
 func postC2B(t *testing.T, shortcode, transID, billRef, msisdn string, amount float64) {
+	t.Helper()
+	postC2BTo(t, "/c2b?token="+testCallbackSecret, shortcode, transID, billRef, msisdn, amount)
+}
+
+// postC2BTo is postC2B to an exact URL (e.g. without the token, like the live
+// paybill's registration).
+func postC2BTo(t *testing.T, url, shortcode, transID, billRef, msisdn string, amount float64) {
 	t.Helper()
 	app := fiber.New()
 	app.Post("/c2b", MpesaC2BConfirmation)
 	body := fmt.Sprintf(`{"TransactionType":"Pay Bill","TransID":%q,"TransTime":"20260921120000","TransAmount":"%.2f","BusinessShortCode":%q,"BillRefNumber":%q,"MSISDN":%q,"FirstName":"JANE","LastName":"DOE"}`,
 		transID, amount, shortcode, billRef, msisdn)
-	req := httptest.NewRequest("POST", "/c2b", strings.NewReader(body))
+	req := httptest.NewRequest("POST", url, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req, -1)
 	if err != nil {

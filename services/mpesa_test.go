@@ -11,7 +11,9 @@ func newTestMpesaService() *MpesaService {
 	sms := NewSmsService()
 	voucher := NewVoucherService(sms)
 	mikrotik := NewMikroTikService()
-	return NewMpesaService(sms, voucher, mikrotik)
+	s := NewMpesaService(sms, voucher, mikrotik)
+	s.Router = &fakeRouter{} // never dial a real router from tests
+	return s
 }
 
 // seedZone creates a zone + package and returns their IDs.
