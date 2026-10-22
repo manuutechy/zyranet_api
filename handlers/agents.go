@@ -35,7 +35,7 @@ func isAgentOwner(role string) bool { return role == "super_admin" }
 // agentActor is the acting user, from the session only.
 func agentActor(c *fiber.Ctx) services.AgentActor {
 	claims := middleware.GetClaims(c)
-	return services.AgentActor{OrgID: claims.OrganizationID, UserID: claims.UserID}
+	return services.AgentActor{OrgID: claims.OrganizationID, UserID: claims.UserID, Role: claims.Role}
 }
 
 // findAgentForCaller loads an agent of the caller's ISP the caller may see.

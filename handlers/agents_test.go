@@ -331,6 +331,56 @@ func TestAgentIssue_CreditLimitFloatAndUpfront(t *testing.T) {
 	}
 }
 
+// Upfront issues record that money was received, so only the owner may use
+// them; everyone else issues on credit/float within the limits.
+func TestAgentIssue_UpfrontOwnerOnlyAndCreditLimitEnforced(t *testing.T) {
+	app, a, _ := setupAgentTest(t)
+	_, owner := staffUser(t, a.OrgID, "super_admin")
+	fa, faTok := staffUser(t, a.OrgID, "field_agent")
+	zm, zmTok := staffUser(t, a.OrgID, "zone_manager")
+	config.DB.Model(&models.User{}).Where("id = ?", zm.ID).Update("zone_id", a.ZoneID)
+	id := newAgent(t, app, owner, a.ZoneID, fmt.Sprintf(`,"user_id":%d`, fa.ID)) // KES 1,000 credit, 10%
+	pkg := pkgOf(t, a.ZoneID)
+	issue := func(tok string, qty int, funding, key string) int {
+		st, _ := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/issue", id), tok,
+			fmt.Sprintf(`{"zone_id":%d,"package_id":%d,"quantity":%d,"funding":%q,"method":"cash","idempotency_key":%q}`, a.ZoneID, pkg.ID, qty, funding, key))
+		return st
+	}
+
+	// A field agent (on their own ledger) and a zone manager can't claim upfront payment.
+	if st := issue(faTok, 50, "upfront", "fa-upfront-01"); st != 403 {
+		t.Errorf("field agent upfront issue: status %d, want 403", st)
+	}
+	if st := issue(zmTok, 50, "upfront", "zm-upfront-01"); st != 403 {
+		t.Errorf("zone manager upfront issue: status %d, want 403", st)
+	}
+	if n := count(t, &models.AgentLedgerEntry{}); n != 0 {
+		t.Errorf("%d ledger entries after refused upfront issues, want 0", n)
+	}
+	if n := count(t, &models.AgentVoucher{}); n != 0 {
+		t.Errorf("%d vouchers issued by refused upfront requests, want 0", n)
+	}
+
+	// Past the credit limit (12 x KES 90 = 1,080 > 1,000) is refused for the
+	// zone manager and the owner alike; nothing is written.
+	if st := issue(zmTok, 12, "credit", "zm-credit-01"); st != 422 {
+		t.Errorf("zone manager over the credit limit: status %d, want 422", st)
+	}
+	if st := issue(owner, 12, "credit", "own-credit-01"); st != 422 {
+		t.Errorf("owner over the credit limit: status %d, want 422", st)
+	}
+	if n := count(t, &models.AgentLedgerEntry{}); n != 0 {
+		t.Errorf("%d ledger entries after over-limit issues, want 0", n)
+	}
+	// Within the limit the zone manager can issue on credit.
+	if st := issue(zmTok, 11, "credit", "zm-credit-02"); st != 201 {
+		t.Errorf("zone manager within the limit: status %d, want 201", st)
+	}
+	if got := agentBalance(t, id); got != 99000 {
+		t.Errorf("balance %d, want 99000", got)
+	}
+}
+
 func TestAgents_OrgIsolation(t *testing.T) {
 	app, a, b := setupAgentTest(t)
 	_, ownerA := staffUser(t, a.OrgID, "super_admin")

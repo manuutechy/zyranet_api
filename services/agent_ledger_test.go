@@ -42,6 +42,31 @@ func TestFormatCentsAndCentsFromKES(t *testing.T) {
 	}
 }
 
+// The upfront rule lives in the service, so it holds for any caller.
+func TestIssueToAgent_UpfrontNeedsOwnerRole(t *testing.T) {
+	setupTestDB(t)
+	zoneID, pkgID := seedZone(t)
+	config.DB.Model(&models.Zone{}).Where("id = ?", zoneID).Update("organization_id", 7)
+	agent := models.Agent{OrganizationID: 7, Name: "Shop", Phone: "254700000000", CommissionType: "percent", Status: "active", Zones: []models.Zone{{ID: zoneID}}}
+	config.DB.Create(&agent)
+	vs := NewVoucherService(NewSmsService())
+	req := AgentIssueRequest{AgentID: agent.ID, ZoneID: zoneID, PackageID: pkgID, Quantity: 3, Funding: "upfront", Method: "cash", Key: "svc-upfront-01"}
+	for _, role := range []string{"field_agent", "zone_manager", "finance", ""} {
+		_, err := IssueToAgent(config.DB, vs, AgentActor{OrgID: 7, UserID: 1, Role: role}, req)
+		if le, ok := err.(*LedgerError); !ok || le.Status != 403 {
+			t.Errorf("upfront as %q: %v, want a 403 refusal", role, err)
+		}
+	}
+	var n int64
+	config.DB.Model(&models.AgentLedgerEntry{}).Count(&n)
+	if n != 0 {
+		t.Errorf("%d entries written by refused upfront issues", n)
+	}
+	if _, err := IssueToAgent(config.DB, vs, AgentActor{OrgID: 7, UserID: 1, Role: "super_admin"}, req); err != nil {
+		t.Errorf("owner upfront issue: %v", err)
+	}
+}
+
 // A customer redeeming a voucher at the same moment the agent returns it:
 // exactly one of them wins, and the ledger matches whichever did.
 func TestAgentVoucher_RedeemAndReturnRaceOneWins(t *testing.T) {
@@ -57,7 +82,7 @@ func TestAgentVoucher_RedeemAndReturnRaceOneWins(t *testing.T) {
 	if err := config.DB.Create(&agent).Error; err != nil {
 		t.Fatal(err)
 	}
-	actor := AgentActor{OrgID: 7, UserID: 1}
+	actor := AgentActor{OrgID: 7, UserID: 1, Role: "super_admin"}
 	vs := NewVoucherService(NewSmsService())
 
 	const n = 10

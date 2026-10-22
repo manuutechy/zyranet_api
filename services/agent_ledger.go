@@ -63,7 +63,14 @@ const (
 type AgentActor struct {
 	OrgID  uint
 	UserID uint
+	// Role is the actor's staff role. Recording that money was received
+	// (an upfront-paid issue) needs the owner role, whoever the caller is.
+	Role string
 }
+
+// IsOwner reports whether the actor is the ISP owner (super_admin), the only
+// role that may confirm cash or M-Pesa was received.
+func (a AgentActor) IsOwner() bool { return a.Role == "super_admin" }
 
 // CentsFromKES converts a decimal(10,2) shilling amount to integer cents.
 func CentsFromKES(kes float64) int64 { return int64(math.Round(kes * 100)) }
@@ -262,6 +269,11 @@ func IssueToAgent(db *gorm.DB, vs *VoucherService, actor AgentActor, req AgentIs
 	switch req.Funding {
 	case "credit", "float":
 	case "upfront":
+		// Upfront records a handover: only the owner confirms money received.
+		// Anyone else issues on credit or float, within the limits.
+		if !actor.IsOwner() {
+			return nil, ledgerErr(403, "Only the account owner can record an upfront payment. Issue on credit or float instead.")
+		}
 		if err := validMethod(req.Method, req.Reference); err != nil {
 			return nil, err
 		}

@@ -68,7 +68,7 @@ func seedMySQLAgent(t *testing.T, creditLimit int64) (models.Agent, uint, uint) 
 	must(config.DB.Create(&org).Error)
 	owner := models.User{Name: "Owner", Email: "owner@example.com", Password: "x", Role: "super_admin", Status: "active", OrganizationID: org.ID}
 	must(config.DB.Create(&owner).Error)
-	mysqlActor = AgentActor{OrgID: org.ID, UserID: owner.ID}
+	mysqlActor = AgentActor{OrgID: org.ID, UserID: owner.ID, Role: "super_admin"}
 	zone := models.Zone{Name: "Z", Location: "L", RouterName: "r", RouterIP: "127.0.0.1", OrganizationID: org.ID}
 	must(config.DB.Create(&zone).Error)
 	pkg := models.Package{ZoneID: zone.ID, Name: "Daily", Type: "hotspot", Price: 50, SpeedUploadKbps: 1, SpeedDownloadKbps: 1, BillingCycle: "daily", Status: "active"}
