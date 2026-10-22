@@ -832,11 +832,6 @@ func (s *MpesaService) payerFor(payment *models.Payment, phone string) *models.C
 			return c
 		}
 	}
-	if payment.MacAddress != "" {
-		if c, ok := CustomerByDeviceForZone(payment.ZoneID, payment.MacAddress); ok {
-			return c
-		}
-	}
 	return nil
 }
 
@@ -980,14 +975,6 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			customer = c
 			payment.CustomerID = &c.ID
 			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", c.ID)
-		}
-	}
-
-	if customer == nil && payment.MacAddress != "" {
-		if c, ok := CustomerByDeviceForZone(payment.ZoneID, payment.MacAddress); ok {
-			customer = c
-			payment.CustomerID = &customer.ID
-			config.DB.Model(&models.Payment{}).Where("id = ?", payment.ID).Update("customer_id", customer.ID)
 		}
 	}
 

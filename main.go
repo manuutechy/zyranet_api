@@ -62,6 +62,10 @@ func main() {
 		&models.OtpCode{},
 		&models.C2BTransaction{},
 		&models.PendingRouterAction{},
+		&models.HotspotCredential{},
+		&models.HotspotAccessToken{},
+		&models.ZoneOutage{},
+		&models.FreeTrialClaim{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)

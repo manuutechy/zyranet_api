@@ -312,6 +312,7 @@ func TestStkPush_SecondTapReusesThePendingPrompt(t *testing.T) {
 	a := seedISP(t, "a", "", 1)
 	var pkg models.Package
 	config.DB.Where("zone_id = ?", a.ZoneID).First(&pkg)
+	config.DB.Model(&models.Zone{}).Where("id = ?", a.ZoneID).Update("last_seen_at", time.Now())
 
 	body := fmt.Sprintf(`{"phone":"0712345678","package_id":%d,"mac":"AA:BB:CC:DD:EE:01"}`, pkg.ID)
 	code1, out1 := postJSON(t, MpesaStkPush, "/stk", body)
@@ -334,5 +335,24 @@ func TestStkPush_SecondTapReusesThePendingPrompt(t *testing.T) {
 	postJSON(t, MpesaStkPush, "/stk", strings.Replace(body, "0712345678", "0799000111", 1))
 	if f.stkPushes != 1 {
 		t.Errorf("same device, other phone: %d prompts", f.stkPushes)
+	}
+}
+
+func TestStkPush_OfflineRouterIsNeverCharged(t *testing.T) {
+	setupC2BTestDB(t)
+	f := newFakeDarajaAPI(t)
+	productionPlatform(t)
+	initMoneyServices(t, f.URL)
+	a := seedISP(t, "a", "", 1)
+	var pkg models.Package
+	config.DB.Where("zone_id = ?", a.ZoneID).First(&pkg)
+	config.DB.Model(&models.Zone{}).Where("id = ?", a.ZoneID).Update("last_seen_at", time.Now().Add(-10*time.Minute))
+
+	code, out := postJSON(t, MpesaStkPush, "/stk", fmt.Sprintf(`{"phone":"0712345678","package_id":%d}`, pkg.ID))
+	if code != 503 || out["code"] != "zone_offline" {
+		t.Fatalf("status %d code %v, want 503 zone_offline", code, out["code"])
+	}
+	if f.stkPushes != 0 {
+		t.Errorf("%d STK prompts sent while the router was offline, want 0", f.stkPushes)
 	}
 }

@@ -548,19 +548,11 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 		First(&payment).Error; err == nil {
 
 		if payment.Status == "completed" {
-			// Link MAC / device if provided and not yet associated
-			if body.Mac != "" && payment.Customer != nil {
-				payment.Customer.MacAddress = &body.Mac
-				config.DB.Model(payment.Customer).Update("mac_address", body.Mac)
-				if mpesaSvcGlobal != nil && payment.Zone != nil && payment.Package != nil {
-					pkgID := payment.Package.ID
-					mpesaSvcGlobal.EnqueueRouterAction(models.PendingRouterAction{
-						ZoneID: payment.Zone.ID, PaymentID: &payment.ID, Action: services.RouterActionWhitelistMAC,
-						MacAddress: body.Mac, PackageID: &pkgID,
-					})
-				}
-			}
-			return utils.SuccessResponse(c, payment, "Payment verified successfully.")
+			// Knowing a receipt code proves nothing about who paid, so this only
+			// confirms the status. Moving the plan onto this device goes through
+			// /customer/auth/recover, which also checks the paying phone.
+			return utils.SuccessResponse(c, fiber.Map{"code": code, "status": "completed", "recover": true},
+				"Payment found. Confirm the phone number that paid to move the plan to this device.")
 		}
 
 		if payment.Status == "pending" {
@@ -617,12 +609,6 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 			}
 		}
 
-		if !foundCust && body.Mac != "" {
-			if err := config.DB.Where("mac_address = ?", body.Mac).Order("id DESC").First(&customer).Error; err == nil {
-				foundCust = true
-			}
-		}
-
 		if !foundCust && unmatched.Phone != "" {
 			phoneSuffix := unmatched.Phone
 			if len(phoneSuffix) >= 9 {
@@ -640,8 +626,10 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, "We found your payment but couldn't tell which account it's for. Please sign in first, or contact support with this M-Pesa code.", "Account not found.", fiber.StatusUnprocessableEntity)
 		}
 
-		if body.Mac != "" {
-			customer.MacAddress = &body.Mac
+		// Only the signed-in owner may move the plan onto this device.
+		signedIn := claims != nil && claims.CustomerID == customer.ID
+		if !signedIn {
+			body.Mac = ""
 		}
 
 		// Claim it first (pending → resolved): of two people submitting the

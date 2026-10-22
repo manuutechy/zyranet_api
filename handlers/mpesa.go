@@ -51,9 +51,11 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
 
-	// TODO(router-access branch): refuse checkout while the zone's router is
-	// offline, once services.ZoneAcceptingPayments lands:
-	//   if ok, why := services.ZoneAcceptingPayments(pkg.ZoneID); !ok { return utils.ErrorResponse(c, why, "", fiber.StatusServiceUnavailable) }
+	// Never take money for WiFi we can't switch on: refuse checkout while the
+	// zone's router is silent.
+	if ok, why := services.ZoneAcceptingPayments(pkg.ZoneID); !ok {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"success": false, "code": "zone_offline", "error": why})
+	}
 
 	// One prompt at a time per phone: a second tap within 90s (same phone, or
 	// same device on the same zone) gets the prompt already on their phone
@@ -81,27 +83,32 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	// valid customerAuth session is very likely present here. Prefer that
 	// over any body-supplied customer_id — it's the actual authenticated
 	// identity and needs no further trust decision.
+	// Only a signed-in session may change the customer's name or device; a
+	// customer_id from the body just says who the plan is for.
+	sessionCustomer := false
 	if cc := middleware.OptionalCustomerClaims(c); cc != nil && cc.CustomerID != 0 {
 		cid := cc.CustomerID
 		body.CustomerID = &cid
+		sessionCustomer = true
 	} else if body.CustomerID != nil {
 		// A customer id from the request must belong to the ISP selling this package.
 		if !services.CustomerBelongsToZoneISP(*body.CustomerID, pkg.ZoneID) {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
 	} else if body.CustomerID == nil {
+		// Match by the paying phone only: a MAC can be copied, so it never
+		// decides whose account a payment lands on.
 		if cust, ok := services.CustomerByPhoneForZone(pkg.ZoneID, body.Phone); ok {
-			body.CustomerID = &cust.ID
-		} else if cust, ok := services.CustomerByDeviceForZone(pkg.ZoneID, body.Mac); ok {
 			body.CustomerID = &cust.ID
 		}
 	}
 	// A signed-in customer buying on another ISP's WiFi is a new customer there.
 	if body.CustomerID != nil && !services.CustomerBelongsToZoneISP(*body.CustomerID, pkg.ZoneID) {
 		body.CustomerID = nil
+		sessionCustomer = false
 	}
 
-	if body.CustomerID != nil {
+	if body.CustomerID != nil && sessionCustomer {
 		var owner models.Customer
 		if err := config.DB.First(&owner, *body.CustomerID).Error; err == nil {
 			if body.Mac == "" && owner.MacAddress != nil {
@@ -114,7 +121,7 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		}
 	}
 
-	if body.CustomerID != nil && strings.TrimSpace(body.Name) != "" {
+	if body.CustomerID != nil && sessionCustomer && strings.TrimSpace(body.Name) != "" {
 		trimmedName := strings.TrimSpace(body.Name)
 		config.DB.Model(&models.Customer{}).Where("id = ?", *body.CustomerID).Update("name", trimmedName)
 	}
