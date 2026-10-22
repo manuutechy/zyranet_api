@@ -207,8 +207,17 @@ func UserUpdate(c *fiber.Ctx) error {
 		delete(body, "password")
 	}
 
+	// A new password, role or status ends the user's open sessions.
+	_, pwChanged := body["password"]
+	roleChanged := body["role"] != nil && body["role"] != user.Role
+	statusChanged := body["status"] != nil && body["status"] != user.Status
+	delete(body, "token_version")
+
 	if err := config.DB.Model(&user).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
+	}
+	if pwChanged || roleChanged || statusChanged {
+		middleware.RevokeAdminSessions(config.DB, user.ID)
 	}
 	config.DB.Preload("Zone").First(&user, user.ID)
 	return utils.SuccessResponse(c, user, "User updated successfully.")

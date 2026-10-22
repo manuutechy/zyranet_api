@@ -7,7 +7,9 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/zyranet/zyranet-api/config"
+	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // Claims holds the JWT payload fields.
@@ -25,7 +27,22 @@ type Claims struct {
 	// can look at the account but not change or spend from it
 	// (RequireStrongCustomerAuth). Empty for sessions proven by OTP or payment.
 	AuthMethod string `json:"auth_method,omitempty"`
+	// TokenVersion is the user's token_version when the token was issued
+	// (admin and platform sessions). Logout and password/role/status changes
+	// bump the stored version, which kills every older token at once.
+	TokenVersion uint `json:"tv,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// RevokeAdminSessions ends every session a staff user has open (logout,
+// password/role/status change): tokens carrying the old version stop working.
+func RevokeAdminSessions(db *gorm.DB, userID uint) {
+	db.Model(&models.User{}).Where("id = ?", userID).Update("token_version", gorm.Expr("token_version + 1"))
+}
+
+// RevokePlatformSessions is RevokeAdminSessions for platform (SA) staff.
+func RevokePlatformSessions(db *gorm.DB, platformUserID uint) {
+	db.Model(&models.PlatformUser{}).Where("id = ?", platformUserID).Update("token_version", gorm.Expr("token_version + 1"))
 }
 
 const (
@@ -93,6 +110,25 @@ func AdminAuth() fiber.Handler {
 		if sub, orgID, _, ok := TenantFromRequest(c); sub != "" && (!ok || orgID != claims.OrganizationID) {
 			return utils.ErrorResponse(c, "Forbidden.", "This session does not belong to this ISP portal.", fiber.StatusForbidden)
 		}
+		// A signed token isn't enough on its own: the account must still
+		// exist, be active, and not have logged out / changed password since
+		// the token was issued. Role, zone and ISP come from the database so
+		// a demotion or move takes effect immediately.
+		var u models.User
+		if err := config.DB.Select("id", "role", "zone_id", "organization_id", "status", "token_version").
+			First(&u, claims.UserID).Error; err != nil || u.ID == 0 {
+			return utils.ErrorResponse(c, "Unauthenticated.", "This account no longer exists.", fiber.StatusUnauthorized)
+		}
+		if u.Status != "active" {
+			return utils.ErrorResponse(c, "Your account is inactive.", "Account disabled.", fiber.StatusUnauthorized)
+		}
+		if u.TokenVersion != claims.TokenVersion {
+			return utils.ErrorResponse(c, "Your session has ended. Please sign in again.", "Session revoked.", fiber.StatusUnauthorized)
+		}
+		if u.OrganizationID != claims.OrganizationID {
+			return utils.ErrorResponse(c, "Your session has ended. Please sign in again.", "Session revoked.", fiber.StatusUnauthorized)
+		}
+		claims.Role, claims.ZoneID = u.Role, u.ZoneID
 		c.Locals("claims", claims)
 		c.Locals("userID", claims.UserID)
 		c.Locals("role", claims.Role)
@@ -115,8 +151,36 @@ func PlatformAuth() fiber.Handler {
 		if claims.Type != "platform" {
 			return utils.ErrorResponse(c, "Forbidden.", "Platform access required.", fiber.StatusForbidden)
 		}
+		var u models.PlatformUser
+		if err := config.DB.Select("id", "role", "status", "token_version").
+			First(&u, claims.PlatformUserID).Error; err != nil || u.ID == 0 {
+			return utils.ErrorResponse(c, "Unauthenticated.", "This account no longer exists.", fiber.StatusUnauthorized)
+		}
+		if u.Status != "active" {
+			return utils.ErrorResponse(c, "Your account is inactive.", "Account disabled.", fiber.StatusUnauthorized)
+		}
+		if u.TokenVersion != claims.TokenVersion {
+			return utils.ErrorResponse(c, "Your session has ended. Please sign in again.", "Session revoked.", fiber.StatusUnauthorized)
+		}
+		claims.Role = u.Role
 		c.Locals("claims", claims)
 		c.Locals("platformUserID", claims.PlatformUserID)
+		c.Locals("platformRole", u.Role)
+		return c.Next()
+	}
+}
+
+// PlatformOwner is the platform role allowed to change Zyra Net's shared
+// Daraja/SMS credentials, move money (payouts, C2B reconciliation) and manage
+// platform staff.
+const PlatformOwner = "owner"
+
+// RequirePlatformOwner goes after PlatformAuth on those routes.
+func RequirePlatformOwner() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if role, _ := c.Locals("platformRole").(string); role != PlatformOwner {
+			return utils.ErrorResponse(c, "Only a platform owner can do this.", "Forbidden.", fiber.StatusForbidden)
+		}
 		return c.Next()
 	}
 }
@@ -147,7 +211,12 @@ func GenerateAdminToken(userID uint, role string, zoneID *uint, organizationID u
 		Type:           "admin",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.Config.JWTExpiry)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
+	}
+	var u models.User
+	if err := config.DB.Select("token_version").First(&u, userID).Error; err == nil {
+		claims.TokenVersion = u.TokenVersion
 	}
 	return signToken(claims)
 }
@@ -159,7 +228,12 @@ func GeneratePlatformToken(platformUserID uint) (string, error) {
 		Type:           "platform",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.Config.JWTExpiry)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
+	}
+	var u models.PlatformUser
+	if err := config.DB.Select("token_version").First(&u, platformUserID).Error; err == nil {
+		claims.TokenVersion = u.TokenVersion
 	}
 	return signToken(claims)
 }

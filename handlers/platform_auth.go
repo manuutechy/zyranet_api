@@ -51,12 +51,17 @@ func PlatformLogin(c *fiber.Ctx) error {
 			"id":    user.ID,
 			"name":  user.Name,
 			"email": user.Email,
+			"role":  user.Role,
 		},
 	}, "Login successful.")
 }
 
-// PlatformLogout clears the platform session cookie.
+// PlatformLogout clears the platform session cookie and revokes the user's
+// tokens.
 func PlatformLogout(c *fiber.Ctx) error {
+	if claims := middleware.GetClaims(c); claims != nil && claims.PlatformUserID != 0 {
+		middleware.RevokePlatformSessions(config.DB, claims.PlatformUserID)
+	}
 	middleware.ClearAuthCookie(c, middleware.PlatformCookieName)
 	return utils.SuccessResponse(c, nil, "Logged out successfully.")
 }
@@ -78,5 +83,6 @@ func PlatformMe(c *fiber.Ctx) error {
 		"name":   user.Name,
 		"email":  user.Email,
 		"status": user.Status,
+		"role":   user.Role,
 	}, "")
 }

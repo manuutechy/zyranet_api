@@ -302,16 +302,21 @@ func Register(app *fiber.App) {
 	platform.Post("/auth/logout", platformAuth, handlers.PlatformLogout)
 	platform.Get("/auth/me", platformAuth, handlers.PlatformMe)
 
+	// Changing shared credentials, moving money and managing platform staff
+	// need the platform owner role; other platform staff can view and run
+	// everything else.
+	owner := middleware.RequirePlatformOwner()
+
 	platform.Get("/overview", platformAuth, handlers.PlatformOverview)
 	platform.Get("/settings", platformAuth, handlers.PlatformSettingsIndex)
-	platform.Post("/settings", platformAuth, handlers.PlatformSettingsUpdate)
+	platform.Post("/settings", platformAuth, owner, handlers.PlatformSettingsUpdate)
 
 	// Shared infrastructure credentials (Zyra Net's own Daraja app + Hostpinnacle SMS)
 	platform.Get("/daraja", platformAuth, handlers.PlatformDarajaShow)
-	platform.Post("/daraja", platformAuth, handlers.PlatformDarajaUpdate)
-	platform.Post("/daraja/register-c2b", platformAuth, handlers.PlatformDarajaRegisterC2B)
+	platform.Post("/daraja", platformAuth, owner, handlers.PlatformDarajaUpdate)
+	platform.Post("/daraja/register-c2b", platformAuth, owner, handlers.PlatformDarajaRegisterC2B)
 	platform.Get("/sms", platformAuth, handlers.PlatformSmsShow)
-	platform.Post("/sms", platformAuth, handlers.PlatformSmsUpdate)
+	platform.Post("/sms", platformAuth, owner, handlers.PlatformSmsUpdate)
 	platform.Post("/sms/test", platformAuth, handlers.PlatformSmsTest)
 
 	platform.Get("/organizations", platformAuth, handlers.OrganizationIndex)
@@ -321,14 +326,14 @@ func Register(app *fiber.App) {
 	platform.Post("/zones/:id/radius", platformAuth, handlers.PlatformZoneRadiusSet)
 	platform.Get("/zones/:id/radius-script", platformAuth, handlers.PlatformZoneRadiusScript)
 	platform.Get("/payouts/balances", platformAuth, handlers.PlatformPayoutBalances)
-	platform.Post("/payouts/backfill", platformAuth, handlers.PlatformPayoutBackfill)
+	platform.Post("/payouts/backfill", platformAuth, owner, handlers.PlatformPayoutBackfill)
 	platform.Get("/payouts", platformAuth, handlers.PlatformPayoutIndex)
-	platform.Post("/payouts", platformAuth, handlers.PlatformPayoutStore)
+	platform.Post("/payouts", platformAuth, owner, handlers.PlatformPayoutStore)
 	platform.Get("/payouts/:id", platformAuth, handlers.PlatformPayoutShow)
-	platform.Post("/payouts/:id/send", platformAuth, handlers.PlatformPayoutSend)
-	platform.Post("/payouts/:id/mark-paid", platformAuth, handlers.PlatformPayoutMarkPaid)
-	platform.Post("/payouts/:id/cancel", platformAuth, handlers.PlatformPayoutCancel)
-	platform.Post("/payouts/:id/fail", platformAuth, handlers.PlatformPayoutFail)
+	platform.Post("/payouts/:id/send", platformAuth, owner, handlers.PlatformPayoutSend)
+	platform.Post("/payouts/:id/mark-paid", platformAuth, owner, handlers.PlatformPayoutMarkPaid)
+	platform.Post("/payouts/:id/cancel", platformAuth, owner, handlers.PlatformPayoutCancel)
+	platform.Post("/payouts/:id/fail", platformAuth, owner, handlers.PlatformPayoutFail)
 	platform.Post("/organizations", platformAuth, handlers.OrganizationStore)
 	platform.Get("/organizations/:id", platformAuth, handlers.OrganizationShow)
 	platform.Put("/organizations/:id", platformAuth, handlers.OrganizationUpdate)
@@ -340,7 +345,7 @@ func Register(app *fiber.App) {
 	// C2B reconciliation — payments confirmed on the shared paybill that
 	// couldn't be auto-matched to a customer (see MpesaC2BConfirmation)
 	platform.Get("/c2b/unmatched", platformAuth, handlers.PlatformC2BUnmatchedIndex)
-	platform.Post("/c2b/unmatched/:id/resolve", platformAuth, handlers.PlatformC2BUnmatchedResolve)
+	platform.Post("/c2b/unmatched/:id/resolve", platformAuth, owner, handlers.PlatformC2BUnmatchedResolve)
 	platform.Get("/customers/search", platformAuth, handlers.PlatformCustomerSearch)
 
 	// Billing — Zyra Net invoicing its ISP tenants (distinct from the ISP's
@@ -353,7 +358,7 @@ func Register(app *fiber.App) {
 
 	// Platform staff (SA account management)
 	platform.Get("/staff", platformAuth, handlers.PlatformStaffIndex)
-	platform.Post("/staff", platformAuth, handlers.PlatformStaffStore)
-	platform.Patch("/staff/:id", platformAuth, handlers.PlatformStaffUpdate)
-	platform.Delete("/staff/:id", platformAuth, handlers.PlatformStaffDestroy)
+	platform.Post("/staff", platformAuth, owner, handlers.PlatformStaffStore)
+	platform.Patch("/staff/:id", platformAuth, owner, handlers.PlatformStaffUpdate)
+	platform.Delete("/staff/:id", platformAuth, owner, handlers.PlatformStaffDestroy)
 }

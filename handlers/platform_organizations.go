@@ -400,6 +400,7 @@ func OrganizationResetUserPassword(c *fiber.Ctx) error {
 	if err := config.DB.Model(&user).Update("password", string(hash)).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to reset password.", fiber.StatusInternalServerError)
 	}
+	middleware.RevokeAdminSessions(config.DB, user.ID) // whoever had the old password is signed out
 
 	return utils.SuccessResponse(c, fiber.Map{
 		"user_id":       user.ID,

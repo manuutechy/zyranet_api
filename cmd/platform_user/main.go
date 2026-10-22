@@ -14,6 +14,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/models"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -49,12 +50,15 @@ func main() {
 		Email:    *email,
 		Password: string(hash),
 		Status:   "active",
+		Role:     "owner", // accounts made from the server console are owners
 	}
 	if err := db.Where(models.PlatformUser{Email: *email}).
 		Assign(models.PlatformUser{Name: displayName, Password: string(hash), Status: "active"}).
 		FirstOrCreate(&user).Error; err != nil {
 		log.Fatalf("[platform_user] failed to create/update platform user: %v", err)
 	}
+	// A reset password signs out every session that used the old one.
+	db.Model(&models.PlatformUser{}).Where("id = ?", user.ID).Update("token_version", gorm.Expr("token_version + 1"))
 
 	log.Printf("[platform_user] Ready — %s <%s> (id=%d)", user.Name, user.Email, user.ID)
 }

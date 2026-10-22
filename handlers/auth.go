@@ -72,8 +72,12 @@ func Login(c *fiber.Ctx) error {
 	}, "Login successful.")
 }
 
-// Logout clears the admin session cookie (stateless JWT — nothing server-side to invalidate).
+// Logout clears the admin session cookie and revokes the user's tokens (a
+// copied token stops working too — see Claims.TokenVersion).
 func Logout(c *fiber.Ctx) error {
+	if claims := middleware.GetClaims(c); claims != nil && claims.UserID != 0 {
+		middleware.RevokeAdminSessions(config.DB, claims.UserID)
+	}
 	middleware.ClearAuthCookie(c, middleware.AdminCookieName)
 	return utils.SuccessResponse(c, nil, "Logged out successfully.")
 }

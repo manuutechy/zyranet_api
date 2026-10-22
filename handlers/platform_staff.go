@@ -9,6 +9,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// validPlatformRoles: "owner" may change shared credentials, move money and
+// manage staff; "staff" may do everything else (see RequirePlatformOwner).
+var validPlatformRoles = map[string]bool{"owner": true, "staff": true}
+
 // PlatformStaffIndex lists every Super Admin (SA) platform account.
 func PlatformStaffIndex(c *fiber.Ctx) error {
 	var staff []models.PlatformUser
@@ -22,9 +26,18 @@ func PlatformStaffStore(c *fiber.Ctx) error {
 		Name     string `json:"name"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		Role     string `json:"role"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Email == "" || body.Password == "" {
 		return utils.ErrorResponse(c, "name, email, and password are required.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	// New platform accounts are "staff" unless an owner explicitly makes
+	// another owner.
+	if body.Role == "" {
+		body.Role = "staff"
+	}
+	if !validPlatformRoles[body.Role] {
+		return utils.ErrorResponse(c, "role must be owner or staff.", "Validation failed.", fiber.StatusUnprocessableEntity)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
@@ -37,6 +50,7 @@ func PlatformStaffStore(c *fiber.Ctx) error {
 		Email:    body.Email,
 		Password: string(hash),
 		Status:   "active",
+		Role:     body.Role,
 	}
 	if err := config.DB.Create(&user).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create platform user (email may already be taken).", fiber.StatusInternalServerError)
@@ -56,17 +70,33 @@ func PlatformStaffUpdate(c *fiber.Ctx) error {
 		Name     string `json:"name"`
 		Status   string `json:"status"`
 		Password string `json:"password"`
+		Role     string `json:"role"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	if body.Role != "" && !validPlatformRoles[body.Role] {
+		return utils.ErrorResponse(c, "role must be owner or staff.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	// Nobody demotes or disables themselves (that's how the last owner gets
+	// locked out).
+	if claims := middleware.GetClaims(c); claims != nil && claims.PlatformUserID == user.ID &&
+		((body.Role != "" && body.Role != user.Role) || (body.Status != "" && body.Status != "active")) {
+		return utils.ErrorResponse(c, "You cannot change your own role or disable your own account.", "", fiber.StatusBadRequest)
+	}
 
 	updates := map[string]interface{}{}
+	revoke := false
 	if body.Name != "" {
 		updates["name"] = body.Name
 	}
 	if body.Status != "" {
 		updates["status"] = body.Status
+		revoke = revoke || body.Status != user.Status
+	}
+	if body.Role != "" {
+		updates["role"] = body.Role
+		revoke = revoke || body.Role != user.Role
 	}
 	if body.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
@@ -74,10 +104,15 @@ func PlatformStaffUpdate(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, "Password hashing failed.", "", fiber.StatusInternalServerError)
 		}
 		updates["password"] = string(hash)
+		revoke = true
 	}
 
 	if err := config.DB.Model(&user).Updates(updates).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
+	}
+	if revoke {
+		// Their open sessions end; they sign in again with the new details.
+		middleware.RevokePlatformSessions(config.DB, user.ID)
 	}
 	config.DB.First(&user, user.ID)
 	return utils.SuccessResponse(c, user, "Platform user updated successfully.")

@@ -321,6 +321,11 @@ func ZoneExecCommand(c *fiber.Ctx) error {
 	if !canAccessZone(c, zone) {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
+	// Raw RouterOS commands can reconfigure or wipe the router (and give
+	// away free access), so only the ISP's owner may run them.
+	if claims := middleware.GetClaims(c); claims == nil || claims.Role != "super_admin" {
+		return utils.ErrorResponse(c, "Only the account owner can run router commands.", "Forbidden.", fiber.StatusForbidden)
+	}
 
 	var body struct {
 		Command string `json:"command"`
