@@ -323,14 +323,11 @@ func (s *MikroTikService) PushFullConfig(zone *models.Zone) (map[string]interfac
 	hotspotCount := 0
 	pppoeCount := 0
 
-	var vouchers []models.Voucher
-	config.DB.Preload("Package").Where("zone_id = ? AND status IN ?", zone.ID, []string{"unused", "active"}).Find(&vouchers)
-
 	var customers []models.Customer
 	config.DB.Preload("Package").Where("zone_id = ? AND type = ? AND status = ?", zone.ID, "pppoe", "active").Find(&customers)
 
-	// Push Hotspot
-	count, err := s.PushHotspotUsers(zone, vouchers)
+	// Push Hotspot: each paid-up device's own login
+	count, err := s.PushActiveCredentials(zone)
 	if err != nil {
 		errors = append(errors, "Hotspot Push Error: "+err.Error())
 	} else {
@@ -364,12 +361,33 @@ func (s *MikroTikService) PushFullConfig(zone *models.Zone) (map[string]interfac
 	}, nil
 }
 
-// PushHotspotUsers pushes voucher credentials to the router hotspot.
+// PushHotspotUsers used to put each voucher code on the router as a
+// username=password=code user. That let anyone who knew a code log in at the
+// router directly, many devices at once, without the voucher ever being
+// redeemed (so its time never started). Vouchers are now redeemed on the
+// portal, which gives the device its own login. Kept so existing callers
+// compile; it pushes nothing.
 func (s *MikroTikService) PushHotspotUsers(zone *models.Zone, vouchers []models.Voucher) (int, error) {
-	if zone.ConnectionType == "api" {
-		return s.pushHotspotUsersAPI(zone, vouchers)
+	return 0, nil
+}
+
+// PushActiveCredentials pushes every active device login of the zone's ISP to
+// the router (used by "push full config").
+func (s *MikroTikService) PushActiveCredentials(zone *models.Zone) (int, error) {
+	var creds []models.HotspotCredential
+	config.DB.Where("organization_id = ? AND status = ? AND expires_at > ?", zone.OrganizationID, "active", time.Now()).Find(&creds)
+	count := 0
+	var firstErr error
+	for i := range creds {
+		if err := s.PushCredential(zone, &creds[i]); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		count++
 	}
-	return s.pushHotspotUsersREST(zone, vouchers)
+	return count, firstErr
 }
 
 // PushPppoeSecrets pushes PPPoE credentials to the router.
@@ -478,89 +496,186 @@ func (s *MikroTikService) getStatusAPI(zone *models.Zone) (*RouterStatus, error)
 	}, nil
 }
 
-func (s *MikroTikService) pushHotspotUsersAPI(zone *models.Zone, vouchers []models.Voucher) (int, error) {
-	client, err := s.dialAPI(zone)
-	if err != nil {
-		return 0, err
-	}
-	defer client.Close()
-
-	count := 0
-	for _, v := range vouchers {
-		if v.Package == nil {
-			continue
-		}
-		profileName := sanitizeProfileName(v.Package.Name)
-		s.ensureHotspotProfileAPI(client, v.Package, profileName)
-		// Remove existing
-		if reply, err := client.Run("/ip/hotspot/user/print", "?name="+v.Code); err == nil {
-			for _, row := range reply.Re {
-				client.Run("/ip/hotspot/user/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
-			}
-		}
-		// Add user
-		_, err := client.Run("/ip/hotspot/user/add", //nolint:errcheck
-			"=name="+v.Code,
-			"=password="+v.Code,
-			"=profile="+profileName,
-			"=comment=pkg:"+profileName,
-		)
-		if err == nil {
-			count++
+// WhitelistMAC pushes the device's own router login(s) straight to the router
+// for instant access, if the device already has an active login (see
+// EnsureCredential). It never creates a login and never uses the MAC as a
+// username/password: a MAC is visible to everyone on the WiFi, so it can't
+// be a secret. With nothing to push it returns nil; the router's 1-minute
+// sync brings new logins anyway (routers behind NAT can't be dialled).
+func (s *MikroTikService) WhitelistMAC(zone *models.Zone, mac string, pkg *models.Package) error {
+	var firstErr error
+	for _, cred := range ActiveCredentialsForMAC(zone.OrganizationID, mac) {
+		c := cred
+		if err := s.PushCredential(zone, &c); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return count, nil
+	return firstErr
 }
 
-// WhitelistMAC adds a hotspot user on the router using the MAC address.
-func (s *MikroTikService) WhitelistMAC(zone *models.Zone, mac string, pkg *models.Package) error {
+// PushCredential adds/updates one device login on the router over the API or
+// REST. Best-effort: the sync script is the source of truth.
+func (s *MikroTikService) PushCredential(zone *models.Zone, cred *models.HotspotCredential) error {
+	if config.Config.AppEnv == "local" || zone == nil || cred == nil {
+		return nil
+	}
+	var pkg models.Package
+	if err := config.DB.First(&pkg, cred.PackageID).Error; err != nil {
+		return err
+	}
+	mac, ok := NormalizeMAC(cred.MacAddress)
+	if !ok {
+		return ErrBadMAC
+	}
 	profileName := sanitizeProfileName(pkg.Name)
+	fields := map[string]string{
+		"name":         cred.Username,
+		"password":     cred.Password,
+		"mac-address":  mac,
+		"profile":      profileName,
+		"limit-uptime": credentialLimitUptime(cred),
+		"comment":      credentialComment(cred),
+	}
+	if pkg.DataLimitMB != nil && *pkg.DataLimitMB > 0 {
+		fields["limit-bytes-total"] = fmt.Sprintf("%d", int64(*pkg.DataLimitMB)*1024*1024)
+	}
+
 	if zone.ConnectionType == "api" {
 		client, err := s.dialAPI(zone)
 		if err != nil {
 			return err
 		}
 		defer client.Close()
-
-		s.ensureHotspotProfileAPI(client, pkg, profileName)
-
-		// Remove existing user with this MAC username
-		if reply, err := client.Run("/ip/hotspot/user/print", "?name="+mac); err == nil {
+		s.ensureHotspotProfileAPI(client, &pkg, profileName)
+		if reply, err := client.Run("/ip/hotspot/user/print", "?name="+cred.Username); err == nil {
 			for _, row := range reply.Re {
 				client.Run("/ip/hotspot/user/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
 			}
 		}
+		args := []string{"/ip/hotspot/user/add"}
+		for _, k := range sortedKeys(fields) {
+			args = append(args, "="+k+"="+fields[k])
+		}
+		if _, err := client.Run(args...); err != nil {
+			return err
+		}
+		MarkCredentialPushed(cred.ID, zone.ID)
+		return nil
+	}
 
-		// Add hotspot user
-		_, err = client.Run("/ip/hotspot/user/add",
-			"=name="+mac,
-			"=password="+mac,
-			"=profile="+profileName,
-			"=comment=pkg:"+profileName+";mac_whitelist",
-		)
+	s.ensureHotspotProfileREST(zone, &pkg, profileName)
+	if rows, err := s.restGet(zone, "/ip/hotspot/user?name="+cred.Username); err == nil {
+		for _, row := range rows {
+			if id, ok := row[".id"].(string); ok {
+				s.restDelete(zone, "/ip/hotspot/user/"+id) //nolint:errcheck
+			}
+		}
+	}
+	body := map[string]interface{}{}
+	for k, v := range fields {
+		body[k] = v
+	}
+	if err := s.restPost(zone, "/ip/hotspot/user/add", body); err != nil {
 		return err
-	} else {
-		// REST connection
-		s.ensureHotspotProfileREST(zone, pkg, profileName)
+	}
+	MarkCredentialPushed(cred.ID, zone.ID)
+	return nil
+}
 
-		// Remove existing
-		if rows, err := s.restGet(zone, "/ip/hotspot/user?name="+mac); err == nil {
-			for _, row := range rows {
-				if id, ok := row["id"].(string); ok {
-					s.restDelete(zone, "/ip/hotspot/user/"+id) //nolint:errcheck
+// RemoveCredentialUser takes a retired login off the router and ends its
+// session. Best-effort: the sync script removes it too.
+func (s *MikroTikService) RemoveCredentialUser(zone *models.Zone, username string) error {
+	if config.Config.AppEnv == "local" || zone == nil || username == "" {
+		return nil
+	}
+	if zone.ConnectionType == "api" {
+		client, err := s.dialAPI(zone)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		for _, path := range []string{"/ip/hotspot/active", "/ip/hotspot/cookie"} {
+			if reply, err := client.Run(path+"/print", "?user="+username); err == nil {
+				for _, row := range reply.Re {
+					client.Run(path+"/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
 				}
 			}
 		}
-
-		// Add hotspot user
-		err := s.restPost(zone, "/ip/hotspot/user", map[string]interface{}{
-			"name":     mac,
-			"password": mac,
-			"profile":  profileName,
-			"comment":  "pkg:" + profileName + ";mac_whitelist",
-		})
-		return err
+		if reply, err := client.Run("/ip/hotspot/user/print", "?name="+username); err == nil {
+			for _, row := range reply.Re {
+				client.Run("/ip/hotspot/user/remove", "=.id="+row.Map[".id"]) //nolint:errcheck
+			}
+		}
+		return nil
 	}
+	for _, base := range []string{"/ip/hotspot/active", "/ip/hotspot/cookie"} {
+		if rows, err := s.restGet(zone, base+"?user="+username); err == nil {
+			for _, row := range rows {
+				if id, ok := row[".id"].(string); ok {
+					s.restDelete(zone, base+"/"+id) //nolint:errcheck
+				}
+			}
+		}
+	}
+	if rows, err := s.restGet(zone, "/ip/hotspot/user?name="+username); err == nil {
+		for _, row := range rows {
+			if id, ok := row[".id"].(string); ok {
+				s.restDelete(zone, "/ip/hotspot/user/"+id) //nolint:errcheck
+			}
+		}
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// credentialComment tags a router user as a Zyra Net device login.
+func credentialComment(cred *models.HotspotCredential) string {
+	return fmt.Sprintf("zyra:cred:%d", cred.ID)
+}
+
+// credentialLimitUptime is the router-side cap on how long the login can be
+// online in total: the time from (re)activation to expiry. The router counts
+// only time actually online, so this never cuts a customer short, but it
+// stops a login outliving its plan if the router can't reach us to sync.
+func credentialLimitUptime(cred *models.HotspotCredential) string {
+	d := cred.ExpiresAt.Sub(cred.ActivatedAt)
+	if d < time.Minute {
+		d = time.Minute
+	}
+	return RouterOSDuration(d)
+}
+
+// RouterOSDuration formats a duration the way RouterOS reads it (e.g. 1d2h3m4s).
+func RouterOSDuration(d time.Duration) string {
+	secs := int64(d.Round(time.Second).Seconds())
+	if secs <= 0 {
+		return "0s"
+	}
+	days := secs / 86400
+	secs %= 86400
+	h, m, sec := secs/3600, (secs%3600)/60, secs%60
+	var sb strings.Builder
+	if days > 0 {
+		fmt.Fprintf(&sb, "%dd", days)
+	}
+	if h > 0 {
+		fmt.Fprintf(&sb, "%dh", h)
+	}
+	if m > 0 {
+		fmt.Fprintf(&sb, "%dm", m)
+	}
+	if sec > 0 || sb.Len() == 0 {
+		fmt.Fprintf(&sb, "%ds", sec)
+	}
+	return sb.String()
 }
 
 func (s *MikroTikService) pushPppoeSecretsAPI(zone *models.Zone, customers []models.Customer) (int, error) {
@@ -910,35 +1025,6 @@ func (s *MikroTikService) getStatusREST(zone *models.Zone) (*RouterStatus, error
 		RouterOSVersion:  fmt.Sprintf("%v", res["version"]),
 		LastSeenAt:       now,
 	}, nil
-}
-
-func (s *MikroTikService) pushHotspotUsersREST(zone *models.Zone, vouchers []models.Voucher) (int, error) {
-	count := 0
-	for _, v := range vouchers {
-		if v.Package == nil {
-			continue
-		}
-		profileName := sanitizeProfileName(v.Package.Name)
-		s.ensureHotspotProfileREST(zone, v.Package, profileName)
-
-		// Remove existing
-		if rows, err := s.restGet(zone, "/ip/hotspot/user?name="+v.Code); err == nil {
-			for _, row := range rows {
-				if id, ok := row[".id"].(string); ok {
-					s.restDelete(zone, "/ip/hotspot/user/"+id) //nolint:errcheck
-				}
-			}
-		}
-		// Add user
-		s.restPost(zone, "/ip/hotspot/user", map[string]interface{}{ //nolint:errcheck
-			"name":     v.Code,
-			"password": v.Code,
-			"profile":  profileName,
-			"comment":  "pkg:" + profileName,
-		})
-		count++
-	}
-	return count, nil
 }
 
 func (s *MikroTikService) pushPppoeSecretsREST(zone *models.Zone, customers []models.Customer) (int, error) {

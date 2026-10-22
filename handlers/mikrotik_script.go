@@ -3,13 +3,13 @@ package handlers
 import (
 	"crypto/subtle"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -28,14 +28,14 @@ func zoneTokenAuthorized(c *fiber.Ctx, zone *models.Zone) bool {
 		return true
 	}
 
-	// No valid token: this is either a router still running a pre-token script
-	// or someone guessing zone ids. Record it against the zone so the platform
-	// can see which routers need re-provisioning, then refuse — unless the
-	// operator has explicitly re-opened the legacy path for a migration window.
-	// (A *wrong* token is never accepted, and neither is a matching source IP:
-	// a token is the only credential.)
+	// No valid token: a router still running a pre-token script, or someone
+	// guessing zone ids. Record it against the zone so the platform can see
+	// which routers need re-provisioning (re-run the setup one-liner), then
+	// refuse. There is no way back in without the token: the legacy
+	// ALLOW_LEGACY_ROUTER_REQUESTS escape hatch is gone, because with it on
+	// anyone could pull any zone's sync script.
 	noteLegacyRouterRequest(zone.ID)
-	return supplied == "" && config.Config.AllowLegacyRouterRequests
+	return false
 }
 
 // noteLegacyRouterRequest stamps the zone with the time of a token-less or
@@ -148,30 +148,15 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
-	updates := map[string]interface{}{
-		"last_seen_at": &now,
-		"last_status":  "online",
-	}
-
-	// Update router IP if it was unconfigured or a private placeholder (learn real public IP)
-	// Never overwrite WireGuard tunnel IP (10.200.x.x) or already configured valid IPs
-	clientIP := c.Get("CF-Connecting-IP")
-	if clientIP == "" {
-		clientIP = c.Get("X-Forwarded-For")
-	}
-	if clientIP == "" {
-		clientIP = c.IP()
-	}
-	if clientIP != "" && clientIP != "127.0.0.1" && !strings.HasPrefix(zone.RouterIP, "10.200.") && (zone.RouterIP == "" || zone.RouterIP == "10.100.0.1") {
-		updates["router_ip"] = clientIP
-	}
-
-	board := strings.TrimSpace(c.Query("board"))
-	if board != "" && (zone.RouterName == "" || zone.RouterName == "Default Router" || zone.RouterName == "RB951") {
-		updates["router_name"] = board
-	}
-
-	config.DB.Model(&zone).Updates(updates)
+	// Alive: last_seen, router/public IP from this authenticated request's
+	// real source (c.IP() honours CF-Connecting-IP only from trusted
+	// proxies, so it can't be spoofed with a header), and outage
+	// compensation if it had been away for over 10 minutes.
+	services.RecordRouterCheckIn(&zone, services.RouterCheckIn{
+		SourceIP:  c.IP(),
+		Board:     c.Query("board"),
+		Heartbeat: true,
+	})
 
 	// Ingest live telemetry metrics if sent in query string
 	cpuLoad := c.QueryInt("cpu", -1)
@@ -217,8 +202,15 @@ func PublicZoneSync(c *fiber.Ctx) error {
 	if err != nil {
 		return c.SendString("# " + err.Error() + "\n")
 	}
+	// One small write per sync (not per customer): when the router last got
+	// its logins, so the next sync knows what changed since, and the portal
+	// knows when a new login has reached the router.
+	now := time.Now()
+	config.DB.Model(&models.Zone{}).Where("id = ?", zone.ID).UpdateColumn("last_sync_at", now)
+	if zone.LastSeenAt == nil || time.Since(*zone.LastSeenAt) > services.RouterOfflineAfter {
+		services.RecordRouterCheckIn(&zone, services.RouterCheckIn{SourceIP: c.IP()})
+	}
 
 	c.Set("Content-Type", "text/plain; charset=utf-8")
 	return c.SendString(content)
 }
-

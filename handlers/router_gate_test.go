@@ -11,6 +11,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 )
 
 // gateApp exposes zoneTokenAuthorized the way the router-facing endpoints use it.
@@ -108,18 +109,20 @@ func TestRouterGate_RecordsLegacyRoutersAndOnlyWritesOncePerWindow(t *testing.T)
 	}
 }
 
-func TestRouterGate_MigrationEscapeHatch(t *testing.T) {
+// The legacy no-token escape hatch is gone: even with the old setting on, a
+// router without its zone's token gets nothing (and is still recorded).
+func TestRouterGate_NoEscapeHatch(t *testing.T) {
 	z := seedRouterZone(t)
 	config.Config.AllowLegacyRouterRequests = true
 
-	if st := gateStatus(t, fmt.Sprintf("/z/%d", z.ID)); st != 200 {
-		t.Errorf("hatch on, no token: %d, want 200 (old routers keep working during migration)", st)
+	if st := gateStatus(t, fmt.Sprintf("/z/%d", z.ID)); st != 403 {
+		t.Errorf("legacy setting on, no token: %d, want 403", st)
 	}
 	if legacyStamp(t, z.ID) == nil {
-		t.Error("requests served through the hatch must still be recorded, so the list shows what's left to migrate")
+		t.Error("token-less requests must still be recorded, so the list shows what's left to re-provision")
 	}
 	if st := gateStatus(t, fmt.Sprintf("/z/%d?token=wrong", z.ID)); st != 403 {
-		t.Errorf("hatch on, wrong token: %d, want 403 — the hatch is for missing tokens only", st)
+		t.Errorf("wrong token: %d, want 403", st)
 	}
 }
 
@@ -196,8 +199,13 @@ func TestWeakDeviceSession_CanReadButNotChangeOrSpend(t *testing.T) {
 	}
 }
 
-func TestCustomerAuthByDevice_IssuesAWeakSession(t *testing.T) {
+// A MAC address alone no longer signs anyone in; the device token does, and
+// then only as a weak (device) session.
+func TestCustomerAuthByDevice_NeedsDeviceTokenAndIssuesAWeakSession(t *testing.T) {
 	setupC2BTestDB(t)
+	if err := services.MigrateRouterAccess(config.DB); err != nil {
+		t.Fatal(err)
+	}
 	config.Config.JWTSecret = "device-test-secret-device-test-secret"
 	config.Config.JWTExpiry = time.Hour
 	a := seedISP(t, "isp", "", 1)
@@ -208,9 +216,29 @@ func TestCustomerAuthByDevice_IssuesAWeakSession(t *testing.T) {
 
 	app := fiber.New()
 	app.Get("/customer/auth/device", CustomerAuthByDevice)
+
+	// MAC only: not recognised, no session.
 	resp, err := app.Test(httptest.NewRequest("GET", "/customer/auth/device?mac="+mac, nil), -1)
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("device auth failed: %v %v", err, resp)
+	}
+	for _, ck := range resp.Cookies() {
+		if ck.Name == middleware.CustomerCookieName && ck.Value != "" {
+			t.Fatal("a MAC alone must not get a session")
+		}
+	}
+
+	cred, err := services.EnsureCredential(c.ID, mac, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl, err := services.IssueRouterLogin(cred, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = app.Test(httptest.NewRequest("GET", "/customer/auth/device?mac="+mac+"&device_token="+rl.DeviceToken, nil), -1)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("device auth with token failed: %v %v", err, resp)
 	}
 	var token string
 	for _, ck := range resp.Cookies() {

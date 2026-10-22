@@ -109,32 +109,8 @@ func VoucherGenerate(c *fiber.Ctx) error {
 		}
 	}
 
-	// Push newly generated vouchers to router hotspot
-	if mikrotikSvcGlobal == nil {
-		log.Printf("[VoucherGenerate] WARNING: mikrotikSvcGlobal is nil")
-	} else if len(createdVouchers) > 0 {
-		var voucherModels []models.Voucher
-		for _, v := range createdVouchers {
-			var vm models.Voucher
-			if err := config.DB.Preload("Package").First(&vm, v.ID).Error; err != nil {
-				log.Printf("[VoucherGenerate] Preload failed for voucher %d: %v", v.ID, err)
-			} else if vm.Package == nil {
-				log.Printf("[VoucherGenerate] Voucher %d has nil package", v.ID)
-			} else {
-				voucherModels = append(voucherModels, vm)
-			}
-		}
-		if len(voucherModels) > 0 {
-			go func(z models.Zone, vm []models.Voucher) {
-				count, err := mikrotikSvcGlobal.PushHotspotUsers(&z, vm)
-				if err != nil {
-					log.Printf("[VoucherGenerate] PushHotspotUsers to router failed: %v", err)
-				} else {
-					log.Printf("[VoucherGenerate] Successfully pushed %d vouchers to router at %s", count, z.RouterIP)
-				}
-			}(targetZone, voucherModels)
-		}
-	}
+	// Vouchers are not pushed to the router as users any more: a voucher is
+	// redeemed on the portal, which gives that device its own router login.
 
 	if body.Quantity == 1 {
 		return utils.SuccessResponse(c, createdVouchers[0], "Voucher generated successfully.", fiber.StatusCreated)
@@ -175,46 +151,47 @@ func VoucherDestroy(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, nil, "Voucher deleted successfully.")
 }
 
-// resolveCustomerForVoucher resolves an existing customer or auto-creates one
-// so voucher redemption works seamlessly for anyone without requiring pre-registration.
-func resolveCustomerForVoucher(c *fiber.Ctx, voucher *models.Voucher, cleanMac, phone, name string) (*models.Customer, error) {
+// resolveCustomerForVoucher picks whose account a voucher's time goes on.
+// Only a proven identity counts: a customer session from OTP/payment, or the
+// device token of an anonymous voucher/guest account on this device. A MAC
+// or a typed phone number is not proof (both were used to land on — and get
+// a full session for — someone else's account). Anyone else gets a fresh
+// anonymous voucher account.
+func resolveCustomerForVoucher(c *fiber.Ctx, voucher *models.Voucher, cleanMac, phone, name, deviceToken string) (*models.Customer, error) {
 	var customer models.Customer
 
-	// 1. Try resolving from JWT session cookie or Bearer claims
-	claims := middleware.OptionalCustomerClaims(c)
-	if claims == nil {
-		claims = middleware.GetClaims(c)
-	}
-	if claims != nil && claims.CustomerID != 0 {
-		if err := config.DB.First(&customer, claims.CustomerID).Error; err == nil && customer.ID != 0 {
+	// 1. A session proven by OTP / payment, of this voucher's ISP.
+	if claims := strongCustomerClaims(c); claims != nil {
+		if err := config.DB.First(&customer, claims.CustomerID).Error; err == nil && customer.ID != 0 &&
+			services.CustomerBelongsToZoneISP(customer.ID, voucher.ZoneID) {
 			return &customer, nil
 		}
 	}
 
-	// 2. Try resolving by MAC address
-	if cleanMac != "" {
-		if err := config.DB.Where("mac_address = ?", cleanMac).Order("updated_at DESC").First(&customer).Error; err == nil && customer.ID != 0 {
-			return &customer, nil
+	// 2. This device's anonymous account (time stacks on it), proven by its token.
+	if tok := deviceTokenFrom(c, deviceToken); tok != "" {
+		if cred, err := services.CredentialByDeviceToken(tok); err == nil {
+			if m, ok := services.NormalizeMAC(cleanMac); ok && m == cred.MacAddress {
+				if err := config.DB.First(&customer, cred.CustomerID).Error; err == nil && isAnonymousAccount(&customer) &&
+					services.CustomerBelongsToZoneISP(customer.ID, voucher.ZoneID) {
+					return &customer, nil
+				}
+			}
 		}
 	}
 
-	// 3. Try resolving by phone if provided
-	if phone != "" {
-		formattedPhone := utils.FormatPhone(phone)
-		if err := config.DB.Where("phone = ? AND zone_id = ?", formattedPhone, voucher.ZoneID).First(&customer).Error; err == nil && customer.ID != 0 {
-			return &customer, nil
-		}
-	}
-
-	// 4. Auto-create customer on the fly
+	// 3. A new anonymous voucher account.
 	var count int64
 	config.DB.Unscoped().Model(&models.Customer{}).Where("account_number LIKE 'ZYR#VCHR#%' OR account_number LIKE 'ZYR#GUEST#%'").Count(&count)
 
-	guestPhone := strings.TrimSpace(phone)
-	if guestPhone != "" {
-		guestPhone = utils.FormatPhone(guestPhone)
-	} else {
-		guestPhone = fmt.Sprintf("VCHR%d", 10001+count)
+	guestPhone := fmt.Sprintf("VCHR%d", 10001+count)
+	if p := strings.TrimSpace(phone); p != "" {
+		// Keep the number for receipts only if nobody at this ISP has it yet
+		// (a typed number must not attach this account to someone else's).
+		formatted := utils.FormatPhone(p)
+		if _, taken := services.CustomerByPhoneForZone(voucher.ZoneID, formatted); !taken {
+			guestPhone = formatted
+		}
 	}
 
 	accountNum := fmt.Sprintf("ZYR#VCHR#%d", 10001+count)
@@ -253,34 +230,38 @@ func resolveCustomerForVoucher(c *fiber.Ctx, voucher *models.Voucher, cleanMac, 
 // VoucherRedeem redeems a voucher code (public endpoint).
 func VoucherRedeem(c *fiber.Ctx) error {
 	var body struct {
-		Code  string `json:"code"`
-		Phone string `json:"phone"`
-		Name  string `json:"name"`
-		Mac   string `json:"mac"`
+		Code        string `json:"code"`
+		Phone       string `json:"phone"`
+		Name        string `json:"name"`
+		Mac         string `json:"mac"`
+		ZoneID      string `json:"zone_id"`
+		DeviceToken string `json:"device_token"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
 		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
 	}
 
-	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name)
+	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name, body.ZoneID, body.DeviceToken)
 }
 
 // VoucherRedeemAuthenticated redeems a voucher (authenticated or unauthenticated guest).
 func VoucherRedeemAuthenticated(c *fiber.Ctx) error {
 	var body struct {
-		Code  string `json:"code"`
-		Mac   string `json:"mac"`
-		Phone string `json:"phone"`
-		Name  string `json:"name"`
+		Code        string `json:"code"`
+		Mac         string `json:"mac"`
+		Phone       string `json:"phone"`
+		Name        string `json:"name"`
+		ZoneID      string `json:"zone_id"`
+		DeviceToken string `json:"device_token"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
 		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
 	}
 
-	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name)
+	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name, body.ZoneID, body.DeviceToken)
 }
 
-func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nameInput string) error {
+func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nameInput, zoneInput, deviceToken string) error {
 	cleanCode := strings.ToUpper(strings.TrimSpace(codeInput))
 	cleanMac := strings.ToLower(strings.TrimSpace(macInput))
 	cleanMac = strings.ReplaceAll(cleanMac, "-", ":")
@@ -296,11 +277,18 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	if voucher.ExpiresAt != nil && time.Now().UTC().After(*voucher.ExpiresAt) {
 		return utils.ErrorResponse(c, "This voucher ticket has expired.", "", fiber.StatusBadRequest)
 	}
+	// A voucher only works on its own ISP's WiFi.
+	zone := zoneByID(zoneInput)
+	if zone != nil {
+		if org, ok := services.ZoneOrganization(voucher.ZoneID); !ok || org != zone.OrganizationID {
+			return utils.ErrorResponse(c, "Invalid voucher ticket code.", "Voucher not found.", fiber.StatusBadRequest)
+		}
+	}
 
 	// 2. Resolve or auto-create customer
-	customer, err := resolveCustomerForVoucher(c, &voucher, cleanMac, phoneInput, nameInput)
+	customer, err := resolveCustomerForVoucher(c, &voucher, cleanMac, phoneInput, nameInput, deviceToken)
 	if err != nil {
-		return utils.ErrorResponse(c, "Failed to initialize customer session.", err.Error(), fiber.StatusInternalServerError)
+		return utils.ErrorResponse(c, "Failed to initialize customer session.", "", fiber.StatusInternalServerError)
 	}
 
 	// 3. Redeem voucher via VoucherService
@@ -311,7 +299,7 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 
 	// Update customer name and MAC if provided
 	updates := map[string]interface{}{}
-	if nameInput != "" && customer.Name != nameInput {
+	if nameInput != "" && customer.Name != nameInput && !isRealCustomerName(customer.Name) {
 		updates["name"] = nameInput
 		customer.Name = nameInput
 	}
@@ -323,7 +311,8 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 		config.DB.Model(&models.Customer{}).Where("id = ?", customer.ID).Updates(updates)
 	}
 
-	// 4. Issue a valid session token and cookie so client is automatically authenticated
+	// 4. Issue a valid session token and cookie so client is automatically
+	// authenticated (holding the voucher code is the proof).
 	token, _ := middleware.GenerateCustomerToken(customer.ID)
 	if token != "" {
 		middleware.SetAuthCookie(c, middleware.CustomerCookieName, token)
@@ -333,34 +322,24 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	redeemedPkg := result["package"].(models.Package)
 	redeemedCustomer := result["customer"].(models.Customer)
 
-	// 5. Whitelist MAC on zone router if available
-	effectiveMac := cleanMac
-	if effectiveMac == "" && redeemedCustomer.MacAddress != nil {
-		effectiveMac = *redeemedCustomer.MacAddress
-	}
-
-	if effectiveMac != "" && mikrotikSvcGlobal != nil {
-		var zone models.Zone
-		if err := config.DB.First(&zone, redeemedCustomer.ZoneID).Error; err == nil {
-			go func(z models.Zone, m string, p models.Package) {
-				if err := mikrotikSvcGlobal.WhitelistMAC(&z, m, &p); err != nil {
-					log.Printf("[VoucherRedeem] WhitelistMAC for %s failed: %v", m, err)
-				} else {
-					log.Printf("[VoucherRedeem] Successfully whitelisted MAC %s on router at %s", m, z.RouterIP)
-				}
-			}(zone, effectiveMac, redeemedPkg)
+	// 5. This device's own router login (never a shared pkg-<id> user, never
+	// the voucher code itself as a router user).
+	if cleanMac != "" {
+		if zone == nil {
+			zone = zoneByID(fmt.Sprint(redeemedCustomer.ZoneID))
+		}
+		if rl, _, err := grantRouterLogin(redeemedCustomer.ID, cleanMac, zone, "voucher", true); err == nil {
+			result["router_login"] = rl
+		} else {
+			log.Printf("[VoucherRedeem] no router login for customer %d on %s: %v", redeemedCustomer.ID, cleanMac, err)
 		}
 	}
 
-	pkgTag := fmt.Sprintf("pkg-%d", redeemedPkg.ID)
 	speed := fmt.Sprintf("%.0f Mbps", float64(redeemedPkg.SpeedDownloadKbps)/1024)
-
-	result["username"] = pkgTag
-	result["password"] = pkgTag
 	result["plan_name"] = redeemedPkg.Name
 	result["speed"] = speed
 	result["expires_at"] = redeemedCustomer.ExpiresAt
-	result["customer"] = customer
+	result["customer"] = buildCustomerProfile(customer)
 
 	return utils.SuccessResponse(c, result, "Voucher redeemed successfully. Internet activated.")
 }
