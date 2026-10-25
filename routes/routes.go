@@ -270,19 +270,21 @@ func Register(app *fiber.App) {
 	admin.Get("/zones/:id/queue-tuning-script", adminAuth, middleware.IsSuperAdmin(), handlers.ZoneQueueTuningScript)
 	admin.Post("/customers/cleanup-inactive", adminAuth, handlers.CustomerCleanupInactive)
 
-	// Payments
-	admin.Get("/payments", adminAuth, handlers.PaymentIndex)
+	// Payments — the money views follow the live-ops rule: owner, finance and
+	// zone managers (own zone, pinned in the handlers). Never field agents.
+	seesMoney := middleware.RequireRoles("super_admin", "finance", "zone_manager")
+	admin.Get("/payments", adminAuth, seesMoney, handlers.PaymentIndex)
 	admin.Post("/payments/manual", adminAuth, handlers.PaymentRecordManual)
-	admin.Get("/payments/:id", adminAuth, handlers.PaymentShow)
-	admin.Get("/payments/:id/invoice", adminAuth, handlers.PaymentInvoice)
-	admin.Post("/payments/:id/invoice/email", adminAuth, handlers.PaymentInvoiceEmail)
-	admin.Post("/payments/:id/invoice/sms", adminAuth, handlers.PaymentInvoiceSMS)
+	admin.Get("/payments/:id", adminAuth, seesMoney, handlers.PaymentShow)
+	admin.Get("/payments/:id/invoice", adminAuth, seesMoney, handlers.PaymentInvoice)
+	admin.Post("/payments/:id/invoice/email", adminAuth, seesMoney, handlers.PaymentInvoiceEmail)
+	admin.Post("/payments/:id/invoice/sms", adminAuth, seesMoney, handlers.PaymentInvoiceSMS)
 
 	// Reports
-	admin.Get("/reports/revenue", adminAuth, handlers.ReportRevenue)
+	admin.Get("/reports/revenue", adminAuth, seesMoney, handlers.ReportRevenue)
 	admin.Get("/reports/vouchers", adminAuth, handlers.ReportVouchers)
-	admin.Get("/reports/zones", adminAuth, handlers.ReportZones)
-	admin.Get("/reports/service-types", adminAuth, handlers.ReportServiceTypes)
+	admin.Get("/reports/zones", adminAuth, seesMoney, handlers.ReportZones)
+	admin.Get("/reports/service-types", adminAuth, seesMoney, handlers.ReportServiceTypes)
 
 	// Settings
 	admin.Get("/settings", adminAuth, handlers.SettingsIndex)

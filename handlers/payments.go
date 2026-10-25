@@ -22,7 +22,7 @@ func debitCredit(customerID uint, amount float64) bool {
 }
 
 func PaymentIndex(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
@@ -31,8 +31,9 @@ func PaymentIndex(c *fiber.Ctx) error {
 	var payments []models.Payment
 	var total int64
 
-	query := config.DB.Model(&models.Payment{}).Preload("Customer").Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
-	if z := c.Query("zone_id"); z != "" {
+	query := config.DB.Model(&models.Payment{}).Where("zone_id IN (?)", orgZoneIDs)
+	// A zone manager only ever sees their own zone's payments.
+	if z := scopedZoneID(c, c.Query("zone_id")); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
 	if m := c.Query("method"); m != "" {
@@ -44,6 +45,15 @@ func PaymentIndex(c *fiber.Ctx) error {
 	if cid := c.Query("customer_id"); cid != "" {
 		query = query.Where("customer_id = ?", cid)
 	}
+	// The admin's "M-Pesa receipt, phone..." box (was ignored, so typing did nothing).
+	if q := strings.TrimSpace(c.Query("search")); q != "" {
+		like := "%" + q + "%"
+		phoneLike := like
+		if p := phoneSearchForm(q); p != "" {
+			phoneLike = "%" + p + "%"
+		}
+		query = query.Where("(phone LIKE ? OR phone LIKE ? OR mpesa_receipt_number LIKE ? OR mpesa_transaction_id LIKE ?)", like, phoneLike, like, like)
+	}
 	if df := c.Query("date_from"); df != "" {
 		query = query.Where("DATE(created_at) >= ?", df)
 	}
@@ -51,9 +61,40 @@ func PaymentIndex(c *fiber.Ctx) error {
 		query = query.Where("DATE(created_at) <= ?", dt)
 	}
 
-	query.Count(&total)
-	query.Order("created_at DESC").Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&payments)
-	return utils.PaginatedResponse(c, payments, total, page, perPage)
+	query.Session(&gorm.Session{}).Count(&total)
+	query.Session(&gorm.Session{}).Preload("Customer").Preload("Zone").Preload("Package").
+		Order("created_at DESC").Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&payments)
+
+	// Totals for everything matching the filter (not just this page), so the
+	// money tiles above the table add up to the records, not to 15 rows.
+	var summary struct {
+		CompletedAmount float64 `json:"completed_amount"`
+		CompletedCount  int64   `json:"completed_count"`
+		StkAmount       float64 `json:"stk_amount"`
+		StkCount        int64   `json:"stk_count"`
+		C2bAmount       float64 `json:"c2b_amount"`
+		C2bCount        int64   `json:"c2b_count"`
+		ManualAmount    float64 `json:"manual_amount"`
+		ManualCount     int64   `json:"manual_count"`
+	}
+	query.Session(&gorm.Session{}).Select(`
+		COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) AS completed_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) AS stk_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN 1 ELSE 0 END), 0) AS stk_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) AS c2b_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'mpesa_c2b' THEN 1 ELSE 0 END), 0) AS c2b_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('manual', 'bank', 'cash') THEN amount ELSE 0 END), 0) AS manual_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('manual', 'bank', 'cash') THEN 1 ELSE 0 END), 0) AS manual_count`).
+		Scan(&summary)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    payments,
+		"meta":    fiber.Map{"total": total, "page": page, "per_page": perPage},
+		"summary": summary,
+		"message": "",
+	})
 }
 
 // PaymentShow returns a single payment, scoped to the caller's organization
@@ -63,12 +104,16 @@ func PaymentIndex(c *fiber.Ctx) error {
 // for the payer's own in-flight STK push is served by the customer JWT
 // route (CustomerAuthPayments) / hotspot status endpoints instead.
 func PaymentShow(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 	var payment models.Payment
-	if err := config.DB.Preload("Package").Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&payment, c.Params("id")).Error; err != nil {
+	q := config.DB.Preload("Package").Preload("Zone").Where("zone_id IN (?)", orgZoneIDs)
+	if z := scopedZoneID(c, ""); z != "" {
+		q = q.Where("zone_id = ?", z)
+	}
+	if err := q.First(&payment, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Payment record not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, payment, "")
@@ -252,7 +297,7 @@ var emailSvcGlobal = services.NewEmailService()
 // a payment ID. Emailing/SMS-ing the invoice to the actual customer is
 // still handled by PaymentInvoiceEmail/PaymentInvoiceSMS.
 func PaymentInvoice(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}

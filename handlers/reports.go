@@ -25,7 +25,8 @@ func scopedZoneID(c *fiber.Ctx, requested string) string {
 
 // ReportRevenue returns revenue summary and daily breakdown.
 func ReportRevenue(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	// Deleted zones stay in: money already earned must not vanish from the books.
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
@@ -120,7 +121,8 @@ func ReportRevenue(c *fiber.Ctx) error {
 
 // ReportVouchers returns voucher status summary and package breakdown.
 func ReportVouchers(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	// Deleted zones stay in: money already earned must not vanish from the books.
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
@@ -184,6 +186,19 @@ func ReportZones(c *fiber.Ctx) error {
 		zoneQuery = zoneQuery.Where("id = ?", *claims.ZoneID)
 	}
 	zoneQuery.Find(&zones)
+	// A deleted zone that took money still appears (status "deleted"), so the
+	// zone rows add up to the revenue report instead of silently dropping it.
+	if claims.Role != "zone_manager" {
+		var deleted []models.Zone
+		config.DB.Unscoped().Model(&models.Zone{}).
+			Where("organization_id = ? AND deleted_at IS NOT NULL", claims.OrganizationID).
+			Where("id IN (?)", config.DB.Model(&models.Payment{}).Select("zone_id").Where("status = ?", "completed")).
+			Find(&deleted)
+		for i := range deleted {
+			deleted[i].Status = "deleted"
+		}
+		zones = append(zones, deleted...)
+	}
 
 	type ZoneComparison struct {
 		ZoneID         uint    `json:"zone_id"`
@@ -234,7 +249,8 @@ func ReportZones(c *fiber.Ctx) error {
 // sessions right now, sessions started today, today's revenue, weekly revenue,
 // monthly revenue, active customers, and total customers.
 func ReportServiceTypes(c *fiber.Ctx) error {
-	orgZoneIDs, err := middleware.OrgZoneIDs(c)
+	// Deleted zones stay in: money already earned must not vanish from the books.
+	orgZoneIDs, err := middleware.OrgZoneIDsWithDeleted(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}

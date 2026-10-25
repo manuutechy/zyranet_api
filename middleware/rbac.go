@@ -67,3 +67,21 @@ func OrgZoneIDs(c *fiber.Ctx) ([]uint, error) {
 	}
 	return ids, nil
 }
+
+// OrgZoneIDsWithDeleted is OrgZoneIDs plus the Organization's soft-deleted
+// zones. Use it only for read-only money history (payments list, invoices,
+// revenue reports): money already earned on a zone must not vanish from the
+// books when that zone is later deleted. Never use it to authorise writes.
+func OrgZoneIDsWithDeleted(c *fiber.Ctx) ([]uint, error) {
+	claims := GetClaims(c)
+	if claims == nil {
+		return nil, fiber.ErrUnauthorized
+	}
+	var ids []uint
+	if err := config.DB.Unscoped().Model(&models.Zone{}).
+		Where("organization_id = ?", claims.OrganizationID).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
