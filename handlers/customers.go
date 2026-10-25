@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -62,8 +63,13 @@ func CustomerIndex(c *fiber.Ctx) error {
 		query = query.Where("status = ?", s)
 	}
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ?",
-			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		// Phones are stored as 2547…; staff type 07…, so match that form too.
+		phoneLike := "%" + search + "%"
+		if p := phoneSearchForm(search); p != "" {
+			phoneLike = "%" + p + "%"
+		}
+		query = query.Where("name LIKE ? OR phone LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ?",
+			"%"+search+"%", "%"+search+"%", phoneLike, "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	// Active Now filter (active subscription that has not expired)
@@ -253,6 +259,13 @@ func CustomerShow(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, customer, "")
 }
 
+// customerEditableFields are the keys PUT /customers/:id may change.
+var customerEditableFields = map[string]bool{
+	"name": true, "phone": true, "email": true, "zone_id": true, "package_id": true,
+	"type": true, "pppoe_username": true, "pppoe_password": true, "mac_address": true,
+	"status": true, "expires_at": true,
+}
+
 // CustomerUpdate updates a customer.
 func CustomerUpdate(c *fiber.Ctx) error {
 	customerPtr, err := findCustomerOrFail(c)
@@ -263,8 +276,46 @@ func CustomerUpdate(c *fiber.Ctx) error {
 	if !customerInScope(c, &customer) {
 		return utils.ErrorResponse(c, "Unauthorized to update this customer.", "", fiber.StatusForbidden)
 	}
-	var body map[string]interface{}
-	c.BodyParser(&body)
+	// Same roles that can register customers: an edit can set a plan, status
+	// and expiry, i.e. give internet time.
+	if claims := middleware.GetClaims(c); claims.Role != "super_admin" && claims.Role != "zone_manager" {
+		return utils.ErrorResponse(c, "Unauthorized to edit customers.", "", fiber.StatusForbidden)
+	}
+	var raw map[string]interface{}
+	if err := c.BodyParser(&raw); err != nil {
+		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+	// Only profile/plan fields. credit_balance in particular is money and
+	// only moves through add-credit (owner-only, logged); it used to be
+	// settable here by any staff role.
+	body := map[string]interface{}{}
+	for k, v := range raw {
+		if customerEditableFields[k] {
+			body[k] = v
+		}
+	}
+	if z, ok := body["zone_id"]; ok {
+		zf, _ := z.(float64)
+		var zone models.Zone
+		claims := middleware.GetClaims(c)
+		if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, uint(zf)).Error; err != nil || zf <= 0 {
+			return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+		}
+		if claims.Role == "zone_manager" && claims.ZoneID != nil && zone.ID != *claims.ZoneID {
+			return utils.ErrorResponse(c, "Unauthorized to move customer to this zone.", "", fiber.StatusForbidden)
+		}
+	}
+	if p, ok := body["package_id"]; ok {
+		pf, _ := p.(float64)
+		orgZoneIDs, _ := middleware.OrgZoneIDs(c)
+		var pkg models.Package
+		if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, uint(pf)).Error; err != nil || pf <= 0 {
+			return utils.ErrorResponse(c, "That package does not belong to your organization.", "", fiber.StatusUnprocessableEntity)
+		}
+	}
+	if len(body) == 0 {
+		return utils.ErrorResponse(c, "Nothing to update.", "", fiber.StatusUnprocessableEntity)
+	}
 	if statusVal, ok := body["status"].(string); ok && statusVal == "active" {
 		if _, hasExp := body["expires_at"]; !hasExp {
 			if customer.ExpiresAt == nil || customer.ExpiresAt.Before(time.Now()) {
@@ -312,7 +363,10 @@ func CustomerSuspend(c *fiber.Ctx) error {
 	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to suspend this customer.", "", fiber.StatusForbidden)
 	}
-	config.DB.Model(customer).Update("status", "suspended")
+	if err := config.DB.Model(customer).Update("status", "suspended").Error; err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
+	}
+	customer.Status = "suspended"
 	return utils.SuccessResponse(c, customer, "Customer account suspended successfully.")
 }
 
@@ -325,7 +379,13 @@ func CustomerActivate(c *fiber.Ctx) error {
 	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to activate this customer.", "", fiber.StatusForbidden)
 	}
-	config.DB.Model(customer).Update("status", "active")
+	if claims := middleware.GetClaims(c); claims.Role != "super_admin" && claims.Role != "zone_manager" {
+		return utils.ErrorResponse(c, "Unauthorized to activate customers.", "", fiber.StatusForbidden)
+	}
+	if err := config.DB.Model(customer).Update("status", "active").Error; err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
+	}
+	customer.Status = "active"
 	return utils.SuccessResponse(c, customer, "Customer account activated successfully.")
 }
 
@@ -468,7 +528,9 @@ func purgeInactiveCustomers(zoneIDs []uint, scoped bool) (int64, error) {
 	cutoff := now.Add(-7 * 24 * time.Hour)
 	var inactiveIDs []uint
 	q := config.DB.Model(&models.Customer{}).
-		Where("(phone LIKE 'GUEST%' OR phone LIKE 'VCHR%' OR account_number LIKE 'ZYR#GUEST%' OR account_number LIKE 'ZYR#VCHR%') AND status != 'active' AND created_at < ?", cutoff)
+		Where("(phone LIKE 'GUEST%' OR phone LIKE 'VCHR%' OR account_number LIKE 'ZYR#GUEST%' OR account_number LIKE 'ZYR#VCHR%') AND status != 'active' AND created_at < ?", cutoff).
+		// Never purge an account still holding credit — that money is owed to the customer.
+		Where("credit_balance <= 0")
 	if scoped {
 		q = q.Where("zone_id IN ?", zoneIDs)
 	}
@@ -517,3 +579,17 @@ func CustomerCleanupInactive(c *fiber.Ctx) error {
 	}, fmt.Sprintf("Successfully removed %d inactive/guest customers. Only active subscribers retained.", deleted))
 }
 
+// phoneSearchForm turns a typed local number ("0712", "+254 712") into the
+// stored 254… form for LIKE searches; "" when the text isn't a phone fragment.
+func phoneSearchForm(search string) string {
+	t := strings.TrimSpace(search)
+	if len(t) < 2 || (t[0] != '0' && t[0] != '+') {
+		return ""
+	}
+	for _, ch := range t[1:] {
+		if (ch < '0' || ch > '9') && ch != ' ' {
+			return ""
+		}
+	}
+	return utils.FormatPhone(t)
+}
