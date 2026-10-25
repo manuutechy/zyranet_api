@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -174,9 +175,19 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 	var voucherID *uint
 	var receiptPtr *string
 	if strings.TrimSpace(body.MpesaReceiptNumber) != "" {
-		ref := strings.TrimSpace(body.MpesaReceiptNumber)
+		ref := strings.ToUpper(strings.TrimSpace(body.MpesaReceiptNumber))
 		receiptPtr = &ref
+		// One M-Pesa code is one payment: recording it twice credited the
+		// customer twice and doubled the revenue. Held for the whole request
+		// so two clicks can't both pass the check.
+		unlock := lockReceipt(ref)
+		defer unlock()
+		// Already a payment, or waiting in the paybill unmatched queue.
+		if c2bAlreadyRecorded(ref) {
+			return utils.ErrorResponse(c, "This M-Pesa code is already recorded.", "Duplicate payment.", fiber.StatusConflict)
+		}
 	}
+	renewNotCovered := false
 
 	if body.CustomerID == nil || *body.CustomerID == 0 {
 		// Hotspot voucher cash/C2B purchase
@@ -227,36 +238,43 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		}
 
 		if (body.Action == "renew" || body.Action == "credit_and_renew") && packageIDPtr != nil {
-			// Check if auto-renewing from credit balance
-			// (the debit only happens when the balance covers it)
-			if body.Action == "credit_and_renew" && debitCredit(customer.ID, pkg.Price) {
-				customer.CreditBalance = services.CreditBalanceOf(config.DB, customer.ID)
-
-				debitNote := fmt.Sprintf("Package %s auto-renewed from credit", pkg.Name)
-				config.DB.Create(&models.CreditLog{
-					CustomerID: customer.ID,
-					Amount:     pkg.Price,
-					Type:       "debit",
-					Note:       &debitNote,
-					AddedBy:    &claims.UserID,
-				})
+			// credit_and_renew renews only when the balance covers the plan; it
+			// used to renew regardless, giving the plan away when it didn't.
+			if body.Action == "credit_and_renew" {
+				if debitCredit(customer.ID, pkg.Price) {
+					customer.CreditBalance = services.CreditBalanceOf(config.DB, customer.ID)
+					debitNote := fmt.Sprintf("Package %s auto-renewed from credit", pkg.Name)
+					config.DB.Create(&models.CreditLog{
+						CustomerID: customer.ID,
+						Amount:     pkg.Price,
+						Type:       "debit",
+						Note:       &debitNote,
+						AddedBy:    &claims.UserID,
+					})
+				} else {
+					renewNotCovered = true
+				}
 			}
 
-			expiresAt := utils.CalculateExpiry(pkg.BillingCycle, nil, pkg.TimeLimitMinutes)
-			config.DB.Model(&customer).Updates(map[string]interface{}{
-				"status":     "active",
-				"package_id": pkg.ID,
-				"expires_at": expiresAt,
-			})
+			if !renewNotCovered {
+				// Time still left on the plan is kept (as M-Pesa and credit
+				// purchases do), not thrown away by an early renewal.
+				expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
+				config.DB.Model(&customer).Updates(map[string]interface{}{
+					"status":     "active",
+					"package_id": pkg.ID,
+					"expires_at": expiresAt,
+				})
 
-			templateActive := GetSetting("sms_template_active")
-			msg := utils.RenderTemplate(templateActive, map[string]string{
-				"name":    customer.Name,
-				"package": pkg.Name,
-				"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
-			})
-			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
-				go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
+				templateActive := GetSetting("sms_template_active")
+				msg := utils.RenderTemplate(templateActive, map[string]string{
+					"name":    customer.Name,
+					"package": pkg.Name,
+					"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
+				})
+				if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
+					go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
+				}
 			}
 		} else if body.Action == "credit" {
 			// Send credit notification SMS
@@ -280,7 +298,12 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		MpesaReceiptNumber: receiptPtr,
 		Status:             "completed",
 	}
-	config.DB.Create(&payment)
+	if err := config.DB.Create(&payment).Error; err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Failed to record payment.", fiber.StatusInternalServerError)
+	}
+	if renewNotCovered {
+		return utils.SuccessResponse(c, payment, fmt.Sprintf("Payment recorded and added as credit, but the balance doesn't cover %s (KES %.2f), so the plan was not renewed.", pkg.Name, pkg.Price), fiber.StatusCreated)
+	}
 	return utils.SuccessResponse(c, payment, "Payment and credit recorded successfully.", fiber.StatusCreated)
 }
 
@@ -778,4 +801,15 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 		"pending": true,
 		"message": "We could not find an M-Pesa payment matching that code yet. If you just sent it, please give it a moment and try again.",
 	})
+}
+
+// receiptLocks serialises manual recordings of the same M-Pesa code within
+// this process, so a double-click can't record it twice.
+var receiptLocks sync.Map
+
+func lockReceipt(ref string) func() {
+	m, _ := receiptLocks.LoadOrStore(ref, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }

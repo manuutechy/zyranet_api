@@ -77,6 +77,15 @@ func PlatformC2BUnmatchedResolve(c *fiber.Ctx) error {
 	if err := config.DB.First(&zone, body.ZoneID).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusUnprocessableEntity)
 	}
+	// An ISP may already have recorded this code by hand (Payments > record
+	// C2B); crediting it again here would pay the customer twice.
+	var already int64
+	config.DB.Model(&models.Payment{}).
+		Where("mpesa_receipt_number = ? OR mpesa_transaction_id = ?", unmatched.TransID, unmatched.TransID).
+		Count(&already)
+	if already > 0 {
+		return utils.ErrorResponse(c, "This M-Pesa code is already recorded as a payment.", "", fiber.StatusConflict)
+	}
 
 	var customer *models.Customer
 	if body.CustomerID != nil {
