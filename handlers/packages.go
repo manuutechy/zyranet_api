@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // IsFreeTierAvailableNow checks whether a package with scheduled free tier hours is currently open.
@@ -138,9 +140,16 @@ func PackageStore(c *fiber.Ctx) error {
 	if err := c.BodyParser(&pkg); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	pkg.ID = 0
 	var targetZone models.Zone
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, pkg.ZoneID).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+	}
+	if !packageZoneAllowed(c, pkg.ZoneID) {
+		return utils.ErrorResponse(c, "You can only manage packages in your own zone.", "", fiber.StatusForbidden)
+	}
+	if msg := validatePackage(&pkg); msg != "" {
+		return utils.ErrorResponse(c, msg, "Validation failed.", fiber.StatusUnprocessableEntity)
 	}
 	if err := config.DB.Create(&pkg).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create package.", fiber.StatusInternalServerError)
@@ -172,8 +181,41 @@ func PackageUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
-	var body map[string]interface{}
-	c.BodyParser(&body)
+	if !packageZoneAllowed(c, pkg.ZoneID) {
+		return utils.ErrorResponse(c, "You can only manage packages in your own zone.", "", fiber.StatusForbidden)
+	}
+	var raw map[string]interface{}
+	if err := c.BodyParser(&raw); err != nil {
+		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+	body := map[string]interface{}{}
+	for k, v := range raw {
+		if packageEditableFields[k] {
+			body[k] = v
+		}
+	}
+	if len(body) == 0 {
+		return utils.ErrorResponse(c, "Nothing to update.", "", fiber.StatusUnprocessableEntity)
+	}
+	// Validate the package as it will be after the change.
+	merged := pkg
+	if b, err := json.Marshal(body); err != nil || json.Unmarshal(b, &merged) != nil {
+		return utils.ErrorResponse(c, "Invalid package fields.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	if merged.ZoneID != pkg.ZoneID {
+		inOrg := false
+		for _, id := range orgZoneIDs {
+			if id == merged.ZoneID {
+				inOrg = true
+			}
+		}
+		if !inOrg || !packageZoneAllowed(c, merged.ZoneID) {
+			return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
+		}
+	}
+	if msg := validatePackage(&merged); msg != "" {
+		return utils.ErrorResponse(c, msg, "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
 	if err := config.DB.Model(&pkg).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
@@ -190,6 +232,9 @@ func PackageDestroy(c *fiber.Ctx) error {
 	var pkg models.Package
 	if err := config.DB.Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
+	}
+	if !packageZoneAllowed(c, pkg.ZoneID) {
+		return utils.ErrorResponse(c, "You can only manage packages in your own zone.", "", fiber.StatusForbidden)
 	}
 	if err := config.DB.Delete(&models.Package{}, pkg.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
@@ -223,20 +268,19 @@ func PackageDuplicate(c *fiber.Ctx) error {
 		if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, zoneID).Error; err != nil {
 			continue
 		}
-
-		newPkg := models.Package{
-			Name:              pkg.Name,
-			Type:              pkg.Type,
-			Category:          pkg.Category,
-			DeviceLimit:       pkg.DeviceLimit,
-			Price:             pkg.Price,
-			SpeedUploadKbps:   pkg.SpeedUploadKbps,
-			SpeedDownloadKbps: pkg.SpeedDownloadKbps,
-			TimeLimitMinutes:  pkg.TimeLimitMinutes,
-			BillingCycle:      pkg.BillingCycle,
-			Status:            pkg.Status,
-			ZoneID:            zoneID,
+		if !packageZoneAllowed(c, zoneID) {
+			continue
 		}
+
+		// Copy every plan rule (data cap, free-trial window, …) — the copy
+		// used to drop the data limit and free-trial settings, selling an
+		// uncapped plan at the capped price.
+		newPkg := pkg
+		newPkg.ID = 0
+		newPkg.CreatedAt, newPkg.UpdatedAt = time.Time{}, time.Time{}
+		newPkg.DeletedAt = gorm.DeletedAt{}
+		newPkg.Zone = nil
+		newPkg.ZoneID = zoneID
 
 		if err := config.DB.Create(&newPkg).Error; err == nil {
 			duplicatedCount++
@@ -246,4 +290,52 @@ func PackageDuplicate(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, fiber.Map{
 		"duplicated_count": duplicatedCount,
 	}, "Package duplicated successfully to target zones.")
+}
+
+// packageEditableFields are the only keys PUT /packages/:id may change.
+// Anything else (id, timestamps, the nested zone object) is ignored instead of
+// reaching GORM, where it either errored (500) or rewrote server fields.
+var packageEditableFields = map[string]bool{
+	"zone_id": true, "name": true, "type": true, "category": true, "device_limit": true,
+	"price": true, "is_free_tier": true, "free_tier_cooldown_hours": true,
+	"free_tier_start_time": true, "free_tier_end_time": true, "free_tier_days": true,
+	"time_limit_minutes": true, "data_limit_mb": true, "speed_upload_kbps": true,
+	"speed_download_kbps": true, "billing_cycle": true, "status": true,
+}
+
+// validatePackage rejects plans the portal can't sell: no name, an unknown
+// type/billing cycle/status, or a negative price.
+func validatePackage(p *models.Package) string {
+	switch {
+	case strings.TrimSpace(p.Name) == "":
+		return "Package name is required."
+	case p.Type != "hotspot" && p.Type != "pppoe":
+		return "Type must be hotspot or pppoe."
+	case p.Price < 0:
+		return "Price cannot be negative."
+	case p.SpeedUploadKbps < 0 || p.SpeedDownloadKbps < 0:
+		return "Speeds cannot be negative."
+	case p.TimeLimitMinutes != nil && *p.TimeLimitMinutes < 0, p.DataLimitMB != nil && *p.DataLimitMB < 0:
+		return "Time and data limits cannot be negative."
+	}
+	switch p.BillingCycle {
+	case "hourly", "daily", "weekly", "monthly":
+	default:
+		return "Billing cycle must be hourly, daily, weekly or monthly."
+	}
+	switch p.Status {
+	case "", "active", "inactive":
+	default:
+		return "Status must be active or inactive."
+	}
+	return ""
+}
+
+// packageZoneAllowed: a zone manager only manages their own zone's plans.
+func packageZoneAllowed(c *fiber.Ctx, zoneID uint) bool {
+	claims := middleware.GetClaims(c)
+	if claims != nil && claims.Role == "zone_manager" && claims.ZoneID != nil {
+		return *claims.ZoneID == zoneID
+	}
+	return true
 }
