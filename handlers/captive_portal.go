@@ -61,7 +61,7 @@ func CaptivePortalPublicSettings(c *fiber.Ctx) error {
 	}
 	primaryColor := org.CaptivePortalPrimaryColor
 	if primaryColor == "" {
-		primaryColor = "#FF6B00"
+		primaryColor = "#C2410C"
 	}
 	theme := org.CaptivePortalTheme
 	if !isValidCaptiveTheme(theme) {
