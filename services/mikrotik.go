@@ -183,13 +183,11 @@ func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
 				cpuLoad := latestStat.CPULoad
 				memUsed := latestStat.MemoryUsedMB
 				memTotal := latestStat.MemoryTotalMB
-				if memTotal == 0 {
-					memTotal = 128
-				}
-
+				// No invented hardware facts: memory stays 0 (= not reported)
+				// unless the router sent it, and an unnamed router is "Unknown".
 				boardName := freshZone.RouterName
 				if boardName == "" || boardName == "Default Router" {
-					boardName = "MikroTik RB951Ui"
+					boardName = "Unknown"
 				}
 
 				return &RouterStatus{
@@ -1148,7 +1146,14 @@ type InterfaceTraffic struct {
 	RxPackets int64   `json:"rx_packets"`
 	TxPackets int64   `json:"tx_packets"`
 	Timestamp string  `json:"timestamp"`
+	// Available is false when no live reading could be taken (router not
+	// reachable directly); the numbers are then zero, never estimates.
+	Available bool   `json:"available"`
+	Message   string `json:"message,omitempty"`
 }
+
+// trafficUnavailableMsg is shown instead of numbers when the router can't be read live.
+const trafficUnavailableMsg = "Live traffic unavailable — router not reachable directly"
 
 // GetInterfaceTraffic retrieves real-time bandwidth traffic for the router's main interface.
 func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (*InterfaceTraffic, error) {
@@ -1170,6 +1175,7 @@ func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (
 			RxPackets: int64(baseRx * 125),
 			TxPackets: int64(baseTx * 85),
 			Timestamp: now.UTC().Format(time.RFC3339),
+			Available: true,
 		}, nil
 	}
 
@@ -1193,34 +1199,20 @@ func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (
 					RxPackets: rxPps,
 					TxPackets: txPps,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Available: true,
 				}, nil
 			}
 		}
-
-		// Graceful Cloud Telemetry fallback when router is behind NAT / unreachable directly from cloud
-		var activeCusts int64
-		config.DB.Model(&models.Customer{}).Where("zone_id = ? AND status = 'active' AND expires_at > ?", zone.ID, time.Now()).Count(&activeCusts)
-		now := time.Now()
-		var baseRx, baseTx float64
-		if activeCusts > 0 {
-			baseRx = float64(activeCusts)*1.45 + float64(now.Second()%15)*0.18
-			baseTx = float64(activeCusts)*0.55 + float64(now.Second()%10)*0.09
-		}
-		return &InterfaceTraffic{
-			Interface: iface,
-			RxBps:     int64(baseRx * 1000 * 1000),
-			TxBps:     int64(baseTx * 1000 * 1000),
-			RxMbps:    baseRx,
-			TxMbps:    baseTx,
-			RxPackets: int64(baseRx * 110),
-			TxPackets: int64(baseTx * 75),
-			Timestamp: now.UTC().Format(time.RFC3339),
-		}, nil
 	}
 
+	// Router not reachable directly (behind NAT, or a REST-connected router):
+	// say so. This used to return made-up figures (active customers × 1.45
+	// Mbps plus clock jitter) as if they were a live reading.
 	return &InterfaceTraffic{
 		Interface: iface,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Available: false,
+		Message:   trafficUnavailableMsg,
 	}, nil
 }
 

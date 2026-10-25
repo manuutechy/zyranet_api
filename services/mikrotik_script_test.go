@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -234,5 +235,30 @@ func TestGenerateScript_PortsAndWifi(t *testing.T) {
 	full, _ = scriptFor(t, models.Zone{LanPorts: "ether2; /system reset"})
 	if strings.Contains(full, "/system reset") || !strings.Contains(full, "interface=ether2 }") {
 		t.Error("invalid port input must fall back to the safe defaults")
+	}
+}
+
+// When the router can't be dialled, live traffic must say "unavailable" with
+// zeros — never an estimate derived from customer counts.
+func TestGetInterfaceTraffic_UnreachableIsNotInvented(t *testing.T) {
+	db := setupTestDB(t)
+	zone := models.Zone{Name: "NAT Zone", Location: "Maseno", RouterName: "hAP", RouterIP: "10.100.0.9", ConnectionType: "api"}
+	if err := db.Create(&zone).Error; err != nil {
+		t.Fatalf("create zone: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		db.Create(&models.Customer{Name: "c", Phone: fmt.Sprintf("25470000%04d", i), ZoneID: zone.ID, Status: "active", ExpiresAt: &future})
+	}
+
+	tr, err := NewMikroTikService().GetInterfaceTraffic(&zone, "ether1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tr.Available || tr.RxBps != 0 || tr.TxBps != 0 || tr.RxMbps != 0 || tr.TxMbps != 0 {
+		t.Fatalf("expected unavailable with zero traffic, got %+v", tr)
+	}
+	if tr.Message == "" {
+		t.Fatalf("expected an explanation message, got %+v", tr)
 	}
 }

@@ -55,6 +55,10 @@ func MikroTikScriptGenerate(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
+	// The script and token set up the router: owner or this zone's manager only.
+	if !canAccessZone(c, &zone) {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
+	}
 
 	content, filename, err := scriptSvc.GenerateScript(zone.ID)
 	if err != nil {
@@ -75,6 +79,10 @@ func ZoneProvisionToken(c *fiber.Ctx) error {
 	var zone models.Zone
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
+	// The script and token set up the router: owner or this zone's manager only.
+	if !canAccessZone(c, &zone) {
+		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	if zone.ProvisionToken == "" {
 		token, err := models.GenerateProvisionToken()

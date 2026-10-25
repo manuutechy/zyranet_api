@@ -61,6 +61,11 @@ func ZoneStore(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" {
+		return utils.ErrorResponse(c, "Zone name is required.", "Validation failed.", fiber.StatusUnprocessableEntity)
+	}
+	body.ID = 0
 	body.OrganizationID = claims.OrganizationID
 	body.AuthMode = "" // RADIUS is switched on from the platform, not here
 	wan, lan, err := utils.NormalizeRouterPorts(body.WanPort, defaultString(body.LanPorts, "ether2,ether3,ether4"))
@@ -108,8 +113,13 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	}
 	delete(body, "organization_id") // never allow moving a zone to another tenant via this endpoint
 	// Server-managed fields are never set from the ISP admin.
-	for _, k := range []string{"auth_mode", "legacy_request_at", "last_seen_at", "last_status", "id"} {
+	for _, k := range []string{"auth_mode", "legacy_request_at", "last_seen_at", "last_status", "id", "created_at", "updated_at", "deleted_at", "manager", "organization", "packages", "has_router_password"} {
 		delete(body, k)
+	}
+	if v, ok := body["name"]; ok {
+		if str, _ := v.(string); strings.TrimSpace(str) == "" {
+			return utils.ErrorResponse(c, "Zone name is required.", "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
 	}
 	_, hasWan := body["wan_port"]
 	_, hasLan := body["lan_ports"]
@@ -206,6 +216,14 @@ func ZonePushConfig(c *fiber.Ctx) error {
 		NewValues: &newValsStr,
 	})
 
+	// Don't report success when the router refused or couldn't be reached.
+	if ok, _ := result["success"].(bool); !ok {
+		msg := "Router could not be fully configured."
+		if errs, _ := result["errors"].([]string); len(errs) > 0 {
+			msg = strings.Join(errs, "; ")
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": msg, "message": "Push to router failed.", "data": result})
+	}
 	return utils.SuccessResponse(c, result, "Configuration pushed to router.")
 }
 
@@ -242,7 +260,14 @@ func ZoneActiveSessions(c *fiber.Ctx) error {
 	if !canAccessZone(c, zone) {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
-	sessions, _ := mikrotikSvc.GetActiveSessions(zone)
+	sessions, err := mikrotikSvc.GetActiveSessions(zone)
+	if err != nil {
+		// Unreachable router is an error, not "nobody online".
+		return utils.ErrorResponse(c, "Router not reachable: "+err.Error(), "Failed to read active sessions.", fiber.StatusBadRequest)
+	}
+	if sessions == nil {
+		sessions = []services.ActiveSession{}
+	}
 	return utils.SuccessResponse(c, sessions, "")
 }
 
@@ -397,7 +422,12 @@ func canAccessZone(c *fiber.Ctx, zone *models.Zone) bool {
 	if claims.Role == "super_admin" {
 		return true
 	}
-	return zone.ManagerID != nil && *zone.ManagerID == claims.UserID
+	if zone.ManagerID != nil && *zone.ManagerID == claims.UserID {
+		return true
+	}
+	// A zone manager assigned to this zone on the Users page (users.zone_id)
+	// — the same rule ZoneUpdate, customers and reports use.
+	return claims.Role == "zone_manager" && claims.ZoneID != nil && *claims.ZoneID == zone.ID
 }
 
 // validServiceMode checks a zone service mode; "" becomes def (or is an error

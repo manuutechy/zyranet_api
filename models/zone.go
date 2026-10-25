@@ -3,6 +3,7 @@ package models
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"time"
 
 	"gorm.io/gorm"
@@ -79,6 +80,20 @@ type Zone struct {
 }
 
 func (Zone) TableName() string { return "zones" }
+
+// MarshalJSON never sends the router admin password back out: every staff
+// role (and every payment row that preloads its Zone) used to receive it.
+// The admin only ever writes it; has_router_password says whether one is set.
+// Request bodies still decode router_password normally.
+func (z Zone) MarshalJSON() ([]byte, error) {
+	type zoneAlias Zone
+	out := struct {
+		zoneAlias
+		RouterPassword    *string `json:"router_password"`
+		HasRouterPassword bool    `json:"has_router_password"`
+	}{zoneAlias: zoneAlias(z), HasRouterPassword: z.RouterPassword != nil && *z.RouterPassword != ""}
+	return json.Marshal(out)
+}
 
 // BeforeCreate generates the router-provisioning token.
 func (z *Zone) BeforeCreate(tx *gorm.DB) (err error) {
