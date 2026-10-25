@@ -62,11 +62,11 @@ func ReportRevenue(c *fiber.Ctx) error {
 
 	day := eatDateSQL("created_at")
 	dailyQuery := config.DB.Model(&models.Payment{}).
-		Select(day+" as date, " +
-			"COALESCE(SUM(amount), 0) as total, " +
-			"COUNT(id) as count, " +
-			"COALESCE(SUM(CASE WHEN method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) as mpesa_total, " +
-			"COALESCE(SUM(CASE WHEN method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) as c2b_total, " +
+		Select(day+" as date, "+
+			"COALESCE(SUM(amount), 0) as total, "+
+			"COUNT(id) as count, "+
+			"COALESCE(SUM(CASE WHEN method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) as mpesa_total, "+
+			"COALESCE(SUM(CASE WHEN method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) as c2b_total, "+
 			"COALESCE(SUM(CASE WHEN method IN ('cash', 'manual', 'bank') THEN amount ELSE 0 END), 0) as cash_total").
 		Where("status = ?", "completed").
 		Where("zone_id IN (?)", orgZoneIDs).
@@ -113,12 +113,12 @@ func ReportRevenue(c *fiber.Ctx) error {
 
 	return utils.SuccessResponse(c, fiber.Map{
 		"summary": fiber.Map{
-			"total_revenue":       totalRevenue,
-			"total_payments":      totalPayments,
-			"days_count":          daysCount,
-			"avg_per_day":         roundFloat(avgPerDay, 2),
-			"highest_day_amount":  highestAmount,
-			"highest_day_date":    highestDay,
+			"total_revenue":      totalRevenue,
+			"total_payments":     totalPayments,
+			"days_count":         daysCount,
+			"avg_per_day":        roundFloat(avgPerDay, 2),
+			"highest_day_amount": highestAmount,
+			"highest_day_date":   highestDay,
 		},
 		"chart_data": daily,
 	}, "")

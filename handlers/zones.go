@@ -116,6 +116,13 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	for _, k := range []string{"auth_mode", "legacy_request_at", "last_seen_at", "last_status", "id", "created_at", "updated_at", "deleted_at", "manager", "organization", "packages", "has_router_password"} {
 		delete(body, k)
 	}
+	// The zone JSON never carries the router password (always null), so a form
+	// that sends the zone back must not wipe it: only a typed password changes it.
+	if pw, ok := body["router_password"]; ok {
+		if str, _ := pw.(string); strings.TrimSpace(str) == "" {
+			delete(body, "router_password")
+		}
+	}
 	if v, ok := body["name"]; ok {
 		if str, _ := v.(string); strings.TrimSpace(str) == "" {
 			return utils.ErrorResponse(c, "Zone name is required.", "Validation failed.", fiber.StatusUnprocessableEntity)
