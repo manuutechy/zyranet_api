@@ -12,6 +12,7 @@ import (
 	"github.com/zyranet/zyranet-api/models"
 	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 var voucherSvcGlobal *services.VoucherService
@@ -54,6 +55,9 @@ func VoucherIndex(c *fiber.Ctx) error {
 	return utils.PaginatedResponse(c, vouchers, total, page, perPage)
 }
 
+// maxVoucherBatch caps one generate request.
+const maxVoucherBatch = 500
+
 // VoucherGenerate generates a single new voucher.
 func VoucherGenerate(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
@@ -91,22 +95,35 @@ func VoucherGenerate(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 	}
 
+	// The plan must be one of this zone's own (was unchecked: any package id,
+	// even another zone's or another ISP's, could be put on a voucher).
+	var pkg models.Package
+	if err := config.DB.Where("zone_id = ?", targetZone.ID).First(&pkg, body.PackageID).Error; err != nil {
+		return utils.ErrorResponse(c, "That package is not one of this zone's plans.", "", fiber.StatusUnprocessableEntity)
+	}
+	if body.Quantity < 1 || body.Quantity > maxVoucherBatch {
+		return utils.ErrorResponse(c, fmt.Sprintf("Quantity must be between 1 and %d.", maxVoucherBatch), "", fiber.StatusUnprocessableEntity)
+	}
+	if body.Type != "single_use" && body.Type != "multi_use" {
+		return utils.ErrorResponse(c, "Type must be single_use or multi_use.", "", fiber.StatusUnprocessableEntity)
+	}
+	if body.UsageLimit < 1 {
+		return utils.ErrorResponse(c, "Usage limit must be at least 1.", "", fiber.StatusUnprocessableEntity)
+	}
+
+	// One transaction: a batch is created whole or not at all.
 	var createdVouchers []*models.Voucher
-	if body.Quantity == 1 {
-		voucher, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
-		if err != nil {
-			return utils.ErrorResponse(c, err.Error(), "Voucher generation failed.", fiber.StatusInternalServerError)
-		}
-		createdVouchers = append(createdVouchers, voucher)
-	} else {
-		// Batch generation
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
 		for i := 0; i < body.Quantity; i++ {
-			v, err := voucherSvcGlobal.Generate(body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
+			v, err := voucherSvcGlobal.GenerateTx(tx, body.ZoneID, body.PackageID, body.Type, body.UsageLimit)
 			if err != nil {
-				return utils.ErrorResponse(c, err.Error(), "Batch generation failed.", fiber.StatusInternalServerError)
+				return err
 			}
 			createdVouchers = append(createdVouchers, v)
 		}
+		return nil
+	}); err != nil {
+		return utils.ErrorResponse(c, err.Error(), "Voucher generation failed.", fiber.StatusInternalServerError)
 	}
 
 	// Vouchers are not pushed to the router as users any more: a voucher is
@@ -151,6 +168,11 @@ func VoucherDestroy(c *fiber.Ctx) error {
 	config.DB.Model(&models.AgentVoucher{}).Where("voucher_id = ?", voucher.ID).Count(&held)
 	if held > 0 {
 		return utils.ErrorResponse(c, "This voucher was issued to an agent. Return it from the agent's page instead.", "", fiber.StatusConflict)
+	}
+	// Vouchers are hard-deleted: a used one is a sale record (and may be what
+	// a cash payment points at), so only unused vouchers can be removed.
+	if voucher.Status != "unused" || voucher.UsageCount > 0 {
+		return utils.ErrorResponse(c, "This voucher has already been used, so it is kept as a sales record.", "", fiber.StatusConflict)
 	}
 	if err := config.DB.Delete(&models.Voucher{}, voucher.ID).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
