@@ -49,7 +49,7 @@ func CustomerIndex(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 
-	query := config.DB.Model(&models.Customer{}).Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
+	query := config.DB.Model(&models.Customer{}).Where("zone_id IN (?)", orgZoneIDs)
 	claims := middleware.GetClaims(c)
 	if claims.Role == "zone_manager" && claims.ZoneID != nil {
 		query = query.Where("zone_id = ?", *claims.ZoneID)
@@ -59,6 +59,9 @@ func CustomerIndex(c *fiber.Ctx) error {
 	if t := c.Query("type"); t != "" {
 		query = query.Where("type = ?", t)
 	}
+	// Card totals for this zone/type (all pages, before the card/status/search
+	// filters) — the page used to count only the 15 rows on screen.
+	summary := customerSummary(query.Session(&gorm.Session{}))
 	if s := c.Query("status"); s != "" {
 		query = query.Where("status = ?", s)
 	}
@@ -167,8 +170,50 @@ func CustomerIndex(c *fiber.Ctx) error {
 		orderClause = "name DESC"
 	}
 
-	query.Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
-	return utils.PaginatedResponse(c, customers, total, page, perPage)
+	query.Preload("Zone").Preload("Package").Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    customers,
+		"meta":    fiber.Map{"total": total, "page": page, "per_page": perPage},
+		"summary": summary,
+		"message": "",
+	})
+}
+
+// customerCounts are the customers page's summary cards.
+type customerCounts struct {
+	Total        int64   `json:"total"`
+	Active       int64   `json:"active"`
+	ActiveNow    int64   `json:"active_now"`
+	Today        int64   `json:"today"`
+	ExpiringSoon int64   `json:"expiring_soon"`
+	Expired      int64   `json:"expired"`
+	Suspended    int64   `json:"suspended"`
+	Hotspot      int64   `json:"hotspot"`
+	PPPoE        int64   `json:"pppoe" gorm:"column:pppoe"`
+	TotalCredit  float64 `json:"total_credit"`
+}
+
+func customerSummary(q *gorm.DB) customerCounts {
+	now := time.Now()
+	eat := utils.Kenya(now)
+	dayStart := time.Date(eat.Year(), eat.Month(), eat.Day(), 0, 0, 0, 0, utils.EAT).In(time.Local)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	var out customerCounts
+	soon := now.Add(2 * time.Hour)
+	q.Select(`COUNT(*) AS total,
+		COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
+		COALESCE(SUM(CASE WHEN status = 'active' AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END), 0) AS active_now,
+		COALESCE(SUM(CASE WHEN (created_at >= ? AND created_at < ?) OR (expires_at >= ? AND expires_at < ?) THEN 1 ELSE 0 END), 0) AS today,
+		COALESCE(SUM(CASE WHEN status = 'active' AND expires_at > ? AND expires_at <= ? THEN 1 ELSE 0 END), 0) AS expiring_soon,
+		COALESCE(SUM(CASE WHEN status = 'expired' OR expires_at <= ? THEN 1 ELSE 0 END), 0) AS expired,
+		COALESCE(SUM(CASE WHEN status = 'suspended' THEN 1 ELSE 0 END), 0) AS suspended,
+		COALESCE(SUM(CASE WHEN type = 'hotspot' THEN 1 ELSE 0 END), 0) AS hotspot,
+		COALESCE(SUM(CASE WHEN type = 'pppoe' THEN 1 ELSE 0 END), 0) AS pppoe,
+		COALESCE(SUM(credit_balance), 0) AS total_credit`,
+		now, dayStart, dayEnd, dayStart, dayEnd, now, soon, now).
+		Scan(&out)
+	return out
 }
 
 // CustomerStore creates a new customer.
