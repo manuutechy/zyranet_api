@@ -218,7 +218,7 @@ func main() {
 			}
 			c.Set("Access-Control-Allow-Credentials", "true")
 			c.Set("Access-Control-Allow-Methods", config.CORSAllowMethods)
-			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept,X-Device-Token")
+			c.Set("Access-Control-Allow-Headers", "Origin,Content-Type,Authorization,Accept,X-Device-Token,Idempotency-Key")
 
 			if c.Method() == "OPTIONS" {
 				return c.SendStatus(fiber.StatusNoContent)
