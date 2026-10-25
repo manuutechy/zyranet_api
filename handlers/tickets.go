@@ -23,10 +23,9 @@ func TicketIndex(c *fiber.Ctx) error {
 
 	query := config.DB.Model(&models.Ticket{}).Preload("Customer").Preload("AssignedUser").Preload("Zone")
 
-	// Scope by organization for tenant admins
-	if claims != nil && claims.Role != "super_admin" && claims.OrganizationID > 0 {
-		query = query.Where("organization_id = ?", claims.OrganizationID)
-	}
+	// Every ISP staff role — super_admin included (it is the ISP owner, not
+	// platform staff) — sees only its own organization's tickets.
+	query = query.Where("organization_id = ?", ticketOrgID(claims))
 	if claims != nil && claims.ZoneID != nil {
 		query = query.Where("zone_id = ? OR zone_id IS NULL", *claims.ZoneID)
 	}
@@ -264,9 +263,7 @@ func TicketShow(c *fiber.Ctx) error {
 	var ticket models.Ticket
 	query := config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone").Preload("Organization")
 
-	if claims != nil && claims.Role != "super_admin" && claims.OrganizationID > 0 {
-		query = query.Where("organization_id = ?", claims.OrganizationID)
-	}
+	query = query.Where("organization_id = ?", ticketOrgID(claims))
 
 	if err := query.First(&ticket, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Ticket not found.", "", fiber.StatusNotFound)
@@ -280,19 +277,35 @@ func TicketUpdate(c *fiber.Ctx) error {
 	var ticket models.Ticket
 	query := config.DB.Model(&models.Ticket{})
 
-	if claims != nil && claims.Role != "super_admin" && claims.OrganizationID > 0 {
-		query = query.Where("organization_id = ?", claims.OrganizationID)
-	}
+	query = query.Where("organization_id = ?", ticketOrgID(claims))
 
 	if err := query.First(&ticket, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Ticket not found.", "", fiber.StatusNotFound)
 	}
 
-	var body map[string]interface{}
-	c.BodyParser(&body)
-	delete(body, "organization_id") // Immutable
-
-	config.DB.Model(&ticket).Updates(body)
+	var raw map[string]interface{}
+	if err := c.BodyParser(&raw); err != nil {
+		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
+	}
+	// Staff may only work the ticket: status, priority, assignee, notes.
+	body := map[string]interface{}{}
+	for _, k := range []string{"status", "priority", "assigned_to", "internal_notes"} {
+		if v, ok := raw[k]; ok {
+			body[k] = v
+		}
+	}
+	if a, ok := body["assigned_to"].(float64); ok {
+		var n int64
+		config.DB.Model(&models.User{}).Where("id = ? AND organization_id = ?", uint(a), ticketOrgID(claims)).Count(&n)
+		if n == 0 {
+			return utils.ErrorResponse(c, "Assignee is not one of your staff.", "", fiber.StatusUnprocessableEntity)
+		}
+	}
+	if len(body) > 0 {
+		if err := config.DB.Model(&ticket).Updates(body).Error; err != nil {
+			return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
+		}
+	}
 	config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone").Preload("Organization").First(&ticket, ticket.ID)
 	return utils.SuccessResponse(c, ticket, "Ticket updated successfully.")
 }
@@ -317,9 +330,7 @@ func TicketDestroy(c *fiber.Ctx) error {
 
 	var ticket models.Ticket
 	query := config.DB.Model(&models.Ticket{})
-	if claims.Role != "super_admin" && claims.OrganizationID > 0 {
-		query = query.Where("organization_id = ?", claims.OrganizationID)
-	}
+	query = query.Where("organization_id = ?", ticketOrgID(claims))
 
 	if err := query.First(&ticket, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Ticket not found.", "", fiber.StatusNotFound)
@@ -329,4 +340,12 @@ func TicketDestroy(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, err.Error(), "Delete failed.", fiber.StatusInternalServerError)
 	}
 	return utils.SuccessResponse(c, nil, "Ticket deleted successfully.")
+}
+
+// ticketOrgID is the organization whose tickets the caller may see (0 = none).
+func ticketOrgID(claims *middleware.Claims) uint {
+	if claims == nil {
+		return 0
+	}
+	return claims.OrganizationID
 }
