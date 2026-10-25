@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -31,15 +32,19 @@ func ReportRevenue(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 
-	dateFrom := c.Query("date_from", time.Now().AddDate(0, 0, -30).Format("2006-01-02"))
-	dateTo := c.Query("date_to", time.Now().Format("2006-01-02"))
+	nowEAT := utils.Kenya(time.Now())
+	dateFrom := c.Query("date_from", nowEAT.AddDate(0, 0, -30).Format("2006-01-02"))
+	dateTo := c.Query("date_to", nowEAT.Format("2006-01-02"))
 	zoneID := scopedZoneID(c, c.Query("zone_id"))
+	start, end, err := eatDayRange(dateFrom, dateTo)
+	if err != nil {
+		return utils.ErrorResponse(c, "date_from and date_to must be YYYY-MM-DD.", "", fiber.StatusUnprocessableEntity)
+	}
 
 	query := config.DB.Model(&models.Payment{}).
 		Where("status = ?", "completed").
 		Where("zone_id IN (?)", orgZoneIDs).
-		Where("DATE(created_at) >= ?", dateFrom).
-		Where("DATE(created_at) <= ?", dateTo)
+		Where("created_at >= ? AND created_at < ?", start, end)
 
 	if zoneID != "" {
 		query = query.Where("zone_id = ?", zoneID)
@@ -55,8 +60,9 @@ func ReportRevenue(c *fiber.Ctx) error {
 		AvgPerTx   float64 `json:"avg_per_tx"`
 	}
 
+	day := eatDateSQL("created_at")
 	dailyQuery := config.DB.Model(&models.Payment{}).
-		Select("DATE(created_at) as date, " +
+		Select(day+" as date, " +
 			"COALESCE(SUM(amount), 0) as total, " +
 			"COUNT(id) as count, " +
 			"COALESCE(SUM(CASE WHEN method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) as mpesa_total, " +
@@ -64,13 +70,12 @@ func ReportRevenue(c *fiber.Ctx) error {
 			"COALESCE(SUM(CASE WHEN method IN ('cash', 'manual', 'bank') THEN amount ELSE 0 END), 0) as cash_total").
 		Where("status = ?", "completed").
 		Where("zone_id IN (?)", orgZoneIDs).
-		Where("DATE(created_at) >= ?", dateFrom).
-		Where("DATE(created_at) <= ?", dateTo)
+		Where("created_at >= ? AND created_at < ?", start, end)
 	if zoneID != "" {
 		dailyQuery = dailyQuery.Where("zone_id = ?", zoneID)
 	}
 	var daily []DailyRevenue
-	dailyQuery.Group("DATE(created_at)").Order("date ASC").Find(&daily)
+	dailyQuery.Group(day).Order("date ASC").Find(&daily)
 
 	for i := range daily {
 		if strings.Contains(daily[i].Date, "T") {
@@ -255,10 +260,13 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 	zoneID := scopedZoneID(c, c.Query("zone_id"))
-	now := time.Now()
-	today := now.Format("2006-01-02")
-	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
-	monthStart := now.Format("2006-01") + "-01"
+	// Kenyan calendar days, whatever the server's clock zone.
+	now := utils.Kenya(time.Now())
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, utils.EAT)
+	tomorrow := todayStart.AddDate(0, 0, 1).In(time.Local)
+	weekStart := todayStart.AddDate(0, 0, -7).In(time.Local)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, utils.EAT).In(time.Local)
+	today := todayStart.In(time.Local)
 
 	type ServiceTypeStats struct {
 		Type             string  `json:"type"`
@@ -297,7 +305,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 
 		sessionsTodayQuery := config.DB.Model(&models.Session{}).
 			Joins("JOIN customers ON customers.id = sessions.customer_id").
-			Where("customers.type = ? AND DATE(sessions.started_at) = ? AND sessions.zone_id IN (?)", t, today, orgZoneIDs)
+			Where("customers.type = ? AND sessions.started_at >= ? AND sessions.started_at < ? AND sessions.zone_id IN (?)", t, today, tomorrow, orgZoneIDs)
 		if zoneID != "" {
 			sessionsTodayQuery = sessionsTodayQuery.Where("sessions.zone_id = ?", zoneID)
 		}
@@ -306,7 +314,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue Today
 		revTodayQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) = ? AND payments.zone_id IN (?)", t, "completed", today, orgZoneIDs)
+			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.created_at < ? AND payments.zone_id IN (?)", t, "completed", today, tomorrow, orgZoneIDs)
 		if zoneID != "" {
 			revTodayQuery = revTodayQuery.Where("payments.zone_id = ?", zoneID)
 		}
@@ -315,7 +323,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue This Week
 		revWeekQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) >= ? AND payments.zone_id IN (?)", t, "completed", weekStart, orgZoneIDs)
+			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", weekStart, orgZoneIDs)
 		if zoneID != "" {
 			revWeekQuery = revWeekQuery.Where("payments.zone_id = ?", zoneID)
 		}
@@ -324,7 +332,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue This Month
 		revMonthQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND DATE(payments.created_at) >= ? AND payments.zone_id IN (?)", t, "completed", monthStart, orgZoneIDs)
+			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", monthStart, orgZoneIDs)
 		if zoneID != "" {
 			revMonthQuery = revMonthQuery.Where("payments.zone_id = ?", zoneID)
 		}
@@ -342,4 +350,30 @@ func roundFloat(f float64, precision int) float64 {
 		p *= 10
 	}
 	return float64(int(f*p+0.5)) / p
+}
+
+// eatDayRange turns a YYYY-MM-DD..YYYY-MM-DD range of Kenyan (EAT) days into
+// [start, end) instants in the server's zone, which is how created_at is
+// stored. DATE(created_at) used the server's own calendar: on a UTC server
+// every payment between 00:00 and 03:00 EAT landed on the previous day.
+func eatDayRange(from, to string) (time.Time, time.Time, error) {
+	f, err := time.ParseInLocation("2006-01-02", from, utils.EAT)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	t, err := time.ParseInLocation("2006-01-02", to, utils.EAT)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return f.In(time.Local), t.AddDate(0, 0, 1).In(time.Local), nil
+}
+
+// eatDateSQL is the Kenyan calendar date of a stored (server-zone) timestamp.
+func eatDateSQL(col string) string {
+	_, off := time.Now().Zone()
+	shift := 3*3600 - off
+	if shift == 0 {
+		return "DATE(" + col + ")"
+	}
+	return fmt.Sprintf("DATE(DATE_ADD(%s, INTERVAL %d SECOND))", col, shift)
 }

@@ -55,11 +55,16 @@ func PaymentIndex(c *fiber.Ctx) error {
 		}
 		query = query.Where("(phone LIKE ? OR phone LIKE ? OR mpesa_receipt_number LIKE ? OR mpesa_transaction_id LIKE ?)", like, phoneLike, like, like)
 	}
+	// Kenyan calendar days (see eatDayRange).
 	if df := c.Query("date_from"); df != "" {
-		query = query.Where("DATE(created_at) >= ?", df)
+		if start, _, err := eatDayRange(df, df); err == nil {
+			query = query.Where("created_at >= ?", start)
+		}
 	}
 	if dt := c.Query("date_to"); dt != "" {
-		query = query.Where("DATE(created_at) <= ?", dt)
+		if _, end, err := eatDayRange(dt, dt); err == nil {
+			query = query.Where("created_at < ?", end)
+		}
 	}
 
 	query.Session(&gorm.Session{}).Count(&total)
