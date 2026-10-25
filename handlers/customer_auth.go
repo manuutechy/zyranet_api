@@ -19,7 +19,11 @@ import (
 	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// errInsufficientCredit aborts a credit purchase whose balance no longer covers the price.
+var errInsufficientCredit = errors.New("insufficient credit")
 
 // otpStore is an in-memory OTP cache (phone → otp, expires).
 var (
@@ -974,13 +978,26 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 	// (balance deducted, package activated) with no payment record at all.
 	// Wrapping them means any failure rolls back the whole operation
 	// instead of leaving a paid-but-unrecorded state.
-	newBalance := customer.CreditBalance - pkg.Price
-	expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
+	// The customer row is locked for the whole purchase and the debit is one
+	// conditional UPDATE (AdjustCredit): two taps at once used to both pass
+	// the balance check above and both write the same "balance - price",
+	// recording two paid plans for a single charge.
+	var newBalance float64
+	var expiresAt time.Time
 	var payment models.Payment
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&customer).Update("credit_balance", newBalance).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&customer, customer.ID).Error; err != nil {
 			return err
 		}
+		expiresAt = utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
+		ok, err := services.AdjustCredit(tx, customer.ID, -pkg.Price)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errInsufficientCredit
+		}
+		newBalance = services.CreditBalanceOf(tx, customer.ID)
 
 		note := fmt.Sprintf("Purchased Package: %s", pkg.Name)
 		if err := tx.Create(&models.CreditLog{
@@ -1016,6 +1033,9 @@ func CustomerPurchaseWithCredit(c *fiber.Ctx) error {
 			"expires_at": expiresAt,
 		}).Error
 	})
+	if errors.Is(err, errInsufficientCredit) {
+		return utils.ErrorResponse(c, "Insufficient credit balance. Please top up your account.", "Insufficient balance", fiber.StatusBadRequest)
+	}
 	if err != nil {
 		log.Printf("[Credit Purchase] Transaction failed for Customer %d: %v", customer.ID, err)
 		return utils.ErrorResponse(c, "Failed to complete purchase. Your credit balance was not charged.", "", fiber.StatusInternalServerError)
