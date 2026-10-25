@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,46 +74,12 @@ func HotspotPay(c *fiber.Ctx) error {
 		return zoneOfflineResponse(c, msg)
 	}
 
-	// Map plan_id to package details
-	var price float64
-	var speedDown, speedUp int
-	var name string
-
-	switch strings.ToLower(body.PlanID) {
-	case "basic":
-		price = 20
-		speedDown = 2048
-		speedUp = 1024
-		name = "Basic"
-	case "premium":
-		price = 50
-		speedDown = 10240
-		speedUp = 5120
-		name = "Premium"
-	default: // standard
-		price = 30
-		speedDown = 5120
-		speedUp = 2048
-		name = "Standard"
+	// The plan is the package the customer picked (the portal sends its id).
+	pkgPtr, perr := resolveHotspotPlan(zone.ID, body.PlanID)
+	if perr != nil {
+		return utils.ErrorResponse(c, perr.Error(), "", fiber.StatusUnprocessableEntity)
 	}
-
-	// Find or create package in DB
-	var pkg models.Package
-	if err := config.DB.Where("price = ? AND type = ? AND zone_id = ?", price, "hotspot", zone.ID).First(&pkg).Error; err != nil {
-		pkg = models.Package{
-			ZoneID:            zone.ID,
-			Name:              name,
-			Type:              "hotspot",
-			Price:             price,
-			BillingCycle:      "daily",
-			SpeedDownloadKbps: speedDown,
-			SpeedUploadKbps:   speedUp,
-			Status:            "active",
-		}
-		if err := config.DB.Create(&pkg).Error; err != nil {
-			return utils.ErrorResponse(c, err.Error(), "Failed to create package.", fiber.StatusInternalServerError)
-		}
-	}
+	pkg := *pkgPtr
 
 	// Auto-generate voucher
 	voucher, err := voucherSvcGlobal.Generate(zone.ID, pkg.ID, "single_use", 1)
@@ -376,4 +343,35 @@ func HotspotLogout(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// resolveHotspotPlan finds the package a captive-portal payment is for.
+// The portal sends the package id; it used to be ignored — anything other
+// than "basic"/"premium" was charged as a KES 30 "Standard" plan (or a new
+// package was created on the fly), so a customer who picked a KES 7 plan got
+// a KES 30 M-Pesa prompt. Only an active, paid hotspot plan of this zone is
+// accepted; the old plan names still work but never create packages.
+func resolveHotspotPlan(zoneID uint, planID string) (*models.Package, error) {
+	planID = strings.TrimSpace(planID)
+	var pkg models.Package
+	if id, err := strconv.ParseUint(planID, 10, 64); err == nil && id > 0 {
+		if err := config.DB.Where("zone_id = ? AND status = ? AND type = ?", zoneID, "active", "hotspot").
+			First(&pkg, uint(id)).Error; err != nil {
+			return nil, errors.New("That plan is not available on this WiFi. Refresh and pick a plan again.")
+		}
+		if pkg.Price <= 0 || pkg.IsFreeTier {
+			return nil, errors.New("That plan is free — claim it instead of paying.")
+		}
+		return &pkg, nil
+	}
+	legacy := map[string]float64{"basic": 20, "standard": 30, "premium": 50}
+	price, ok := legacy[strings.ToLower(planID)]
+	if !ok {
+		return nil, errors.New("Pick a plan to pay for.")
+	}
+	if err := config.DB.Where("price = ? AND type = ? AND zone_id = ? AND status = ?", price, "hotspot", zoneID, "active").
+		First(&pkg).Error; err != nil {
+		return nil, errors.New("That plan is not available on this WiFi. Refresh and pick a plan again.")
+	}
+	return &pkg, nil
 }
