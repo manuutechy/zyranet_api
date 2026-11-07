@@ -299,7 +299,7 @@ var packageEditableFields = map[string]bool{
 	"zone_id": true, "name": true, "type": true, "category": true, "device_limit": true,
 	"price": true, "is_free_tier": true, "free_tier_cooldown_hours": true,
 	"free_tier_start_time": true, "free_tier_end_time": true, "free_tier_days": true,
-	"time_limit_minutes": true, "data_limit_mb": true, "speed_upload_kbps": true,
+	"time_limit_minutes": true, "data_limit_mb": true, "fair_use_kbps": true, "speed_upload_kbps": true,
 	"speed_download_kbps": true, "billing_cycle": true, "status": true,
 }
 
@@ -317,6 +317,8 @@ func validatePackage(p *models.Package) string {
 		return "Speeds cannot be negative."
 	case p.TimeLimitMinutes != nil && *p.TimeLimitMinutes < 0, p.DataLimitMB != nil && *p.DataLimitMB < 0:
 		return "Time and data limits cannot be negative."
+	case p.FairUseKbps != nil && *p.FairUseKbps != 0 && (*p.FairUseKbps < 64 || *p.FairUseKbps > 1024000):
+		return "Speed after the data cap must be between 0.064 and 1000 Mbps (or empty)."
 	}
 	switch p.BillingCycle {
 	case "hourly", "daily", "weekly", "monthly":

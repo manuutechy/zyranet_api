@@ -58,6 +58,7 @@ type radiusUser struct {
 	Kind               string // hotspot | pppoe
 	CustomerID, ZoneID uint
 	Check, Reply       []radiusAttr
+	FairUse            bool // slowed to the plan's fair-use speed (not hashed: it is in Reply)
 }
 
 // hash fingerprints everything written for the user, so an unchanged user
@@ -81,16 +82,20 @@ func radiusExpiration(t time.Time) string { return t.UTC().Format("Jan 02 2006 1
 // desiredRadiusUsers works out the RADIUS accounts a customer should have right
 // now. A customer who is not active and paid up gets none — so the router
 // rejects them. deviceMACs are the customer's known devices, most recent first.
-func desiredRadiusUsers(c *models.Customer, pkg *models.Package, deviceMACs []string, now time.Time) []radiusUser {
+//
+// used is the bytes used in the current plan window (usageUnknown if not
+// known); it only matters for plans with a data cap — see radius_fairuse.go.
+func desiredRadiusUsers(c *models.Customer, pkg *models.Package, deviceMACs []string, now time.Time, used int64) []radiusUser {
 	if c.Status != "active" || c.ExpiresAt == nil || !c.ExpiresAt.After(now) || pkg == nil {
 		return nil
 	}
 	exp := radiusExpiration(*c.ExpiresAt)
-	reply := []radiusAttr{
-		// The router's rx/tx are the client's upload/download — same order the
-		// API-driven profiles already use.
-		{"Mikrotik-Rate-Limit", ":=", fmt.Sprintf("%dk/%dk", pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)},
-		{"Acct-Interim-Interval", ":=", radiusInterim},
+	// The router's rx/tx are the client's upload/download — same order the
+	// API-driven profiles already use — with the same short burst, so pages
+	// open instantly.
+	reply, fairUse, ok := radiusReply(pkg, used)
+	if !ok {
+		return nil // hard data cap reached: refused until they buy again
 	}
 
 	if c.Type == "pppoe" {
@@ -100,7 +105,7 @@ func desiredRadiusUsers(c *models.Customer, pkg *models.Package, deviceMACs []st
 		return []radiusUser{{
 			Username: strings.TrimSpace(*c.PPPoEUsername), Kind: "pppoe", CustomerID: c.ID, ZoneID: c.ZoneID,
 			Check: []radiusAttr{{"Cleartext-Password", ":=", *c.PPPoEPassword}, {"Expiration", ":=", exp}},
-			Reply: reply,
+			Reply: reply, FairUse: fairUse,
 		}}
 	}
 
@@ -132,7 +137,7 @@ func desiredRadiusUsers(c *models.Customer, pkg *models.Package, deviceMACs []st
 		users = append(users, radiusUser{
 			Username: mac, Kind: "hotspot", CustomerID: c.ID, ZoneID: c.ZoneID,
 			Check: []radiusAttr{{"Auth-Type", ":=", "Accept"}, {"Expiration", ":=", exp}},
-			Reply: reply,
+			Reply: reply, FairUse: fairUse,
 		})
 	}
 	return users
@@ -265,10 +270,11 @@ func (s *RadiusService) SyncZone(zoneID uint) error {
 	devices := deviceMACsFor(ids)
 
 	now := time.Now()
+	usage := capUsage(customers, pkgs, now)
 	desired := map[string]radiusUser{}
 	for i := range customers {
 		c := &customers[i]
-		for _, u := range desiredRadiusUsers(c, pkgs[c.PackageID], devices[c.ID], now) {
+		for _, u := range desiredRadiusUsers(c, pkgs[c.PackageID], devices[c.ID], now, usedOf(usage, c.ID)) {
 			desired[u.Username] = u
 		}
 	}
@@ -280,7 +286,8 @@ func (s *RadiusService) SyncZone(zoneID uint) error {
 		have[a.Username] = a
 	}
 
-	return config.DB.Transaction(func(tx *gorm.DB) error {
+	var slowed []radiusUser
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
 		names := make([]string, 0, len(desired))
 		for n := range desired {
 			names = append(names, n)
@@ -294,6 +301,10 @@ func (s *RadiusService) SyncZone(zoneID uint) error {
 			if err := writeUser(tx, u); err != nil {
 				return err
 			}
+			// Just crossed the cap while online: slow the live session too.
+			if _, wasOn := have[n]; wasOn && u.FairUse {
+				slowed = append(slowed, u)
+			}
 		}
 		for n := range have {
 			if _, keep := desired[n]; !keep {
@@ -304,6 +315,20 @@ func (s *RadiusService) SyncZone(zoneID uint) error {
 		}
 		return nil
 	})
+	if err == nil {
+		for _, u := range slowed {
+			go slowLiveSession(zoneID, u.Username, u.Reply[0].Value)
+		}
+	}
+	return err
+}
+
+// usedOf is a customer's window usage, or usageUnknown if not counted.
+func usedOf(usage map[uint]int64, id uint) int64 {
+	if v, ok := usage[id]; ok {
+		return v
+	}
+	return usageUnknown
 }
 
 // SyncCustomer applies one customer's change immediately (used right after a
@@ -326,7 +351,12 @@ func (s *RadiusService) SyncCustomer(customerID uint) error {
 	if err := config.DB.Unscoped().First(&pkg, c.PackageID).Error; err == nil {
 		pkgPtr = &pkg
 	}
-	desired := desiredRadiusUsers(&c, pkgPtr, deviceMACsFor([]uint{c.ID})[c.ID], time.Now())
+	now := time.Now()
+	usage := map[uint]int64{}
+	if pkgPtr != nil {
+		usage = capUsage([]models.Customer{c}, map[uint]*models.Package{c.PackageID: pkgPtr}, now)
+	}
+	desired := desiredRadiusUsers(&c, pkgPtr, deviceMACsFor([]uint{c.ID})[c.ID], now, usedOf(usage, c.ID))
 
 	return config.DB.Transaction(func(tx *gorm.DB) error {
 		keep := map[string]bool{}

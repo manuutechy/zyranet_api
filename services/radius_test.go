@@ -78,7 +78,7 @@ func TestDesiredRadiusUsers(t *testing.T) {
 	mac := "aa-bb-cc-dd-ee-01"
 	base := models.Customer{ID: 7, ZoneID: 3, Type: "hotspot", Status: "active", ExpiresAt: &exp, MacAddress: &mac}
 
-	u := desiredRadiusUsers(&base, pkg, nil, now)
+	u := desiredRadiusUsers(&base, pkg, nil, now, usageUnknown)
 	if len(u) != 1 || u[0].Username != "AA:BB:CC:DD:EE:01" || u[0].Kind != "hotspot" {
 		t.Fatalf("hotspot user: %+v", u)
 	}
@@ -93,7 +93,7 @@ func TestDesiredRadiusUsers(t *testing.T) {
 	if check["Auth-Type"] != "Accept" || check["Expiration"] != "Sep 23 2026 10:00:00" {
 		t.Errorf("check attrs: %v", check)
 	}
-	if reply["Mikrotik-Rate-Limit"] != "2048k/5120k" || reply["Acct-Interim-Interval"] != "300" {
+	if reply["Mikrotik-Rate-Limit"] != "2048k/5120k 20000k/20000k 1433k/3584k 15/15 8" || reply["Acct-Interim-Interval"] != "300" {
 		t.Errorf("reply attrs: %v (rate must be upload/download, as the API-driven profiles use)", reply)
 	}
 
@@ -102,29 +102,29 @@ func TestDesiredRadiusUsers(t *testing.T) {
 	expired.ExpiresAt = &past
 	suspended := base
 	suspended.Status = "suspended"
-	if len(desiredRadiusUsers(&expired, pkg, nil, now)) != 0 || len(desiredRadiusUsers(&suspended, pkg, nil, now)) != 0 || len(desiredRadiusUsers(&base, nil, nil, now)) != 0 {
+	if len(desiredRadiusUsers(&expired, pkg, nil, now, usageUnknown)) != 0 || len(desiredRadiusUsers(&suspended, pkg, nil, now, usageUnknown)) != 0 || len(desiredRadiusUsers(&base, nil, nil, now, usageUnknown)) != 0 {
 		t.Error("expired / suspended / package-less customers must get no RADIUS account")
 	}
 
 	// Device limit caps devices; junk MACs and duplicates are ignored.
 	devs := []string{"AA:BB:CC:DD:EE:01", "not-a-mac", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:03"}
-	if got := desiredRadiusUsers(&base, pkg, devs, now); len(got) != 2 || got[1].Username != "AA:BB:CC:DD:EE:02" {
+	if got := desiredRadiusUsers(&base, pkg, devs, now, usageUnknown); len(got) != 2 || got[1].Username != "AA:BB:CC:DD:EE:02" {
 		t.Errorf("device limit 2: %+v", got)
 	}
 	one := &models.Package{SpeedUploadKbps: 1, SpeedDownloadKbps: 1, DeviceLimit: 1}
-	if got := desiredRadiusUsers(&base, one, devs, now); len(got) != 1 {
+	if got := desiredRadiusUsers(&base, one, devs, now, usageUnknown); len(got) != 1 {
 		t.Errorf("device limit 1 allowed %d devices", len(got))
 	}
 
 	// PPPoE uses username/password, not a MAC.
 	un, pw := "pppoe_jane", "s3cret"
 	ppp := models.Customer{ID: 8, ZoneID: 3, Type: "pppoe", Status: "active", ExpiresAt: &exp, PPPoEUsername: &un, PPPoEPassword: &pw}
-	pu := desiredRadiusUsers(&ppp, pkg, nil, now)
+	pu := desiredRadiusUsers(&ppp, pkg, nil, now, usageUnknown)
 	if len(pu) != 1 || pu[0].Username != "pppoe_jane" || pu[0].Kind != "pppoe" || pu[0].Check[0].Attribute != "Cleartext-Password" {
 		t.Errorf("pppoe user: %+v", pu)
 	}
 	ppp.PPPoEPassword = nil
-	if len(desiredRadiusUsers(&ppp, pkg, nil, now)) != 0 {
+	if len(desiredRadiusUsers(&ppp, pkg, nil, now, usageUnknown)) != 0 {
 		t.Error("a PPPoE customer with no password can't be given an account")
 	}
 }
@@ -145,7 +145,7 @@ func TestSyncZone_WritesRadiusRowsAndKeepsThemCurrent(t *testing.T) {
 	if check["Auth-Type"] != "Accept" || check["Expiration"] == "" {
 		t.Fatalf("radcheck rows: %v", check)
 	}
-	if reply := radiusRows(t, "radreply", "AA:BB:CC:DD:EE:10"); reply["Mikrotik-Rate-Limit"] != "2048k/5120k" {
+	if reply := radiusRows(t, "radreply", "AA:BB:CC:DD:EE:10"); reply["Mikrotik-Rate-Limit"] != "2048k/5120k 20000k/20000k 1433k/3584k 15/15 8" {
 		t.Errorf("radreply rows: %v", reply)
 	}
 	var acct models.RadiusAccount

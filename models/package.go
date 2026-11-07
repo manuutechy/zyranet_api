@@ -23,6 +23,9 @@ type Package struct {
 	FreeTierDays           string         `gorm:"size:20;default:all" json:"free_tier_days"` // all | weekdays | weekends
 	TimeLimitMinutes       *int           `json:"time_limit_minutes"`
 	DataLimitMB            *int           `json:"data_limit_mb"`
+	// FairUseKbps: with a data cap, the speed (both ways) after the cap is used
+	// up, until the plan ends. Nil/0 = cut off at the cap. RADIUS zones only.
+	FairUseKbps            *int           `json:"fair_use_kbps"`
 	SpeedUploadKbps        int            `gorm:"not null" json:"speed_upload_kbps"`
 	SpeedDownloadKbps      int            `gorm:"not null" json:"speed_download_kbps"`
 	BillingCycle           string         `gorm:"size:20;not null" json:"billing_cycle"` // hourly|daily|weekly|monthly
