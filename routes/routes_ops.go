@@ -13,6 +13,7 @@ func registerOpsRoutes(admin fiber.Router, adminAuth fiber.Handler) {
 	// Money: owner, finance, zone manager (own zone). Never field agents.
 	seesMoney := middleware.RequireRoles("super_admin", "finance", "zone_manager")
 	admin.Get("/ops/live", adminAuth, seesMoney, handlers.OpsLive)
+	admin.Get("/reports/insights", adminAuth, seesMoney, handlers.ReportInsights)
 
 	// Router alert banner: every staff role (zone managers see their zone).
 	admin.Get("/ops/alerts", adminAuth, handlers.OpsAlertsIndex)
