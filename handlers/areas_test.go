@@ -349,3 +349,40 @@ func TestOwner_AreaFlowAndOverride(t *testing.T) {
 		t.Errorf("after adding area B + loose zone: %v", got)
 	}
 }
+
+// A single-zone manager sees their zone's area, and its takings are only
+// their own zone's, never the rest of the area (lead security review).
+func TestZoneManager_AreaSummaryOnlyOwnZoneMoney(t *testing.T) {
+	w := newAreaWorld(t)
+	app := areasApp()
+	config.DB.Create(&models.Payment{ZoneID: w.a2, Phone: "254700000777", Amount: 5000, Method: "mpesa", Status: "completed"})
+	zm, ztok := staffUser(t, w.org, "zone_manager")
+	config.DB.Model(&models.User{}).Where("id = ?", zm.ID).Update("zone_id", w.a1)
+
+	st, body := areaCall(t, app, "GET", "/admin/areas", ztok, "")
+	list, _ := body["data"].([]interface{})
+	if st != 200 || len(list) != 1 {
+		t.Fatalf("areas for zone manager: %d %v", st, body)
+	}
+	a := list[0].(map[string]interface{})
+	if a["takings_today"].(float64) != float64(100*w.a1) || a["takings_month"].(float64) != float64(100*w.a1) {
+		t.Errorf("zone manager sees area takings %v / %v, want only own zone %d", a["takings_today"], a["takings_month"], 100*w.a1)
+	}
+	if a["zones_count"].(float64) != 1 {
+		t.Errorf("zone manager sees %v zones in the area", a["zones_count"])
+	}
+
+	from := time.Now().In(time.FixedZone("EAT", 3*3600)).Format("2006-01-02")
+	_, body = areaCall(t, app, "GET", "/admin/reports/areas?from="+from+"&to="+from, ztok, "")
+	d := body["data"].(map[string]interface{})
+	if tot := d["total"].(map[string]interface{})["takings"].(float64); tot != float64(100*w.a1) {
+		t.Errorf("zone manager report total = %v", tot)
+	}
+
+	// The owner's summary for the same area does include a2's money.
+	_, body = areaCall(t, app, "GET", fmt.Sprintf("/admin/areas/%d", w.areaA), w.owner, "")
+	oa := body["data"].(map[string]interface{})["area"].(map[string]interface{})
+	if oa["takings_today"].(float64) != float64(100*w.a1+5000) {
+		t.Errorf("owner area takings = %v", oa["takings_today"])
+	}
+}

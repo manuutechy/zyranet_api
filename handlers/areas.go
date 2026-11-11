@@ -63,6 +63,30 @@ func isOwner(c *fiber.Ctx) bool {
 	return cl != nil && cl.Role == "super_admin"
 }
 
+// moneyZoneIDs is every zone whose money this caller may see, soft-deleted
+// zones included: owner/finance the whole organization, an area manager the
+// zones of their areas, a single-zone manager only their own zone. Used by
+// both the area summaries and the money-by-area report.
+func moneyZoneIDs(c *fiber.Ctx) ([]uint, error) {
+	cl := middleware.GetClaims(c)
+	ids, err := middleware.OrgZoneIDsWithDeleted(c)
+	if err != nil {
+		return nil, err
+	}
+	if cl.Role == "zone_manager" && !cl.AreaManager {
+		if cl.ZoneID == nil {
+			return []uint{}, nil
+		}
+		for _, id := range ids {
+			if id == *cl.ZoneID {
+				return []uint{id}, nil
+			}
+		}
+		return []uint{}, nil
+	}
+	return ids, nil
+}
+
 func seesAreaMoney(c *fiber.Ctx) bool {
 	cl := middleware.GetClaims(c)
 	return cl != nil && (cl.Role == "super_admin" || cl.Role == "finance" || cl.Role == "zone_manager")
@@ -191,7 +215,7 @@ func buildAreaSummaries(c *fiber.Ctx, areas []models.Area, withZones bool) ([]ar
 
 	var today, month map[uint]float64
 	if seesAreaMoney(c) {
-		ids, err := middleware.OrgZoneIDsWithDeleted(c)
+		ids, err := moneyZoneIDs(c)
 		if err != nil {
 			return nil, err
 		}
@@ -658,12 +682,9 @@ func ReportAreas(c *fiber.Ctx) error {
 	if end.Sub(start) > 400*24*time.Hour {
 		return utils.ErrorResponse(c, "Pick at most 400 days.", "", fiber.StatusUnprocessableEntity)
 	}
-	ids, err := middleware.OrgZoneIDsWithDeleted(c)
+	ids, err := moneyZoneIDs(c)
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
-	}
-	if cl.Role == "zone_manager" && !cl.AreaManager && cl.ZoneID != nil {
-		ids = []uint{*cl.ZoneID}
 	}
 	areas, err := visibleAreas(c)
 	if err != nil {
