@@ -72,6 +72,10 @@ func main() {
 		&models.AgentVoucher{},
 		&models.AgentLedgerEntry{},
 		&models.AgentIdempotencyKey{},
+		// Areas (groups of zones), area price lists, area managers — new tables only.
+		&models.Area{},
+		&models.AreaPackage{},
+		&models.UserArea{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)

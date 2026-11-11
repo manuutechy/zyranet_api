@@ -31,6 +31,9 @@ type Claims struct {
 	// (admin and platform sessions). Logout and password/role/status changes
 	// bump the stored version, which kills every older token at once.
 	TokenVersion uint `json:"tv,omitempty"`
+	// AreaManager is set (never from the token, only by AdminAuth from the
+	// database) for users with role area_manager. See area_scope.go.
+	AreaManager bool `json:"-"`
 	jwt.RegisteredClaims
 }
 
@@ -129,6 +132,7 @@ func AdminAuth() fiber.Handler {
 			return utils.ErrorResponse(c, "Your session has ended. Please sign in again.", "Session revoked.", fiber.StatusUnauthorized)
 		}
 		claims.Role, claims.ZoneID = u.Role, u.ZoneID
+		applyAreaManager(claims)
 		c.Locals("claims", claims)
 		c.Locals("userID", claims.UserID)
 		c.Locals("role", claims.Role)

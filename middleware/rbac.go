@@ -60,8 +60,8 @@ func OrgZoneIDs(c *fiber.Ctx) ([]uint, error) {
 		return nil, fiber.ErrUnauthorized
 	}
 	var ids []uint
-	if err := config.DB.Model(&models.Zone{}).
-		Where("organization_id = ?", claims.OrganizationID).
+	if err := limitToAreaZones(claims, config.DB.Model(&models.Zone{}).
+		Where("organization_id = ?", claims.OrganizationID)).
 		Pluck("id", &ids).Error; err != nil {
 		return nil, err
 	}
@@ -78,8 +78,8 @@ func OrgZoneIDsWithDeleted(c *fiber.Ctx) ([]uint, error) {
 		return nil, fiber.ErrUnauthorized
 	}
 	var ids []uint
-	if err := config.DB.Unscoped().Model(&models.Zone{}).
-		Where("organization_id = ?", claims.OrganizationID).
+	if err := limitToAreaZones(claims, config.DB.Unscoped().Model(&models.Zone{}).
+		Where("organization_id = ?", claims.OrganizationID)).
 		Pluck("id", &ids).Error; err != nil {
 		return nil, err
 	}

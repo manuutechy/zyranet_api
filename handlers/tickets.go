@@ -28,6 +28,8 @@ func TicketIndex(c *fiber.Ctx) error {
 	query = query.Where("organization_id = ?", ticketOrgID(claims))
 	if claims != nil && claims.ZoneID != nil {
 		query = query.Where("zone_id = ? OR zone_id IS NULL", *claims.ZoneID)
+	} else if claims != nil && claims.AreaManager {
+		query = query.Where("zone_id IN ? OR zone_id IS NULL", middleware.AreaZoneIDs(c))
 	}
 
 	if s := c.Query("status"); s != "" {

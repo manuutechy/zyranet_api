@@ -178,6 +178,9 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, body.ZoneID).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 	}
+	if !middleware.ZoneInScope(c, targetZone.ID) {
+		return utils.ErrorResponse(c, "Unauthorized to record payments for this zone.", "", fiber.StatusForbidden)
+	}
 
 	var pkg models.Package
 	var packageIDPtr *uint

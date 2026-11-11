@@ -322,6 +322,7 @@ func Register(app *fiber.App) {
 
 	// ---- LIVE OPS (live money view + owner router alerts) ----
 	registerOpsRoutes(admin, adminAuth)
+	registerAreaRoutes(admin, adminAuth)
 
 	// ---- PLATFORM (SUPER ADMIN) JWT ROUTES ----
 	// Deliberately separate from the admin/customer groups above — see

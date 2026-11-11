@@ -17,6 +17,19 @@ import (
 // zone_manager always to their own; anyone else to ?zone_id= if it belongs
 // to their ISP. ok=false means the requested zone isn't theirs.
 func opsZoneScope(c *fiber.Ctx, claims *middleware.Claims) (*uint, bool) {
+	if claims.AreaManager {
+		// Area manager: all their zones (OnlyZoneIDs) or one of them.
+		q := strings.TrimSpace(c.Query("zone_id"))
+		if q == "" || q == "all" {
+			return nil, true
+		}
+		id, err := strconv.ParseUint(q, 10, 64)
+		if err != nil || !middleware.ZoneInScope(c, uint(id)) {
+			return nil, false
+		}
+		z := uint(id)
+		return &z, true
+	}
 	if claims.Role == "zone_manager" {
 		if claims.ZoneID == nil {
 			return nil, false
@@ -54,7 +67,7 @@ func OpsLive(c *fiber.Ctx) error {
 	if !ok {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	live, err := services.BuildLiveOps(config.DB, services.LiveScope{OrganizationID: claims.OrganizationID, ZoneID: zoneID}, time.Now())
+	live, err := services.BuildLiveOps(config.DB, services.LiveScope{OrganizationID: claims.OrganizationID, ZoneID: zoneID, OnlyZoneIDs: areaOnlyZones(c)}, time.Now())
 	if err != nil {
 		return utils.ErrorResponse(c, "Could not load live figures.", "", fiber.StatusInternalServerError)
 	}
@@ -71,7 +84,7 @@ func OpsAlertsIndex(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthenticated.", "", fiber.StatusUnauthorized)
 	}
 	var zoneID *uint
-	if claims.Role == "zone_manager" {
+	if claims.Role == "zone_manager" && !claims.AreaManager {
 		if claims.ZoneID == nil {
 			return utils.SuccessResponse(c, fiber.Map{"offline": []interface{}{}, "alerts": []interface{}{}}, "")
 		}
@@ -82,6 +95,7 @@ func OpsAlertsIndex(c *fiber.Ctx) error {
 	if err != nil {
 		return utils.ErrorResponse(c, "Could not load alerts.", "", fiber.StatusInternalServerError)
 	}
+	alerts = keepAreaAlerts(c, alerts)
 
 	var zones []models.Zone
 	q := config.DB.Select("id", "name", "last_seen_at").
@@ -90,6 +104,7 @@ func OpsAlertsIndex(c *fiber.Ctx) error {
 	if zoneID != nil {
 		q = q.Where("id = ?", *zoneID)
 	}
+	q = middleware.ScopeZones(c, q, "id")
 	q.Order("last_seen_at ASC").Find(&zones)
 	offline := make([]fiber.Map, 0, len(zones))
 	for _, z := range zones {
@@ -112,7 +127,9 @@ func OpsAlertAck(c *fiber.Ctx) error {
 	}
 	q := config.DB.Model(&models.OpsAlert{}).
 		Where("id = ? AND organization_id = ? AND acknowledged_at IS NULL", c.Params("id"), claims.OrganizationID)
-	if claims.Role == "zone_manager" {
+	if claims.AreaManager {
+		q = q.Where("zone_id IN ?", middleware.AreaZoneIDs(c))
+	} else if claims.Role == "zone_manager" {
 		if claims.ZoneID == nil {
 			return utils.ErrorResponse(c, "Alert not found.", "", fiber.StatusNotFound)
 		}
