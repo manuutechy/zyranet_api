@@ -337,11 +337,12 @@ func commaInt(n int64) string {
 }
 
 func fmtSpeed(kbps int) string {
-	if kbps >= 1000 && kbps%1000 == 0 {
-		return fmt.Sprintf("%d Mbps", kbps/1000)
+	// 1 Mbps = 1024 kbps, as the admin's package pages show it.
+	if kbps >= 1024 && kbps%1024 == 0 {
+		return fmt.Sprintf("%d Mbps", kbps/1024)
 	}
-	if kbps >= 1000 {
-		return fmt.Sprintf("%.1f Mbps", float64(kbps)/1000)
+	if kbps >= 1024 {
+		return fmt.Sprintf("%.1f Mbps", float64(kbps)/1024)
 	}
 	return fmt.Sprintf("%d kbps", kbps)
 }
