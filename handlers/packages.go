@@ -216,6 +216,9 @@ func PackageUpdate(c *fiber.Ctx) error {
 	if msg := validatePackage(&merged); msg != "" {
 		return utils.ErrorResponse(c, msg, "Validation failed.", fiber.StatusUnprocessableEntity)
 	}
+	if areaPlanChanged(&pkg, &merged) {
+		body["area_override"] = true // this zone now has its own price; area updates skip it
+	}
 	if err := config.DB.Model(&pkg).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
@@ -281,6 +284,7 @@ func PackageDuplicate(c *fiber.Ctx) error {
 		newPkg.DeletedAt = gorm.DeletedAt{}
 		newPkg.Zone = nil
 		newPkg.ZoneID = zoneID
+		newPkg.AreaPackageID, newPkg.AreaOverride = nil, false // a copy is the zone's own plan
 
 		if err := config.DB.Create(&newPkg).Error; err == nil {
 			duplicatedCount++
@@ -335,9 +339,6 @@ func validatePackage(p *models.Package) string {
 
 // packageZoneAllowed: a zone manager only manages their own zone's plans.
 func packageZoneAllowed(c *fiber.Ctx, zoneID uint) bool {
-	claims := middleware.GetClaims(c)
-	if claims != nil && claims.Role == "zone_manager" && claims.ZoneID != nil {
-		return *claims.ZoneID == zoneID
-	}
-	return true
+	// zone manager: own zone; area manager: their areas' zones.
+	return middleware.ZoneInScope(c, zoneID)
 }

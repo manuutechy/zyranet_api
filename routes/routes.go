@@ -98,6 +98,7 @@ func failedLookupLimiter(max int, window time.Duration) fiber.Handler {
 // Register mounts all API routes on the Fiber app.
 func Register(app *fiber.App) {
 	v1 := app.Group("/api/v1")
+	registerInstallsRoutes(v1) // home installs + stock; fences installer logins (first, on purpose)
 
 	// ---- PUBLIC ROUTES (no auth) ----
 
@@ -200,6 +201,7 @@ func Register(app *fiber.App) {
 	admin.Post("/auth/logout", adminAuth, handlers.Logout)
 	admin.Get("/auth/me", adminAuth, handlers.Me)
 
+	registerGrowthRoutes(admin, adminAuth) // before /zones/:id
 	// Zone alerts (special top-level routes)
 	admin.Get("/zones/alerts", adminAuth, handlers.ZoneAlerts)
 	admin.Post("/zones/alerts/:id/resolve", adminAuth, handlers.ZoneResolveAlert)
@@ -322,6 +324,8 @@ func Register(app *fiber.App) {
 
 	// ---- LIVE OPS (live money view + owner router alerts) ----
 	registerOpsRoutes(admin, adminAuth)
+	registerHomeRoutes(v1, admin, adminAuth)
+	registerAreaRoutes(admin, adminAuth)
 
 	// ---- PLATFORM (SUPER ADMIN) JWT ROUTES ----
 	// Deliberately separate from the admin/customer groups above — see

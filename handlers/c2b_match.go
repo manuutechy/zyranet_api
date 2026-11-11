@@ -43,8 +43,8 @@ func c2bCustomerScope(orgID uint, scoped bool) func(*gorm.DB) *gorm.DB {
 
 // matchC2BCustomer finds the customer a C2B paybill payment belongs to.
 //
-// It tries, in order: the account number (unique), the PPPoE username, then
-// the phone number from the account reference, then from the payer's MSISDN.
+// It tries, in order: the account number (unique), the PPPoE username, the
+// short customer number, then the phone number from the account reference, then from the payer's MSISDN.
 // A step that finds exactly one customer wins; a step that finds several
 // (e.g. the same phone registered with two ISPs) means the payment can't be
 // attributed safely, so it returns ambiguous=true and the caller must queue
@@ -60,6 +60,11 @@ func matchC2BCustomer(orgID uint, scoped bool, billRef, msisdn string) (customer
 			func(db *gorm.DB) *gorm.DB { return db.Where("account_number = ?", billRef) },
 			func(db *gorm.DB) *gorm.DB { return db.Where("pppoe_username = ?", billRef) },
 		)
+		// The short customer number (homes type it as the account), however
+		// it was typed: "10017", "#10017", "zyr 10017", "Z10017".
+		if no, ok := models.ParseCustomerNo(billRef); ok {
+			lookups = append(lookups, func(db *gorm.DB) *gorm.DB { return db.Where("customer_no = ?", no) })
+		}
 	}
 	for _, raw := range []string{billRef, msisdn} {
 		if suffix := phoneSuffix9(raw); suffix != "" {

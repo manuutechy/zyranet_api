@@ -72,11 +72,24 @@ func main() {
 		&models.AgentVoucher{},
 		&models.AgentLedgerEntry{},
 		&models.AgentIdempotencyKey{},
+		// Home (fibre) accounts: renew-page payments.
+		&models.HomeRenewal{},
+		// Areas (groups of zones), area price lists, area managers — new tables only.
+		&models.Area{},
+		&models.AreaPackage{},
+		&models.UserArea{},
+		// Reports › Growth plan + Network › Watch — new tables only.
+		&models.GrowthPlan{},
+		&models.ZoneLineStat{},
+		&models.ZoneWatchState{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
 	}
 	config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
+	if err := services.MigrateInstalls(config.DB); err != nil { // home installs + stock tables, users.crew_id
+		log.Fatalf("[database] installs migrate failed: %v", err)
+	}
 
 	// Backfill Organization #1 for the existing single-tenant install, and
 	// assign every pre-existing User/Zone to it. Multi-tenancy is additive:
@@ -145,6 +158,11 @@ func main() {
 		}
 	} else {
 		log.Printf("[database] Failed to query customers for backfill: %v", err)
+	}
+
+	// Short customer numbers (the M-Pesa account for homes) for older rows.
+	if n, err := models.BackfillCustomerNumbers(config.DB); err != nil || n > 0 {
+		log.Printf("[database] Customer numbers backfilled: %d (err: %v)", n, err)
 	}
 
 	// Purge inactive/guest/expired customers on startup — preserve only active subscribers
@@ -279,6 +297,9 @@ func main() {
 	opsAlerts := services.NewOpsAlertService(config.DB, services.NewSmsAlertSender(smsSvc))
 	opsAlerts.Start()
 	defer opsAlerts.Stop()
+
+	// Home installs: move installed jobs to "live" when the home's first payment lands.
+	defer services.StartInstallLiveWatcher(config.DB).Stop()
 
 	// Start Automated Subscriber Expiry SMS Reminders
 	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())

@@ -187,15 +187,13 @@ func ReportZones(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	var zones []models.Zone
 	zoneQuery := config.DB.Model(&models.Zone{}).Where("organization_id = ?", claims.OrganizationID)
-	if claims.Role == "zone_manager" && claims.ZoneID != nil {
-		zoneQuery = zoneQuery.Where("id = ?", *claims.ZoneID)
-	}
+	zoneQuery = middleware.ScopeZones(c, zoneQuery, "id")
 	zoneQuery.Find(&zones)
 	// A deleted zone that took money still appears (status "deleted"), so the
 	// zone rows add up to the revenue report instead of silently dropping it.
-	if claims.Role != "zone_manager" {
+	if claims.Role != "zone_manager" || claims.AreaManager {
 		var deleted []models.Zone
-		config.DB.Unscoped().Model(&models.Zone{}).
+		middleware.ScopeZones(c, config.DB.Unscoped().Model(&models.Zone{}), "id").
 			Where("organization_id = ? AND deleted_at IS NOT NULL", claims.OrganizationID).
 			Where("id IN (?)", config.DB.Model(&models.Payment{}).Select("zone_id").Where("status = ?", "completed")).
 			Find(&deleted)

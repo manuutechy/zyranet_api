@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"gorm.io/gorm"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,9 +27,7 @@ func TicketIndex(c *fiber.Ctx) error {
 	// Every ISP staff role — super_admin included (it is the ISP owner, not
 	// platform staff) — sees only its own organization's tickets.
 	query = query.Where("organization_id = ?", ticketOrgID(claims))
-	if claims != nil && claims.ZoneID != nil {
-		query = query.Where("zone_id = ? OR zone_id IS NULL", *claims.ZoneID)
-	}
+	query = ticketZoneScope(c, claims, query)
 
 	if s := c.Query("status"); s != "" {
 		query = query.Where("status = ?", s)
@@ -264,6 +263,7 @@ func TicketShow(c *fiber.Ctx) error {
 	query := config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone").Preload("Organization")
 
 	query = query.Where("organization_id = ?", ticketOrgID(claims))
+	query = ticketZoneScope(c, claims, query)
 
 	if err := query.First(&ticket, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Ticket not found.", "", fiber.StatusNotFound)
@@ -278,6 +278,7 @@ func TicketUpdate(c *fiber.Ctx) error {
 	query := config.DB.Model(&models.Ticket{})
 
 	query = query.Where("organization_id = ?", ticketOrgID(claims))
+	query = ticketZoneScope(c, claims, query)
 
 	if err := query.First(&ticket, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Ticket not found.", "", fiber.StatusNotFound)
@@ -348,4 +349,18 @@ func ticketOrgID(claims *middleware.Claims) uint {
 		return 0
 	}
 	return claims.OrganizationID
+}
+
+// ticketZoneScope limits zone-bound staff to their zone's tickets (and
+// tickets with no zone) and area managers to their areas' zones — the same
+// rule for the list and for opening or changing one ticket.
+func ticketZoneScope(c *fiber.Ctx, claims *middleware.Claims, q *gorm.DB) *gorm.DB {
+	if claims != nil && claims.ZoneID != nil {
+		return q.Where("(zone_id = ? OR zone_id IS NULL)", *claims.ZoneID)
+	}
+	if claims != nil && claims.AreaManager {
+		ids := append([]uint{0}, middleware.AreaZoneIDs(c)...)
+		return q.Where("(zone_id IN ? OR zone_id IS NULL)", ids)
+	}
+	return q
 }

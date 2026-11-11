@@ -71,8 +71,10 @@ func CustomerIndex(c *fiber.Ctx) error {
 		if p := phoneSearchForm(search); p != "" {
 			phoneLike = "%" + p + "%"
 		}
-		query = query.Where("name LIKE ? OR phone LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ?",
-			"%"+search+"%", "%"+search+"%", phoneLike, "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		// Customer number (homes): exact match, however it was typed.
+		customerNo, _ := models.ParseCustomerNo(search)
+		query = query.Where("name LIKE ? OR phone LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ? OR customer_no = ?",
+			"%"+search+"%", "%"+search+"%", phoneLike, "%"+search+"%", "%"+search+"%", "%"+search+"%", customerNo)
 	}
 
 	// Active Now filter (active subscription that has not expired)
@@ -226,7 +228,7 @@ func CustomerStore(c *fiber.Ctx) error {
 	if claims.Role != "super_admin" && claims.Role != "zone_manager" {
 		return utils.ErrorResponse(c, "Unauthorized to register customers.", "", fiber.StatusForbidden)
 	}
-	if claims.Role == "zone_manager" && claims.ZoneID != nil && customer.ZoneID != *claims.ZoneID {
+	if (claims.Role == "zone_manager" && claims.ZoneID != nil && customer.ZoneID != *claims.ZoneID) || !middleware.ZoneInScope(c, customer.ZoneID) {
 		return utils.ErrorResponse(c, "Unauthorized to add customer to this zone.", "", fiber.StatusForbidden)
 	}
 	var targetZone models.Zone
@@ -346,7 +348,7 @@ func CustomerUpdate(c *fiber.Ctx) error {
 		if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, uint(zf)).Error; err != nil || zf <= 0 {
 			return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 		}
-		if claims.Role == "zone_manager" && claims.ZoneID != nil && zone.ID != *claims.ZoneID {
+		if (claims.Role == "zone_manager" && claims.ZoneID != nil && zone.ID != *claims.ZoneID) || !middleware.ZoneInScope(c, zone.ID) {
 			return utils.ErrorResponse(c, "Unauthorized to move customer to this zone.", "", fiber.StatusForbidden)
 		}
 	}

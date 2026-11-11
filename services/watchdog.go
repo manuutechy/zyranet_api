@@ -15,6 +15,18 @@ type WatchdogService struct {
 	// lastReconcile is when device logins were last brought in line with
 	// customers; each run only looks at rows changed since (minus a margin).
 	lastReconcile time.Time
+	// homeRouterOverride replaces mikrotikSvc for switching homes off. Tests only.
+	homeRouterOverride HomeRouter
+}
+
+func (w *WatchdogService) homeRouter() HomeRouter {
+	if w.homeRouterOverride != nil {
+		return w.homeRouterOverride
+	}
+	if w.mikrotikSvc == nil {
+		return nil
+	}
+	return w.mikrotikSvc
 }
 
 // NewWatchdogService initializes the background watchdog service.
@@ -78,8 +90,17 @@ func (w *WatchdogService) runOverloadProtectionSweep() {
 	log.Printf("[watchdog] Found %d expired customer accounts to decommission.", len(expiredCustomers))
 
 	for _, cust := range expiredCustomers {
-		// Update customer status to expired
-		config.DB.Model(&models.Customer{}).Where("id = ?", cust.ID).Update("status", "expired")
+		// A home whose credit covers the next period is renewed, not cut off.
+		if IsHome(&cust) && HomeAutoRenewAtExpiry(cust.ID) {
+			continue
+		}
+		// Update customer status to expired — only if it is still active and
+		// unpaid: a payment that landed a moment ago must not be switched off.
+		if res := config.DB.Model(&models.Customer{}).
+			Where("id = ? AND status = ? AND expires_at < ?", cust.ID, "active", now).
+			Update("status", "expired"); res.Error != nil || res.RowsAffected == 0 {
+			continue
+		}
 
 		// Close any open sessions
 		config.DB.Model(&models.Session{}).
@@ -88,20 +109,16 @@ func (w *WatchdogService) runOverloadProtectionSweep() {
 				"ended_at": &now,
 			})
 
-		// If PPPoE subscriber, disable secret on MikroTik and terminate active tunnel
-		if cust.Type == "pppoe" && cust.Zone != nil && cust.Zone.RouterIP != "" {
-			username := ""
-			if cust.PPPoEUsername != nil && *cust.PPPoEUsername != "" {
-				username = *cust.PPPoEUsername
-			} else {
-				username = cust.AccountNumber
-			}
-			if username != "" {
-				zoneCopy := *cust.Zone
-				go func(z models.Zone, u string) {
-					_ = w.mikrotikSvc.DecommissionPPPoECustomer(&z, u)
-				}(zoneCopy, username)
-			}
+		// Home (PPPoE): switch off at the router in either auth mode — API
+		// (disable the PPP secret, end the tunnel) or RADIUS (drop the RADIUS
+		// rows, Disconnect-Request the live session). See home.go.
+		if cust.Type == "pppoe" && cust.Zone != nil {
+			zoneCopy, custCopy := *cust.Zone, cust
+			go func(z models.Zone, c models.Customer) {
+				if err := HomeSwitchOff(w.homeRouter(), &c, &z); err != nil {
+					log.Printf("[watchdog] switch off home %d: %v", c.ID, err)
+				}
+			}(zoneCopy, custCopy)
 		} else if cust.Zone != nil && cust.Zone.RouterIP != "" {
 			// If Hotspot user, kick active session by MAC or Phone/Account
 			target := ""

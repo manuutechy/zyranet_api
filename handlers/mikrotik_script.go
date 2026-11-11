@@ -189,6 +189,10 @@ func PublicZoneHeartbeat(c *fiber.Ctx) error {
 		config.DB.Create(&stat)
 	}
 
+	// Network › Watch: line use, sessions and OLT ping (newer heartbeat
+	// script only; older routers simply don't send these).
+	recordLineWatch(c, &zone, now)
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"status":    "ok",
 		"zone_id":   zone.ID,

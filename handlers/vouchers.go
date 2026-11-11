@@ -86,7 +86,7 @@ func VoucherGenerate(c *fiber.Ctx) error {
 	}
 
 	// Zone manager can only generate for their zone
-	if claims.Role == "zone_manager" && claims.ZoneID != nil && body.ZoneID != *claims.ZoneID {
+	if (claims.Role == "zone_manager" && claims.ZoneID != nil && body.ZoneID != *claims.ZoneID) || !middleware.ZoneInScope(c, body.ZoneID) {
 		return utils.ErrorResponse(c, "Unauthorized to generate vouchers for this zone.", "", fiber.StatusForbidden)
 	}
 

@@ -30,6 +30,11 @@ type Package struct {
 	SpeedDownloadKbps      int            `gorm:"not null" json:"speed_download_kbps"`
 	BillingCycle           string         `gorm:"size:20;not null" json:"billing_cycle"` // hourly|daily|weekly|monthly
 	Status                 string         `gorm:"size:20;default:active" json:"status"`
+	// AreaPackageID links this plan to its area price-list template; nil for
+	// a zone's own plans. AreaOverride = this zone changed the plan itself,
+	// so "apply area prices" leaves it alone.
+	AreaPackageID          *uint          `gorm:"index" json:"area_package_id"`
+	AreaOverride           bool           `gorm:"default:false" json:"area_override"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`

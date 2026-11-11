@@ -419,10 +419,15 @@ func fetchSecurity(zone *models.Zone) string {
 // heartbeatSource is the body of the router's zyranet-heartbeat script (already
 // escaped for a double-quoted RouterOS string): fetch + import the sync
 // script, then report telemetry. Both URLs carry the zone's token.
+// Telemetry: CPU, memory, hotspot sessions, board, plus (Network › Watch) the
+// WAN port byte counters, PPPoE sessions and an OLT ping when one is set.
+// board stays last in the URL: some board names contain spaces.
 func heartbeatSource(zone *models.Zone) string {
 	sec := fetchSecurity(zone)
-	return fmt.Sprintf("/tool fetch url=\\\"https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s\\\" dst-path=\\\"zyra-sync.rsc\\\" %s; :if ([:len [/file find name=\\\"zyra-sync.rsc\\\"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name=\\\"zyra-sync.rsc\\\"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; /tool fetch url=(\\\"https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=\\\" . \\$c . \\\"&totalmem=\\\" . \\$tm . \\\"&freemem=\\\" . \\$fm . \\\"&clients=\\\" . \\$cl . \\\"&board=\\\" . \\$b) %s keep-result=no",
-		zone.ID, zone.ProvisionToken, sec, zone.ID, zone.ProvisionToken, sec)
+	watch, watchQuery := watchHeartbeatParts(zone)
+	raw := fmt.Sprintf(`/tool fetch url="https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s" dst-path="zyra-sync.rsc" %s; :if ([:len [/file find name="zyra-sync.rsc"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name="zyra-sync.rsc"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; %s/tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=" . $c . "&totalmem=" . $tm . "&freemem=" . $fm . "&clients=" . $cl%s . "&board=" . $b) %s keep-result=no`,
+		zone.ID, zone.ProvisionToken, sec, watch, zone.ID, zone.ProvisionToken, watchQuery, sec)
+	return rosEscape(raw)
 }
 
 // writeLegacyLoginCleanup removes the shared router logins earlier scripts
