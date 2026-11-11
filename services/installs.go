@@ -46,7 +46,6 @@ var ErrInstallJobNotFound = &LedgerError{Status: 404, Msg: "Install job not foun
 
 // ---- cents / hundredths ----
 
-func toCents(kes float64) int64       { return int64(math.Round(kes * 100)) }
 func centsToKES(c int64) float64      { return float64(c) / 100 }
 func toHundredths(q float64) int64    { return int64(math.Round(q * 100)) }
 func hundredthsToQty(h int64) float64 { return float64(h) / 100 }
