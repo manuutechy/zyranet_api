@@ -71,8 +71,10 @@ func CustomerIndex(c *fiber.Ctx) error {
 		if p := phoneSearchForm(search); p != "" {
 			phoneLike = "%" + p + "%"
 		}
-		query = query.Where("name LIKE ? OR phone LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ?",
-			"%"+search+"%", "%"+search+"%", phoneLike, "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		// Customer number (homes): exact match, however it was typed.
+		customerNo, _ := models.ParseCustomerNo(search)
+		query = query.Where("name LIKE ? OR phone LIKE ? OR phone LIKE ? OR pppoe_username LIKE ? OR account_number LIKE ? OR mac_address LIKE ? OR customer_no = ?",
+			"%"+search+"%", "%"+search+"%", phoneLike, "%"+search+"%", "%"+search+"%", "%"+search+"%", customerNo)
 	}
 
 	// Active Now filter (active subscription that has not expired)

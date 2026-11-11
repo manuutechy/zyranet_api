@@ -902,6 +902,11 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 	payment.Status = "completed"
 	payment.MpesaReceiptNumber = &receiptNumber
 
+	// A home (fibre) renewal from the public renew page: see home.go.
+	if handled, err := s.processHomeRenewal(payment, receiptNumber); handled {
+		return err
+	}
+
 	if payment.PackageID == nil {
 		if payment.CustomerID != nil {
 			var customer models.Customer
@@ -1100,6 +1105,11 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 		config.DB.Model(customer).Updates(custUpdates)
 		if s.Radius != nil {
 			s.Radius.SyncCustomerAsync(customer.ID)
+		}
+		if IsHome(customer) {
+			// A home paid by a staff-sent prompt: re-enable its PPP secret
+			// (API mode) — it may have been switched off at expiry.
+			s.HomeSwitchOn(customer.ID, customer.ZoneID, &payment.ID)
 		}
 
 		templateActive := s.SMS.GetSetting("sms_template_active", "Hi {name}, your account is active. Package: {package} Expires: {expiry}.")
