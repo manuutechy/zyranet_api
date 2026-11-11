@@ -90,14 +90,17 @@ func recordLineWatch(c *fiber.Ctx, zone *models.Zone, now time.Time) {
 	services.IngestLineReport(config.DB, zone, r, now)
 }
 
-// watchZoneScope: zone managers see only their zone.
-func watchZoneScope(claims *middleware.Claims) (*uint, bool) {
+// watchZoneScope: zone managers see only their zone, area managers the
+// zones of their areas; nil = the whole ISP.
+func watchZoneScope(c *fiber.Ctx, claims *middleware.Claims) ([]uint, bool) {
+	if claims.AreaManager {
+		return middleware.AreaZoneIDs(c), true
+	}
 	if claims.Role == "zone_manager" {
 		if claims.ZoneID == nil {
 			return nil, false
 		}
-		z := *claims.ZoneID
-		return &z, true
+		return []uint{*claims.ZoneID}, true
 	}
 	return nil, true
 }
@@ -106,11 +109,11 @@ func watchZoneScope(claims *middleware.Claims) (*uint, bool) {
 // peak today, sessions, CPU/memory, OLT and last check-in.
 func ZonesWatch(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
-	zoneID, ok := watchZoneScope(claims)
+	zoneIDs, ok := watchZoneScope(c, claims)
 	if !ok {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	out, err := services.BuildZonesWatch(config.DB, claims.OrganizationID, zoneID, time.Now())
+	out, err := services.BuildZonesWatchIn(config.DB, claims.OrganizationID, zoneIDs, time.Now())
 	if err != nil {
 		return utils.ErrorResponse(c, "Could not load the routers.", "", fiber.StatusInternalServerError)
 	}
@@ -124,7 +127,7 @@ func watchZoneFor(c *fiber.Ctx) (*models.Zone, error) {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, c.Params("id")).Error; err != nil {
 		return nil, utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	if claims.Role == "zone_manager" && (claims.ZoneID == nil || *claims.ZoneID != zone.ID) {
+	if !middleware.ZoneInScope(c, zone.ID) || (claims.Role == "zone_manager" && !claims.AreaManager && claims.ZoneID == nil) {
 		return nil, utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 	return &zone, nil

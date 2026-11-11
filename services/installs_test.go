@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -195,8 +196,9 @@ func TestInstallEndToEnd(t *testing.T) {
 		t.Fatalf("stored job wrong: %+v", stored)
 	}
 	// The home: PPPoE, on the job's zone and plan, created OFF (expired now).
-	if cust.Type != "pppoe" || cust.ZoneID != f.zone.ID || cust.PackageID != f.pkg.ID || cust.Status != "active" ||
-		cust.PPPoEUsername == nil || len(*cust.PPPoEUsername) != 8 || cust.PPPoEPassword == nil || len(*cust.PPPoEPassword) != 12 {
+	if cust.Type != "pppoe" || cust.ZoneID != f.zone.ID || cust.PackageID != f.pkg.ID || cust.Status != "expired" ||
+		cust.CustomerNo == nil || cust.PPPoEUsername == nil || *cust.PPPoEUsername != strconv.FormatUint(uint64(*cust.CustomerNo), 10) ||
+		cust.OntSerial == nil || *cust.OntSerial != "HWTC0002" || cust.PPPoEPassword == nil || len(*cust.PPPoEPassword) != 12 {
 		t.Fatalf("customer wrong: %+v", cust)
 	}
 	if cust.ExpiresAt == nil || cust.ExpiresAt.After(now.Add(time.Second)) {
@@ -353,6 +355,30 @@ func TestInstallScopes(t *testing.T) {
 	// Plans must belong to the job's zone.
 	_, err = CreateInstallJob(f.db, f.owner, InstallJobInput{CustomerName: "A", Phone: "0722222222", ZoneID: &z2.ID, PlanPackageID: &f.pkg.ID}, time.Now())
 	wantStatus(t, err, 422)
+
+	// Area manager (a zone_manager with no single zone): only their areas'
+	// zones — never the whole ISP — and an empty area list sees nothing.
+	am := InstallActor{OrgID: f.org.ID, Role: "zone_manager", AreaZones: []uint{z2.ID}}
+	var seen []models.InstallJob
+	InstallJobScope(f.db.Model(&models.InstallJob{}), am).Find(&seen)
+	for _, j := range seen {
+		if j.ZoneID != nil && *j.ZoneID != z2.ID {
+			t.Fatalf("area manager sees zone %d outside their areas", *j.ZoneID)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("area manager doesn't see their own area's job")
+	}
+	none := InstallActor{OrgID: f.org.ID, Role: "zone_manager", AreaZones: []uint{}}
+	InstallJobScope(f.db.Model(&models.InstallJob{}).Where("zone_id IS NOT NULL"), none).Count(&n)
+	if n != 0 {
+		t.Fatal("area manager with no areas sees zoned jobs")
+	}
+	// Asking for a zone outside their areas leaves the request unzoned.
+	j3, err := CreateInstallJob(f.db, am, InstallJobInput{CustomerName: "Akinyi", Phone: "0733333333", ZoneID: &f.zone.ID}, time.Now())
+	if err != nil || j3.ZoneID != nil {
+		t.Fatalf("area manager job outside areas: %v %+v", err, j3)
+	}
 }
 
 func TestTransitionsEnforced(t *testing.T) {

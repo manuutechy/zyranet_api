@@ -58,10 +58,24 @@ func rfc(t *time.Time) *string {
 }
 
 // BuildZonesWatch lists the ISP's active routers (one zone if zoneID set).
+// BuildZonesWatch: zoneID limits to one zone; BuildZonesWatchIn limits to a
+// set (area managers).
 func BuildZonesWatch(db *gorm.DB, orgID uint, zoneID *uint, now time.Time) (*ZonesWatchReport, error) {
-	q := db.Where("organization_id = ? AND status = ?", orgID, "active")
 	if zoneID != nil {
-		q = q.Where("id = ?", *zoneID)
+		return BuildZonesWatchIn(db, orgID, []uint{*zoneID}, now)
+	}
+	return BuildZonesWatchIn(db, orgID, nil, now)
+}
+
+// BuildZonesWatchIn: zoneIDs nil = every zone of the org; non-nil (even
+// empty) = only those zones.
+func BuildZonesWatchIn(db *gorm.DB, orgID uint, zoneIDs []uint, now time.Time) (*ZonesWatchReport, error) {
+	q := db.Where("organization_id = ? AND status = ?", orgID, "active")
+	if zoneIDs != nil {
+		if len(zoneIDs) == 0 {
+			zoneIDs = []uint{0}
+		}
+		q = q.Where("id IN ?", zoneIDs)
 	}
 	var zones []models.Zone
 	if err := q.Order("name ASC").Find(&zones).Error; err != nil {

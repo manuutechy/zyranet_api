@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,10 @@ type InstallActor struct {
 	UserName string
 	Role     string
 	ZoneID   *uint // zone_manager's zone
-	CrewID   *uint // installer's crew
+	// AreaZones is set for area managers (a zone_manager over several zones):
+	// the zones of their areas. Non-nil means "limit to these", even empty.
+	AreaZones []uint
+	CrewID    *uint // installer's crew
 }
 
 func installErr(status int, format string, args ...interface{}) error {
@@ -128,6 +132,13 @@ func InstallJobScope(q *gorm.DB, a InstallActor) *gorm.DB {
 	case "super_admin", "finance":
 		return q
 	case "zone_manager":
+		if a.AreaZones != nil {
+			ids := a.AreaZones
+			if len(ids) == 0 {
+				ids = []uint{0}
+			}
+			return q.Where("(install_jobs.zone_id IN ? OR install_jobs.zone_id IS NULL)", ids)
+		}
 		if a.ZoneID == nil {
 			return q.Where("1 = 0")
 		}
@@ -139,6 +150,15 @@ func InstallJobScope(q *gorm.DB, a InstallActor) *gorm.DB {
 		return q.Where("install_jobs.crew_id = ?", *a.CrewID)
 	}
 	return q.Where("1 = 0")
+}
+
+func (a InstallActor) inAreaZones(id uint) bool {
+	for _, z := range a.AreaZones {
+		if z == id {
+			return true
+		}
+	}
+	return false
 }
 
 // CanManageInstalls: the office roles that create, schedule, assign, cancel.
@@ -233,7 +253,11 @@ func (in *InstallJobInput) clean(tx *gorm.DB, a InstallActor) error {
 		in.PlanPackageID = nil
 	}
 	if a.Role == "zone_manager" {
-		if in.ZoneID == nil || a.ZoneID == nil || *in.ZoneID != *a.ZoneID {
+		if a.AreaZones != nil {
+			if in.ZoneID != nil && !a.inAreaZones(*in.ZoneID) {
+				in.ZoneID = nil
+			}
+		} else if in.ZoneID == nil || a.ZoneID == nil || *in.ZoneID != *a.ZoneID {
 			in.ZoneID = a.ZoneID
 		}
 	}
@@ -513,6 +537,7 @@ func MarkInstalled(db *gorm.DB, a InstallActor, jobID uint, in MarkInstalledInpu
 		cust, err = CreateHomeFromInstall(tx, HomeFromInstall{
 			OrgID: a.OrgID, ZoneID: *job.ZoneID, PackageID: *job.PlanPackageID,
 			Name: job.CustomerName, Phone: job.Phone, FreeFirstDay: settings.FreeFirstDay, Now: now,
+			Location: job.Location, OntSerial: ont.Serial,
 		})
 		if err != nil {
 			return err
@@ -576,6 +601,8 @@ type HomeFromInstall struct {
 	Name         string
 	Phone        string
 	FreeFirstDay bool
+	Location     string
+	OntSerial    string
 	Now          time.Time
 }
 
@@ -587,28 +614,6 @@ func GeneratePPPoEPassword() string {
 	return hex.EncodeToString(b)
 }
 
-// newPPPoEUsername is a short, unique-per-ISP login like "h7k2m9q4".
-func newPPPoEUsername(tx *gorm.DB, zoneID uint) (string, error) {
-	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
-	for i := 0; i < 10; i++ {
-		b := make([]byte, 7)
-		if _, err := rand.Read(b); err != nil {
-			return "", err
-		}
-		out := []byte{'h'}
-		for _, x := range b {
-			out = append(out, alphabet[int(x)%len(alphabet)])
-		}
-		name := string(out)
-		var n int64
-		tx.Unscoped().Model(&models.Customer{}).Where("pppoe_username = ? AND zone_id IN (?)", name, sameISPZones(zoneID)).Count(&n)
-		if n == 0 {
-			return name, nil
-		}
-	}
-	return "", errors.New("could not pick a free PPPoE username")
-}
-
 // CreateHomeFromInstall creates the paying-home account for a finished
 // install: a PPPoE customer on the job's zone and plan, with a generated
 // username and password, active but expired now (so the router keeps it off
@@ -616,22 +621,41 @@ func newPPPoEUsername(tx *gorm.DB, zoneID uint) (string, error) {
 // "free first day". It is the one place installs create customers, so the
 // homes feature can swap in a richer version later.
 func CreateHomeFromInstall(tx *gorm.DB, in HomeFromInstall) (*models.Customer, error) {
-	user, err := newPPPoEUsername(tx, in.ZoneID)
-	if err != nil {
-		return nil, err
-	}
 	pw := GeneratePPPoEPassword()
-	exp := in.Now
+	// Same shape as "Add a home": off until the first payment (status
+	// expired), or 24 free hours when the ISP turned on "free first day".
+	status, exp := "expired", in.Now
 	if in.FreeFirstDay {
-		exp = in.Now.Add(24 * time.Hour)
+		status, exp = "active", in.Now.Add(24*time.Hour)
+	}
+	opt := func(s string, max int) *string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		if len(s) > max {
+			s = s[:max]
+		}
+		return &s
 	}
 	c := models.Customer{
 		Name: in.Name, Phone: in.Phone, ZoneID: in.ZoneID, PackageID: in.PackageID, Type: "pppoe",
-		PPPoEUsername: &user, PPPoEPassword: &pw, Status: "active", ExpiresAt: &exp,
+		PPPoEPassword: &pw, Status: status, ExpiresAt: &exp,
+		Location: opt(in.Location, 255), OntSerial: opt(in.OntSerial, 64),
 	}
 	if err := tx.Create(&c).Error; err != nil {
 		return nil, err
 	}
+	// The PPPoE username is the customer number — the same number the home
+	// pays with on the M-Pesa menu (assigned by Customer.AfterCreate).
+	if c.CustomerNo == nil {
+		return nil, errors.New("no customer number assigned")
+	}
+	user := strconv.FormatUint(uint64(*c.CustomerNo), 10)
+	if err := tx.Model(&models.Customer{}).Where("id = ?", c.ID).Update("pppoe_username", user).Error; err != nil {
+		return nil, err
+	}
+	c.PPPoEUsername = &user
 	return &c, nil
 }
 

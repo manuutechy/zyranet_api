@@ -360,7 +360,7 @@ func HomeStore(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, body.ZoneID).Error; err != nil {
 		return utils.ErrorResponse(c, "Choose one of your zones.", "", fiber.StatusUnprocessableEntity)
 	}
-	if claims.Role == "zone_manager" && claims.ZoneID != nil && zone.ID != *claims.ZoneID {
+	if !middleware.ZoneInScope(c, zone.ID) {
 		return utils.ErrorResponse(c, "You can only add homes in your own zone.", "", fiber.StatusForbidden)
 	}
 	var pkg models.Package

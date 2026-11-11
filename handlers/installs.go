@@ -34,6 +34,9 @@ func installActor(c *fiber.Ctx) services.InstallActor {
 	if a.Role == "installer" {
 		a.CrewID = u.CrewID
 	}
+	if claims.AreaManager {
+		a.AreaZones = middleware.AreaZoneIDs(c)
+	}
 	return a
 }
 
@@ -489,7 +492,10 @@ func InstallOptions(c *fiber.Ctx) error {
 	zones, pkgs, crews := []opt{}, []pkgOpt{}, []opt{}
 	if a.Role != "installer" {
 		zq := config.DB.Table("zones").Select("id, name").Where("organization_id = ? AND deleted_at IS NULL", a.OrgID)
-		if a.Role == "zone_manager" && a.ZoneID != nil {
+		if a.AreaZones != nil {
+			ids := append([]uint{0}, a.AreaZones...)
+			zq = zq.Where("id IN ?", ids)
+		} else if a.Role == "zone_manager" && a.ZoneID != nil {
 			zq = zq.Where("id = ?", *a.ZoneID)
 		}
 		zq.Order("name").Scan(&zones)
