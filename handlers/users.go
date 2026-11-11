@@ -10,7 +10,7 @@ import (
 )
 
 // validUserRoles are the staff roles the RBAC middleware knows about.
-var validUserRoles = map[string]bool{"super_admin": true, "zone_manager": true, "finance": true, "field_agent": true}
+var validUserRoles = map[string]bool{"super_admin": true, "zone_manager": true, "finance": true, "field_agent": true, "installer": true}
 
 // zoneInOrg reports whether zoneID is a zone of the organization. A staff
 // member's zone_id scopes what they can see, so accepting one from another
