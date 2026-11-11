@@ -26,7 +26,7 @@ func ReportInsights(c *fiber.Ctx) error {
 	if !ok {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	scope := services.InsightsScope{OrganizationID: claims.OrganizationID, ZoneID: zoneID}
+	scope := services.InsightsScope{OrganizationID: claims.OrganizationID, ZoneID: zoneID, OnlyZoneIDs: areaOnlyZones(c)}
 
 	now := time.Now()
 	today := now.In(services.EAT)

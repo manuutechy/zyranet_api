@@ -36,6 +36,10 @@ type Zone struct {
 	Status         string     `gorm:"size:20;default:active" json:"status"`
 	LastSeenAt     *time.Time `json:"last_seen_at"`
 	LastStatus     string     `gorm:"size:20;default:unknown" json:"last_status"` // online | offline | unknown
+
+	// AreaID is the estate/area this zone belongs to (nil = no area).
+	AreaID *uint `gorm:"index" json:"area_id"`
+
 	// ProvisionToken gates the unauthenticated /public/zones/* router-provisioning
 	// endpoints (setup script, sync script, heartbeat). Those endpoints hand back
 	// live customer/voucher credentials and accept router-identity updates, so a

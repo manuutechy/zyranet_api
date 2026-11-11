@@ -39,10 +39,8 @@ func ZoneIndex(c *fiber.Ctx) error {
 		query = query.Where("name LIKE ? OR location LIKE ?", "%"+search+"%", "%"+search+"%")
 	}
 
-	// Zone managers only see their own zone
-	if claims.Role == "zone_manager" && claims.ZoneID != nil {
-		query = query.Where("id = ?", *claims.ZoneID)
-	}
+	// Zone managers only see their own zone; area managers their areas' zones.
+	query = middleware.ScopeZones(c, query, "id")
 
 	query.Count(&total)
 	query.Order("created_at DESC").Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&zones)
@@ -67,6 +65,7 @@ func ZoneStore(c *fiber.Ctx) error {
 	}
 	body.ID = 0
 	body.OrganizationID = claims.OrganizationID
+	body.AreaID = nil  // joined to an area on the Areas page, which also applies its prices
 	body.AuthMode = "" // RADIUS is switched on from the platform, not here
 	wan, lan, err := utils.NormalizeRouterPorts(body.WanPort, defaultString(body.LanPorts, "ether2,ether3,ether4"))
 	if err != nil {
@@ -91,6 +90,9 @@ func ZoneShow(c *fiber.Ctx) error {
 	if err := config.DB.Preload("Manager").Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
+	if claims.AreaManager && !middleware.ZoneInScope(c, zone.ID) {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
 	return utils.SuccessResponse(c, zone, "")
 }
 
@@ -103,7 +105,7 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != zone.ID) {
+	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != zone.ID) && !(claims.AreaManager && middleware.ZoneInScope(c, zone.ID)) {
 		return utils.ErrorResponse(c, "Unauthorized to update this zone.", "", fiber.StatusForbidden)
 	}
 
@@ -113,7 +115,7 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	}
 	delete(body, "organization_id") // never allow moving a zone to another tenant via this endpoint
 	// Server-managed fields are never set from the ISP admin.
-	for _, k := range []string{"auth_mode", "legacy_request_at", "last_seen_at", "last_status", "id", "created_at", "updated_at", "deleted_at", "manager", "organization", "packages", "has_router_password"} {
+	for _, k := range []string{"auth_mode", "area_id", "legacy_request_at", "last_seen_at", "last_status", "id", "created_at", "updated_at", "deleted_at", "manager", "organization", "packages", "has_router_password"} {
 		delete(body, k)
 	}
 	// The zone JSON never carries the router password (always null), so a form
@@ -331,7 +333,7 @@ func ZoneResolveAlert(c *fiber.Ctx) error {
 	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&alert, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Alert not found.", "", fiber.StatusNotFound)
 	}
-	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != alert.ZoneID) {
+	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != alert.ZoneID) && !(claims.AreaManager && middleware.ZoneInScope(c, alert.ZoneID)) {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	now := time.Now()
@@ -428,6 +430,9 @@ func canAccessZone(c *fiber.Ctx, zone *models.Zone) bool {
 	// (super_admin vs. the assigned manager) remains.
 	if claims.Role == "super_admin" {
 		return true
+	}
+	if claims.AreaManager {
+		return middleware.ZoneInScope(c, zone.ID)
 	}
 	if zone.ManagerID != nil && *zone.ManagerID == claims.UserID {
 		return true

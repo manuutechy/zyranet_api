@@ -17,6 +17,8 @@ import (
 type InsightsScope struct {
 	OrganizationID uint
 	ZoneID         *uint
+	// OnlyZoneIDs, when non-nil, limits to these zones (an area manager's).
+	OnlyZoneIDs []uint
 }
 
 type InsightsSummary struct {
@@ -166,6 +168,9 @@ func scopeZoneIDs(db *gorm.DB, scope InsightsScope) ([]uint, error) {
 	q := db.Unscoped().Model(&models.Zone{}).Where("organization_id = ?", scope.OrganizationID)
 	if scope.ZoneID != nil {
 		q = q.Where("id = ?", *scope.ZoneID)
+	}
+	if scope.OnlyZoneIDs != nil {
+		q = q.Where("id IN ?", scope.OnlyZoneIDs)
 	}
 	if err := q.Pluck("id", &ids).Error; err != nil {
 		return nil, err
@@ -501,6 +506,9 @@ func buildRouterHealth(db *gorm.DB, scope InsightsScope, start, end, now time.Ti
 	q := db.Unscoped().Select("id, name, last_seen_at, deleted_at").Where("organization_id = ?", scope.OrganizationID)
 	if scope.ZoneID != nil {
 		q = q.Where("id = ?", *scope.ZoneID)
+	}
+	if scope.OnlyZoneIDs != nil {
+		q = q.Where("id IN ?", scope.OnlyZoneIDs)
 	}
 	if err := q.Order("id ASC").Find(&zones).Error; err != nil {
 		return nil, err

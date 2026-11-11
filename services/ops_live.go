@@ -75,6 +75,8 @@ func ClassifyFailureReason(reason string) string {
 type LiveScope struct {
 	OrganizationID uint
 	ZoneID         *uint
+	// OnlyZoneIDs, when non-nil, limits to these zones (an area manager's).
+	OnlyZoneIDs []uint
 }
 
 type LiveMoney struct {
@@ -229,6 +231,9 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		Where("organization_id = ?", scope.OrganizationID)
 	if scope.ZoneID != nil {
 		zq = zq.Where("id = ?", *scope.ZoneID)
+	}
+	if scope.OnlyZoneIDs != nil {
+		zq = zq.Where("id IN ?", scope.OnlyZoneIDs)
 	}
 	if err := zq.Order("name ASC").Find(&zones).Error; err != nil {
 		return nil, err
