@@ -78,6 +78,10 @@ func main() {
 		&models.Area{},
 		&models.AreaPackage{},
 		&models.UserArea{},
+		// Reports › Growth plan + Network › Watch — new tables only.
+		&models.GrowthPlan{},
+		&models.ZoneLineStat{},
+		&models.ZoneWatchState{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
