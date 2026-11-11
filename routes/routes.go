@@ -98,6 +98,7 @@ func failedLookupLimiter(max int, window time.Duration) fiber.Handler {
 // Register mounts all API routes on the Fiber app.
 func Register(app *fiber.App) {
 	v1 := app.Group("/api/v1")
+	registerInstallsRoutes(v1) // home installs + stock; fences installer logins (first, on purpose)
 
 	// ---- PUBLIC ROUTES (no auth) ----
 

@@ -83,6 +83,9 @@ func main() {
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
 	}
 	config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
+	if err := services.MigrateInstalls(config.DB); err != nil { // home installs + stock tables, users.crew_id
+		log.Fatalf("[database] installs migrate failed: %v", err)
+	}
 
 	// Backfill Organization #1 for the existing single-tenant install, and
 	// assign every pre-existing User/Zone to it. Multi-tenancy is additive:
@@ -290,6 +293,9 @@ func main() {
 	opsAlerts := services.NewOpsAlertService(config.DB, services.NewSmsAlertSender(smsSvc))
 	opsAlerts.Start()
 	defer opsAlerts.Stop()
+
+	// Home installs: move installed jobs to "live" when the home's first payment lands.
+	defer services.StartInstallLiveWatcher(config.DB).Stop()
 
 	// Start Automated Subscriber Expiry SMS Reminders
 	expiryReminder := services.NewExpiryReminderService(services.NewSmsService())
