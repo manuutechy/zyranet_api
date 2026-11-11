@@ -200,6 +200,7 @@ func Register(app *fiber.App) {
 	admin.Post("/auth/logout", adminAuth, handlers.Logout)
 	admin.Get("/auth/me", adminAuth, handlers.Me)
 
+	registerGrowthRoutes(admin, adminAuth) // before /zones/:id
 	// Zone alerts (special top-level routes)
 	admin.Get("/zones/alerts", adminAuth, handlers.ZoneAlerts)
 	admin.Post("/zones/alerts/:id/resolve", adminAuth, handlers.ZoneResolveAlert)

@@ -74,6 +74,9 @@ type Zone struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
+	// OltIP is the fibre OLT the router pings each heartbeat (Network › Watch).
+	OltIP *string `gorm:"size:45" json:"olt_ip"`
+
 	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
 	Packages     []Package     `gorm:"foreignKey:ZoneID" json:"packages,omitempty"`
