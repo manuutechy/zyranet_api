@@ -27,6 +27,15 @@ type Customer struct {
 	UpdatedAt     time.Time      `json:"updated_at"`
 	DeletedAt     gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
+	// CustomerNo is the short number a customer types as the M-Pesa account
+	// (e.g. 10017): 1000+id with a Luhn check digit, so a mistyped number
+	// never lands on someone else's account. Set after create (models/home.go).
+	CustomerNo *uint `gorm:"uniqueIndex" json:"customer_no"`
+	// Location and OntSerial describe a home (fibre) connection: a landmark
+	// for the technician and the ONT's serial number. Free text, optional.
+	Location  *string `gorm:"size:255" json:"location"`
+	OntSerial *string `gorm:"size:64" json:"ont_serial"`
+
 	Zone    *Zone    `gorm:"foreignKey:ZoneID" json:"zone,omitempty"`
 	Package *Package `gorm:"foreignKey:PackageID" json:"package,omitempty"`
 }

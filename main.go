@@ -72,6 +72,8 @@ func main() {
 		&models.AgentVoucher{},
 		&models.AgentLedgerEntry{},
 		&models.AgentIdempotencyKey{},
+		// Home (fibre) accounts: renew-page payments.
+		&models.HomeRenewal{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)
@@ -145,6 +147,11 @@ func main() {
 		}
 	} else {
 		log.Printf("[database] Failed to query customers for backfill: %v", err)
+	}
+
+	// Short customer numbers (the M-Pesa account for homes) for older rows.
+	if n, err := models.BackfillCustomerNumbers(config.DB); err != nil || n > 0 {
+		log.Printf("[database] Customer numbers backfilled: %d (err: %v)", n, err)
 	}
 
 	// Purge inactive/guest/expired customers on startup — preserve only active subscribers

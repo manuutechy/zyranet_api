@@ -148,6 +148,9 @@ type LivePayment struct {
 	Package     string    `json:"package,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	TimeEAT     string    `json:"time_eat"`
+
+	// Provider is who sent the prompt: "daraja" | "cyzora" ("" = no prompt).
+	Provider string `json:"provider"`
 }
 
 type LiveStuck struct {
@@ -411,10 +414,11 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		StatusReason       *string
 		MpesaReceiptNumber *string
 		PackageName        *string
+		Provider           *string
 		CreatedAt          time.Time
 	}
 	if err := db.Raw(`SELECT p.id, p.zone_id, p.phone, p.amount, p.method, p.status, p.status_reason,
-		p.mpesa_receipt_number, pk.name AS package_name, p.created_at
+		p.mpesa_receipt_number, pk.name AS package_name, p.provider, p.created_at
 		FROM payments p LEFT JOIN packages pk ON pk.id = p.package_id
 		WHERE p.zone_id IN ? ORDER BY p.id DESC LIMIT 10`, zoneIDs).Scan(&recent).Error; err != nil {
 		return nil, err
@@ -430,6 +434,9 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		}
 		if r.PackageName != nil {
 			lp.Package = *r.PackageName
+		}
+		if r.Provider != nil {
+			lp.Provider = *r.Provider
 		}
 		if r.Status == "failed" {
 			reason := ""

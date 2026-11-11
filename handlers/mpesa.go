@@ -508,8 +508,9 @@ func creditC2B(l *models.C2BTransaction) {
 		return
 	}
 
-	// Always update customer name from official M-Pesa C2B legal names
-	if payerName != "" {
+	// Always update customer name from official M-Pesa C2B legal names —
+	// except homes: anyone in the house (or a relative) may pay for them.
+	if payerName != "" && !services.IsHome(customer) {
 		customer.Name = payerName
 		config.DB.Model(customer).Update("name", payerName)
 	}
@@ -534,12 +535,29 @@ func creditC2B(l *models.C2BTransaction) {
 			return err
 		}
 
+		// A home (fibre) account keeps its own plan and buys as many whole
+		// periods as the credit covers; the rest stays as credit. A home
+		// switched off by staff keeps the money as credit only.
+		isHome := services.IsHome(customer)
+		if isHome && customer.Status != "suspended" {
+			res, err := services.RenewHomeFromCredit(tx, customer.ID, services.HomeMaxPeriods, "M-Pesa Paybill "+l.TransID)
+			if err != nil {
+				return err
+			}
+			if res.Periods > 0 {
+				renewed = true
+				pkg.ID = res.PackageID
+			}
+		}
+
 		// 1. A package in this zone priced exactly at the amount paid (e.g.
 		// KES 5), 2. otherwise the customer's assigned package.
-		if err := tx.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, l.Amount).First(&pkg).Error; err != nil {
+		if isHome {
+			// handled above
+		} else if err := tx.Where("zone_id = ? AND price = ? AND status = 'active'", customer.ZoneID, l.Amount).First(&pkg).Error; err != nil {
 			tx.First(&pkg, customer.PackageID)
 		}
-		if pkg.ID > 0 && pkg.Price > 0 {
+		if !isHome && pkg.ID > 0 && pkg.Price > 0 {
 			// Debit only if the balance (read by the database, not from a
 			// stale copy) covers it.
 			paid, err := services.AdjustCredit(tx, customer.ID, -pkg.Price)
@@ -593,7 +611,10 @@ func creditC2B(l *models.C2BTransaction) {
 		return // another delivery got there first
 	}
 
-	if renewed && mpesaSvcGlobal != nil && customer.ZoneID > 0 {
+	if renewed && mpesaSvcGlobal != nil && customer.ZoneID > 0 && services.IsHome(customer) {
+		// Home: RADIUS rows or PPP secret, per the zone's auth mode.
+		mpesaSvcGlobal.HomeSwitchOn(customer.ID, customer.ZoneID, &payment.ID)
+	} else if renewed && mpesaSvcGlobal != nil && customer.ZoneID > 0 {
 		// Unblock the PPPoE secret / hotspot MAC — persisted and retried.
 		cid := customer.ID
 		mpesaSvcGlobal.EnqueueRouterAction(models.PendingRouterAction{
