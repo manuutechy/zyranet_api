@@ -893,37 +893,23 @@ func CustomerTopUp(c *fiber.Ctx) error {
 	ref := fmt.Sprintf("Cust-%d", customer.ID)
 	description := fmt.Sprintf("Credit Top Up for %s", customer.Name)
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(customer.ZoneID, body.Phone, body.Amount, ref, description)
+	start, err := mpesaSvcGlobal.StartSTK(&payment, ref, description)
 	if err != nil {
-		reason := err.Error()
-		config.DB.Model(&payment).Updates(map[string]interface{}{
-			"status":        "failed",
-			"status_reason": reason,
-		})
+		failPendingPayment(payment.ID, err.Error())
 		return utils.ErrorResponse(c, err.Error(), "M-Pesa API error.", fiber.StatusInternalServerError)
 	}
 
-	if stkResp.Status == "success" {
-		config.DB.Model(&payment).Update("mpesa_transaction_id", stkResp.CheckoutRequestID)
-
-		// Simulate callback in mock/sandbox mode
-		if stkResp.IsMock {
-			mpesaSvcGlobal.SimulateCallback(stkResp.CheckoutRequestID, body.Amount, body.Phone)
-		}
-
-		return utils.SuccessResponse(c, fiber.Map{
-			"payment_id":     payment.ID,
-			"transaction_id": stkResp.CheckoutRequestID,
-			"message":        stkResp.ResponseDescription,
-		}, "Top up STK Push initiated successfully.")
+	// Simulate callback in mock/sandbox mode
+	if start.IsMock {
+		mpesaSvcGlobal.SimulateCallback(start.Reference, body.Amount, body.Phone)
 	}
 
-	reason := "Failed to initiate top-up M-Pesa STK Push payment."
-	config.DB.Model(&payment).Updates(map[string]interface{}{
-		"status":        "failed",
-		"status_reason": reason,
-	})
-	return utils.ErrorResponse(c, reason, "", fiber.StatusBadRequest)
+	return utils.SuccessResponse(c, fiber.Map{
+		"payment_id":     payment.ID,
+		"transaction_id": start.Reference,
+		"message":        start.Message,
+		"provider":       start.Provider,
+	}, "Top up STK Push initiated successfully.")
 }
 
 // CustomerPurchaseWithCredit purchases a package using credit balance.

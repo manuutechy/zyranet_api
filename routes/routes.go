@@ -125,6 +125,8 @@ func Register(app *fiber.App) {
 	// Payment STK push, callback & C2B Paybill registration (without mpesa in URL)
 	v1.Post("/payments/stkpush", payLimiter(60, time.Minute), payPhoneLimiter(5, time.Minute), handlers.MpesaStkPush)
 	v1.Post("/payments/callback", handlers.MpesaCallback)
+	// Cyzora Pay charge webhooks — signed (X-Cyzora-Signature), see handlers/cyzora.go
+	v1.Post("/payments/cyzora/webhook", payLimiter(300, time.Minute), handlers.CyzoraWebhook)
 	v1.Post("/payments/verify-code", payLimiter(10, time.Minute), handlers.PaymentVerifyCode)
 	v1.Post("/c2b/validation", handlers.MpesaC2BValidation)
 	v1.Post("/c2b/confirmation", handlers.MpesaC2BConfirmation)
@@ -345,6 +347,9 @@ func Register(app *fiber.App) {
 	platform.Get("/daraja", platformAuth, handlers.PlatformDarajaShow)
 	platform.Post("/daraja", platformAuth, owner, handlers.PlatformDarajaUpdate)
 	platform.Post("/daraja/register-c2b", platformAuth, owner, handlers.PlatformDarajaRegisterC2B)
+	platform.Get("/cyzora", platformAuth, handlers.PlatformCyzoraShow)
+	platform.Post("/cyzora", platformAuth, owner, handlers.PlatformCyzoraUpdate)
+	platform.Post("/cyzora/test", platformAuth, handlers.PlatformCyzoraTest)
 	platform.Get("/sms", platformAuth, handlers.PlatformSmsShow)
 	platform.Post("/sms", platformAuth, owner, handlers.PlatformSmsUpdate)
 	platform.Post("/sms/test", platformAuth, handlers.PlatformSmsTest)

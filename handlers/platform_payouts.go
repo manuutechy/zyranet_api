@@ -280,8 +280,11 @@ func PlatformPayoutBackfill(c *fiber.Ctx) error {
 	zoneIDs := config.DB.Unscoped().Model(&models.Zone{}).Select("id").Where("organization_id = ?", body.OrganizationID)
 	scope := func() *gorm.DB {
 		return config.DB.Model(&models.Payment{}).Where(
-			"status = ? AND method IN ? AND (collected_via = '' OR collected_via IS NULL) AND payout_id IS NULL AND created_at >= ? AND zone_id IN (?) AND (mpesa_receipt_number IS NULL OR mpesa_receipt_number NOT LIKE ?)",
-			"completed", []string{"mpesa", "mpesa_c2b"}, from, zoneIDs, "MOCK%")
+			"status = ? AND method IN ? AND (collected_via = '' OR collected_via IS NULL) AND payout_id IS NULL AND created_at >= ? AND zone_id IN (?) AND (mpesa_receipt_number IS NULL OR mpesa_receipt_number NOT LIKE ?) AND (provider IS NULL OR provider <> ?)",
+			"completed", []string{"mpesa", "mpesa_c2b"}, from, zoneIDs, "MOCK%", services.ProviderCyzora)
+		// Cyzora rows are never backfilled: a live one already has
+		// collected_via = "platform"; a blank one was a Cyzora test-key
+		// (simulated) payment — no real money to pay out.
 	}
 	var count int64
 	var gross float64

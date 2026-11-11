@@ -119,36 +119,22 @@ func HotspotPay(c *fiber.Ctx) error {
 		description = pkg.Name
 	}
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(zone.ID, phone, pkg.Price, ref, description)
+	start, err := mpesaSvcGlobal.StartSTK(&payment, ref, description)
 	if err != nil {
-		reason := err.Error()
-		config.DB.Model(&payment).Updates(map[string]interface{}{
-			"status":        "failed",
-			"status_reason": reason,
-		})
+		failPendingPayment(payment.ID, err.Error())
 		return utils.ErrorResponse(c, err.Error(), "M-Pesa API error.", fiber.StatusInternalServerError)
 	}
 
-	if stkResp.Status == "success" {
-		config.DB.Model(&payment).Update("mpesa_transaction_id", stkResp.CheckoutRequestID)
-
-		// Simulate callback in mock/sandbox mode
-		if stkResp.IsMock {
-			mpesaSvcGlobal.SimulateCallback(stkResp.CheckoutRequestID, pkg.Price, phone)
-		}
-
-		return c.JSON(fiber.Map{
-			"reference": stkResp.CheckoutRequestID,
-			"message":   "STK Push initiated successfully.",
-		})
+	// Simulate callback in mock/sandbox mode
+	if start.IsMock {
+		mpesaSvcGlobal.SimulateCallback(start.Reference, pkg.Price, phone)
 	}
 
-	reason := "Failed to initiate M-Pesa STK Push payment."
-	config.DB.Model(&payment).Updates(map[string]interface{}{
-		"status":        "failed",
-		"status_reason": reason,
+	return c.JSON(fiber.Map{
+		"reference": start.Reference,
+		"message":   "STK Push initiated successfully.",
+		"provider":  start.Provider,
 	})
-	return utils.ErrorResponse(c, reason, "", fiber.StatusBadRequest)
 }
 
 // HotspotStatus checks payment status for polling.

@@ -15,6 +15,8 @@ import (
 //     Safaricom's STK query and completed or failed through the same paths a
 //     callback uses (up to 30 minutes old; after that they're failed with a
 //     clear reason — a late real callback still completes them);
+//   - every minute, Cyzora payments still "pending" 1–60 minutes after the
+//     prompt are checked with GET /charges/{id} (ReconcilePendingCyzora);
 //   - every minute, paybill confirmations whose verification never came back
 //     are parked for manual review;
 //   - every 15 seconds, queued router actions whose retry time has come run.
@@ -44,6 +46,7 @@ func (j *MoneyJobs) Start() {
 			select {
 			case <-minute.C:
 				j.ReconcilePendingSTK()
+				j.ReconcilePendingCyzora()
 				ParkStaleC2BVerifications(10 * time.Minute)
 			case <-router.C:
 				j.mpesa.RunDueRouterActions()
@@ -72,6 +75,8 @@ func (j *MoneyJobs) ReconcilePendingSTK() {
 	if err := config.DB.
 		Where("method = ? AND status = ? AND mpesa_transaction_id IS NOT NULL AND mpesa_transaction_id <> '' AND created_at <= ? AND created_at >= ?",
 			"mpesa", "pending", now.Add(-stkReconcileAfter), now.Add(-stkReconcileUntil-5*time.Minute)).
+		// Cyzora payments have their own sweep (ReconcilePendingCyzora).
+		Where("(provider IS NULL OR provider <> ?)", ProviderCyzora).
 		Order("id ASC").Limit(100).Find(&pending).Error; err != nil {
 		log.Printf("[money-jobs] could not load pending payments: %v", err)
 		return

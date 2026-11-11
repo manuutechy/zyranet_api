@@ -43,6 +43,14 @@ func PaymentIndex(c *fiber.Ctx) error {
 	if s := c.Query("status"); s != "" {
 		query = query.Where("status = ?", s)
 	}
+	if pr := c.Query("provider"); pr != "" {
+		if pr == services.ProviderDaraja {
+			// Older STK rows have no provider recorded: they were all Daraja.
+			query = query.Where("(provider = ? OR ((provider IS NULL OR provider = '') AND method IN ('mpesa', 'stk')))", pr)
+		} else {
+			query = query.Where("provider = ?", pr)
+		}
+	}
 	if cid := c.Query("customer_id"); cid != "" {
 		query = query.Where("customer_id = ?", cid)
 	}
@@ -78,16 +86,21 @@ func PaymentIndex(c *fiber.Ctx) error {
 		CompletedCount  int64   `json:"completed_count"`
 		StkAmount       float64 `json:"stk_amount"`
 		StkCount        int64   `json:"stk_count"`
-		C2bAmount       float64 `json:"c2b_amount"`
-		C2bCount        int64   `json:"c2b_count"`
-		ManualAmount    float64 `json:"manual_amount"`
-		ManualCount     int64   `json:"manual_count"`
+		// The part of the STK figures whose prompt went through Cyzora Pay.
+		CyzoraAmount float64 `json:"cyzora_amount"`
+		CyzoraCount  int64   `json:"cyzora_count"`
+		C2bAmount    float64 `json:"c2b_amount"`
+		C2bCount     int64   `json:"c2b_count"`
+		ManualAmount float64 `json:"manual_amount"`
+		ManualCount  int64   `json:"manual_count"`
 	}
 	query.Session(&gorm.Session{}).Select(`
 		COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) AS completed_amount,
 		COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) AS stk_amount,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN 1 ELSE 0 END), 0) AS stk_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') AND provider = 'cyzora' THEN amount ELSE 0 END), 0) AS cyzora_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') AND provider = 'cyzora' THEN 1 ELSE 0 END), 0) AS cyzora_count,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) AS c2b_amount,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'mpesa_c2b' THEN 1 ELSE 0 END), 0) AS c2b_count,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('manual', 'bank', 'cash') THEN amount ELSE 0 END), 0) AS manual_amount,

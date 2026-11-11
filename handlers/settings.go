@@ -74,7 +74,7 @@ var settingDefaults = map[string]string{
 // panel. ISPs configure their own Daraja via /settings/mpesa
 // (OrganizationMpesaConfig) instead; SMS template wording/toggles
 // (sms_template_*, sms_enable_*) are unaffected and remain ISP-editable.
-var platformOnlyKeys = append(append([]string{}, daraKeys...), smsKeys...)
+var platformOnlyKeys = append(append(append([]string{}, daraKeys...), smsKeys...), cyzoraKeys...)
 
 // SettingsIndex returns all settings.
 func SettingsIndex(c *fiber.Ctx) error {

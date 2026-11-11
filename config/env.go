@@ -42,6 +42,14 @@ type AppConfig struct {
 	// server refuses to start without it (see CallbackSecretProblem).
 	MpesaCallbackSecret string
 
+	// Cyzora Pay (alternative STK provider — see services/cyzora.go).
+	// CyzoraAPIBase defaults to https://api.cyzora.co.ke/api/v1. The keys are
+	// normally saved by platform staff (settings table); these env values are
+	// only the fallback when nothing is saved, like the Daraja env keys.
+	CyzoraAPIBase       string
+	CyzoraSecretKey     string
+	CyzoraWebhookSecret string
+
 	// MikroTik router connection safety toggles — see services/mikrotik.go.
 	// Both default to the secure behavior and are meant to be flipped on
 	// only for local/dev testing against self-signed certs or routers on
@@ -150,6 +158,10 @@ func Load() {
 		MpesaCallbackURL:    getEnv("MPESA_CALLBACK_URL", ""),
 		MpesaEnv:            getEnv("MPESA_ENV", "sandbox"),
 		MpesaCallbackSecret: getEnv("MPESA_CALLBACK_SECRET", ""),
+
+		CyzoraAPIBase:       getEnv("CYZORA_API_BASE", "https://api.cyzora.co.ke/api/v1"),
+		CyzoraSecretKey:     getEnv("CYZORA_SECRET_KEY", ""),
+		CyzoraWebhookSecret: getEnv("CYZORA_WEBHOOK_SECRET", ""),
 
 		MikroTikInsecureSkipVerify: getEnvBool("MIKROTIK_INSECURE_SKIP_VERIFY", false),
 		MikroTikAllowPrivateIPs:    getEnvBool("MIKROTIK_ALLOW_PRIVATE_IPS", false),

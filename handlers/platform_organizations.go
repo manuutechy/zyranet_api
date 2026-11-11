@@ -327,6 +327,43 @@ func OrganizationUpdate(c *fiber.Ctx) error {
 		}
 	}
 
+	// Who sends this ISP's M-Pesa prompts moves where its customers' money
+	// lands, so only a platform owner may change it. Sending the current
+	// values back unchanged (a full-form save by other staff) is fine.
+	isOwner := func() bool {
+		role, _ := c.Locals("platformRole").(string)
+		return role == middleware.PlatformOwner
+	}
+	if raw, present := body["payment_provider"]; present {
+		text, isString := raw.(string)
+		provider := strings.ToLower(strings.TrimSpace(text))
+		if !isString || (provider != services.ProviderDaraja && provider != services.ProviderCyzora) {
+			return utils.ErrorResponse(c, "payment_provider must be 'daraja' or 'cyzora'.", "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+		current := org.PaymentProvider
+		if current == "" {
+			current = services.ProviderDaraja
+		}
+		if provider != current {
+			if !isOwner() {
+				return utils.ErrorResponse(c, "Only a platform owner can change how this ISP's payments are collected.", "Forbidden.", fiber.StatusForbidden)
+			}
+			if provider == services.ProviderCyzora && !services.CyzoraConfigured() {
+				return utils.ErrorResponse(c, "Save the Cyzora secret key (Platform › Cyzora) before switching an ISP to Cyzora.", "Validation failed.", fiber.StatusUnprocessableEntity)
+			}
+		}
+		body["payment_provider"] = provider
+	}
+	if raw, present := body["cyzora_fallback"]; present {
+		on, isBool := raw.(bool)
+		if !isBool {
+			return utils.ErrorResponse(c, "cyzora_fallback must be true or false.", "Validation failed.", fiber.StatusUnprocessableEntity)
+		}
+		if on != org.CyzoraFallback && !isOwner() {
+			return utils.ErrorResponse(c, "Only a platform owner can change how this ISP's payments are collected.", "Forbidden.", fiber.StatusForbidden)
+		}
+	}
+
 	// Subdomain is validated and written on its own: it must be a valid,
 	// unreserved, unique DNS label, and "" clears it back to NULL (a bare ""
 	// would collide under the unique index with every other cleared ISP).
