@@ -168,37 +168,32 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		description = pkg.Name
 	}
 
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(pkg.ZoneID, body.Phone, pkg.Price, ref, description)
+	// Daraja or Cyzora, per the ISP's payment provider (services/paygate.go).
+	start, err := mpesaSvcGlobal.StartSTK(&payment, ref, description)
 	if err != nil {
-		reason := err.Error()
-		config.DB.Model(&payment).Updates(map[string]interface{}{
-			"status":        "failed",
-			"status_reason": reason,
-		})
+		failPendingPayment(payment.ID, err.Error())
 		return utils.ErrorResponse(c, err.Error(), "M-Pesa API error.", fiber.StatusInternalServerError)
 	}
 
-	if stkResp.Status == "success" {
-		config.DB.Model(&payment).Update("mpesa_transaction_id", stkResp.CheckoutRequestID)
-
-		// Simulate callback in mock/sandbox mode
-		if stkResp.IsMock {
-			mpesaSvcGlobal.SimulateCallback(stkResp.CheckoutRequestID, pkg.Price, body.Phone)
-		}
-
-		return utils.SuccessResponse(c, fiber.Map{
-			"payment_id":     payment.ID,
-			"transaction_id": stkResp.CheckoutRequestID,
-			"message":        stkResp.ResponseDescription,
-		}, "STK Push initiated successfully.")
+	// Simulate callback in mock/sandbox mode
+	if start.IsMock {
+		mpesaSvcGlobal.SimulateCallback(start.Reference, pkg.Price, body.Phone)
 	}
 
-	reason := "Failed to initiate M-Pesa STK Push payment."
-	config.DB.Model(&payment).Updates(map[string]interface{}{
-		"status":        "failed",
-		"status_reason": reason,
-	})
-	return utils.ErrorResponse(c, reason, "", fiber.StatusBadRequest)
+	return utils.SuccessResponse(c, fiber.Map{
+		"payment_id":     payment.ID,
+		"transaction_id": start.Reference,
+		"message":        start.Message,
+		"provider":       start.Provider,
+	}, "STK Push initiated successfully.")
+}
+
+// failPendingPayment marks a payment whose prompt could not be started as
+// failed — only while it is still pending, so a Cyzora webhook that already
+// completed it (prompt sent despite an unclear answer) is never undone.
+func failPendingPayment(paymentID uint, reason string) {
+	config.DB.Model(&models.Payment{}).Where("id = ? AND status = ?", paymentID, "pending").
+		Updates(map[string]interface{}{"status": "failed", "status_reason": reason})
 }
 
 // mpesaCallbackAuthorized guards the public Daraja callback endpoints.

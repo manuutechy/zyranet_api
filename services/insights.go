@@ -117,6 +117,7 @@ type insPay struct {
 	Phone        string
 	Amount       float64
 	Method       string
+	Provider     string
 	Status       string
 	StatusReason *string
 	PackageID    *uint
@@ -133,6 +134,16 @@ func normPhone(p string) string {
 }
 
 func methodLabel(m string) (string, string) {
+	return methodProviderLabel(m, "")
+}
+
+// methodProviderLabel groups a payment for the "by method" chart. An M-Pesa
+// prompt sent through Cyzora Pay is its own group ("Cyzora"), so the ISP and
+// the platform can see how much came in that way.
+func methodProviderLabel(m, provider string) (string, string) {
+	if provider == ProviderCyzora && (m == "mpesa" || m == "stk") {
+		return "cyzora", "Cyzora"
+	}
 	switch m {
 	case "mpesa", "stk":
 		return "mpesa", "M-Pesa prompt"
@@ -236,7 +247,7 @@ func BuildInsights(db *gorm.DB, scope InsightsScope, fromDay, toDay time.Time, n
 	// Payments for this period and the one before (for the comparison).
 	var all []insPay
 	if err := db.Model(&models.Payment{}).
-		Select("phone, amount, method, status, status_reason, package_id, created_at").
+		Select("phone, amount, method, provider, status, status_reason, package_id, created_at").
 		Where("zone_id IN (?)", zoneIDs).
 		Where("created_at >= ? AND created_at < ?", dbT(prevStart), dbT(end)).
 		Order("created_at ASC").
@@ -374,7 +385,7 @@ func BuildInsights(db *gorm.DB, scope InsightsScope, fromDay, toDay time.Time, n
 		pkgAgg[pid].Count++
 		pkgAgg[pid].Kes += p.Amount
 
-		key, label := methodLabel(p.Method)
+		key, label := methodProviderLabel(p.Method, p.Provider)
 		if methAgg[key] == nil {
 			methAgg[key] = &InsightsMethod{Method: key, Label: label}
 		}

@@ -27,6 +27,15 @@ type Payment struct {
 	// PayoutID is the payout that has claimed this payment. NULL = not yet paid
 	// out. A payment can be claimed by at most one payout at a time.
 	PayoutID *uint `gorm:"index" json:"payout_id"`
+	// Provider is who sent the STK prompt: "daraja" (Safaricom, directly) or
+	// "cyzora" (Cyzora Pay). Blank on rows that never had a prompt (manual,
+	// paybill/C2B, credit) and on STK rows made before providers existed —
+	// those were all Daraja.
+	Provider string `gorm:"size:10;index" json:"provider"`
+	// ProviderRef is the provider's own id for the prompt — for Cyzora the
+	// charge id (polled with GET /charges/{id}, matched by its webhooks).
+	// Daraja payments keep using MpesaTransactionID (CheckoutRequestID).
+	ProviderRef *string `gorm:"size:64;index" json:"provider_ref"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

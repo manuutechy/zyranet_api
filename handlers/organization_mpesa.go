@@ -31,6 +31,10 @@ func OrganizationMpesaShow(c *fiber.Ctx) error {
 		"settlement_till_number":    org.SettlementTillNumber,
 		"settlement_paybill_number": org.SettlementPaybillNumber,
 		"settlement_account_number": org.SettlementAccountNumber,
+		// Read-only here: who sends this ISP's prompts. Only platform staff
+		// change it (PUT /platform/organizations/:id).
+		"payment_provider": orgPaymentProvider(org),
+		"cyzora_fallback":  org.CyzoraFallback,
 	}
 
 	var cfg models.OrganizationMpesaConfig
@@ -59,6 +63,14 @@ func OrganizationMpesaShow(c *fiber.Ctx) error {
 		result[k] = v
 	}
 	return utils.SuccessResponse(c, result, "")
+}
+
+// orgPaymentProvider is the ISP's provider, "daraja" when never set.
+func orgPaymentProvider(org models.Organization) string {
+	if org.PaymentProvider == services.ProviderCyzora {
+		return services.ProviderCyzora
+	}
+	return services.ProviderDaraja
 }
 
 // OrganizationMpesaUpdate lets an ISP super_admin switch between the

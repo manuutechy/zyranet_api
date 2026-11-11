@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -50,6 +51,11 @@ type MpesaService struct {
 
 	// baseURLOverride points every Daraja call at another host. Tests only.
 	baseURLOverride string
+
+	// Cyzora sends prompts for ISPs on the "cyzora" provider (paygate.go).
+	Cyzora *CyzoraService
+	// cyzoraPolls throttles GET /charges/{id} per payment (cyzora_status.go).
+	cyzoraPolls sync.Map
 }
 
 type cachedToken struct {
@@ -187,6 +193,7 @@ func NewMpesaService(sms *SmsService, voucher *VoucherService, mikrotik *MikroTi
 			Transport: tr,
 		},
 		tokenCache: make(map[string]cachedToken),
+		Cyzora:     NewCyzoraService(),
 	}
 }
 
@@ -507,7 +514,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	if creds.Own && !creds.mockAllowed() {
 		if missing := creds.missingFields(); len(missing) > 0 {
 			log.Printf("[M-Pesa] Zone %d: own Daraja config incomplete, refusing STK push (missing: %s)", zoneID, strings.Join(missing, ", "))
-			return nil, errPaymentsUnavailable
+			return nil, notSent(errPaymentsUnavailable)
 		}
 	}
 	shortcode := creds.Shortcode
@@ -528,9 +535,9 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 		} else {
 			log.Printf("[M-Pesa] Zone %d: Daraja auth failed: %v", zoneID, err)
 			if creds.Own {
-				return nil, errPaymentsUnavailable
+				return nil, notSent(errPaymentsUnavailable)
 			}
-			return nil, err
+			return nil, notSent(err)
 		}
 	}
 
@@ -543,7 +550,7 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	if token == "mock_token" || strings.ToLower(env) == "mock" || (strings.ToLower(env) != "production" && isLocalCallback) {
 		if !creds.mockAllowed() {
 			log.Printf("[M-Pesa] Zone %d: refusing to mock an own-Daraja payment on a deployed server (env=%q callback=%q)", zoneID, env, callbackURL)
-			return nil, errPaymentsUnavailable
+			return nil, notSent(errPaymentsUnavailable)
 		}
 		checkoutID := fmt.Sprintf("ws_CO_%d_%d", rand.Intn(999999)+100000, time.Now().Unix())
 		log.Printf("[M-Pesa] Mock STK Push: phone=%s amount=%.0f ref=%s", phone, amount, reference)
@@ -616,7 +623,12 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("STK push request failed: %w", err)
+		err = fmt.Errorf("STK push request failed: %w", err)
+		if isDialError(err) {
+			return nil, notSent(err) // never reached Safaricom
+		}
+		// A timeout may come after Safaricom sent the prompt: not "not sent".
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -648,7 +660,18 @@ func (s *MpesaService) InitiateSTKPush(zoneID uint, phone string, amount float64
 	} else if errCode, ok := result["errorCode"].(string); ok && errCode != "" {
 		desc = fmt.Sprintf("Daraja Error %s", errCode)
 	}
-	return nil, fmt.Errorf(desc)
+	// Safaricom answered and refused the request, so no prompt went out —
+	// except "a transaction is already in process for this subscriber"
+	// (500.001.1001: a prompt IS on the phone) and other 5xx answers, where
+	// we can't be sure; those are never treated as "not sent".
+	errCode, _ := result["errorCode"].(string)
+	_, hasResponseCode := result["ResponseCode"].(string)
+	refused := errCode != "500.001.1001" &&
+		(hasResponseCode || (resp.StatusCode >= 400 && resp.StatusCode < 500) || resp.StatusCode == http.StatusServiceUnavailable)
+	if refused {
+		return nil, notSent(errors.New(desc))
+	}
+	return nil, errors.New(desc)
 }
 
 // HandleCallback processes the async Daraja payment notification.
@@ -777,7 +800,7 @@ func (s *MpesaService) ProcessUnderpayment(payment *models.Payment, paid float64
 	}
 
 	var credited bool
-	via := s.CollectionChannel(payment.ZoneID, receiptNumber)
+	via := s.collectedVia(payment, receiptNumber)
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.Payment{}).
 			Where("id = ? AND status != ?", payment.ID, "completed").
@@ -864,7 +887,7 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 			"status":               "completed",
 			"status_reason":        nil,
 			"mpesa_receipt_number": receiptNumber,
-			"collected_via":        s.CollectionChannel(payment.ZoneID, receiptNumber),
+			"collected_via":        s.collectedVia(payment, receiptNumber),
 		})
 	if res.RowsAffected == 0 {
 		// Already completed. If the status query got there first it stored a
@@ -1231,6 +1254,11 @@ func (s *MpesaService) QuerySTKPushStatus(zoneID uint, checkoutRequestID string)
 
 // QueryAndUpdateSTKStatus queries Safaricom to check the status of a pending payment and updates the database accordingly.
 func (s *MpesaService) QueryAndUpdateSTKStatus(payment *models.Payment) (string, error) {
+	// A Cyzora payment is never asked about at Safaricom with our Daraja app:
+	// Cyzora has its own status check.
+	if payment.Provider == ProviderCyzora {
+		return s.QueryAndUpdateCyzoraStatus(payment)
+	}
 	checkoutID := ""
 	if payment.MpesaTransactionID != nil {
 		checkoutID = *payment.MpesaTransactionID
@@ -1477,6 +1505,7 @@ func (s *MpesaService) queryMpesaSettingsMap() map[string]string {
 		"mpesa_passkey", "mpesa_callback_url", "mpesa_environment",
 		"mpesa_billing_type", "mpesa_till_number", "mpesa_paybill_number",
 		"mpesa_paybill_account",
+		"cyzora_secret_key", "cyzora_webhook_secret",
 	}
 	var settings []models.Setting
 	if err := config.DB.Where("`key` IN ?", keys).Find(&settings).Error; err != nil {

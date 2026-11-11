@@ -53,6 +53,20 @@ type Organization struct {
 	// verify with the platform's Test STK Push before relying on it.
 	DirectSettlement bool `gorm:"default:false" json:"direct_settlement"`
 
+	// PaymentProvider picks who sends this ISP's customers their M-Pesa
+	// prompts: "daraja" (default — Safaricom via the platform's or the ISP's
+	// own Daraja app, exactly as before) or "cyzora" (Cyzora Pay, on the
+	// platform's Cyzora account). Cyzora money lands in Zyra Net's Cyzora
+	// wallet, so it is platform-collected money the ISP is paid out like the
+	// shared paybill (collected_via = "platform"). Only platform staff change
+	// it; the ISP's admin can read it.
+	PaymentProvider string `gorm:"size:10;default:daraja" json:"payment_provider"`
+	// CyzoraFallback: on "daraja", when the Daraja prompt could not even be
+	// sent (Daraja auth/config failure, request refused, connection never
+	// made) retry that same payment once through Cyzora. Never on a customer
+	// cancel or a timeout where the prompt may already be on the phone.
+	CyzoraFallback bool `gorm:"default:false" json:"cyzora_fallback"`
+
 	// Captive portal branding — what a connecting hotspot customer sees at
 	// captive.zyranet.co.ke for this ISP's zones. CaptivePortalTheme selects
 	// the page layout (see the `customer` app's theme registry); the rest
