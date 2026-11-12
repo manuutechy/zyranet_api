@@ -437,6 +437,16 @@ func writeWifiKeepAlive(sb *strings.Builder, zone *models.Zone) {
 :if ([/interface wireless get $id ssid] = "SSID") do={ :set r ($r . "&ssidok=1") } else={ :set r ($r . "&ssidok=0") }
 :if ([:len [/interface bridge port find interface=WLAN]] > 0) do={ :set r ($r . "&bridged=1") } else={ :set r ($r . "&bridged=0") }
 }
+:do { :set r ($r . "&hs_active=" . [:len [/ip hotspot active find]] . "&hs_hosts=" . [:len [/ip hotspot host find]] . "&hs_users=" . [:len [/ip hotspot user find]]) } on-error={}
+:do {
+:local lg ""
+:local ids [/log find where topics~"hotspot"]
+:local n [:len $ids]
+:local from 0
+:if ($n > 4) do={ :set from ($n - 4) }
+:for i from=$from to=($n - 1) do={ :local e [:pick $ids $i]; :set lg ($lg . [/log get $e time] . " " . [/log get $e message] . "\n") }
+:if ([:len $lg] > 0) do={ :set r ($r . "&log=" . [:convert $lg to=base64]) }
+} on-error={}
 :local v [/system resource get version]
 :local sp [:find $v " "]
 :if ([:typeof $sp] = "num") do={ :set v [:pick $v 0 $sp] }
