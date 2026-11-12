@@ -407,9 +407,65 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	}
 
 	writeManagementAccess(&sb)
-	// Last: a radio problem must never stop logins or access rules above.
+	// Last: a radio or tunnel problem must never stop logins or access rules above.
 	writeWifiKeepAlive(&sb, &zone)
+	writeTunnel(&sb, &zone)
 	return sb.String(), nil
+}
+
+// Tunnel hub (munch2 wg0). Overridable for another server.
+func wgServerPublicKey() string {
+	return envOr("WG_SERVER_PUBLIC_KEY", "yJNd1lsQXskvKii3wbbiu7tmTl0qr9MhQPmkEeMbBxE=")
+}
+func wgServerEndpoint() string { return envOr("WG_SERVER_ENDPOINT", "159.195.109.170") }
+
+func envOr(k, def string) string {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		return v
+	}
+	return def
+}
+
+var (
+	tunnelIPRe = regexp.MustCompile(`^10\.200\.0\.([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$`)
+	wgKeyRe    = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+)
+
+// writeTunnel: for zones with a TunnelIP, every sync makes sure the router
+// has the WireGuard tunnel to the hub (it dials out, so NAT doesn't matter)
+// and the server's API login (only usable from the hub's tunnel address),
+// adding only what is missing — no config write when nothing changed — then
+// reports the router's tunnel public key so the hub can add it as a peer.
+func writeTunnel(sb *strings.Builder, zone *models.Zone) {
+	if zone.TunnelIP == nil || !tunnelIPRe.MatchString(*zone.TunnelIP) || zone.ProvisionToken == "" {
+		return
+	}
+	ip := *zone.TunnelIP
+	pub := wgServerPublicKey()
+	if !wgKeyRe.MatchString(pub) {
+		return
+	}
+	block := `# --- Zyra Net tunnel (live reading for routers behind NAT) ---
+:do {
+:if ([:len [/interface wireguard find name="zyra-wg"]] = 0) do={ /interface wireguard add name=zyra-wg listen-port=13231 comment="Zyra Net tunnel" }
+:if ([:len [/ip address find interface=zyra-wg address="TUNIP/24"]] = 0) do={ /ip address add address=TUNIP/24 interface=zyra-wg comment="Zyra Net tunnel" }
+:if ([:len [/interface wireguard peers find interface=zyra-wg public-key="SRVPUB"]] = 0) do={ /interface wireguard peers add interface=zyra-wg public-key="SRVPUB" endpoint-address=SRVEND endpoint-port=51820 allowed-address=10.200.0.1/32 persistent-keepalive=25s comment="Zyra Net server" }
+} on-error={}
+`
+	user, pw := strVal(zone.RouterUsername), strVal(zone.RouterPassword)
+	if user == "zyranet-api" && credPassRe.MatchString(pw) {
+		block += `:do {
+:if ([:len [/user group find name="zyranet-api"]] = 0) do={ /user group add name=zyranet-api policy=api,read,write,test,sensitive comment="Zyra Net server" }
+:if ([:len [/user find name="zyranet-api"]] = 0) do={ /user add name=zyranet-api group=zyranet-api password="APIPW" address=10.200.0.1/32 comment="Zyra Net server (tunnel only)" }
+} on-error={}
+`
+		block = strings.ReplaceAll(block, "APIPW", pw)
+	}
+	block += `:do { /tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/wg-key/ZONE?token=TOKEN&ip=TUNIP&pub=" . [/interface wireguard get [find name="zyra-wg"] public-key]) FETCHSEC keep-result=no } on-error={}
+
+`
+	block = strings.NewReplacer("TUNIP", ip, "SRVPUB", pub, "SRVEND", wgServerEndpoint(), "ZONE", fmt.Sprint(zone.ID), "TOKEN", zone.ProvisionToken, "FETCHSEC", fetchSecurity(zone)).Replace(block)
+	sb.WriteString(block)
 }
 
 // wifiSSID is the network name the built-in WiFi broadcasts (see setup).

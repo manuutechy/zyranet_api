@@ -339,12 +339,12 @@ func TestHandleCallback_VoucherFlow_DuplicateDoesNotReuseVoucher(t *testing.T) {
 
 func TestSanitizeAccountReference(t *testing.T) {
 	cases := map[string]string{
-		"Cust-12345":       "Cust12345",
-		"Vouch-9999":       "Vouch9999",
-		"SA-TEST":          "SATEST",
+		"Cust-12345":               "Cust12345",
+		"Vouch-9999":               "Vouch9999",
+		"SA-TEST":                  "SATEST",
 		"VeryLongAccountName12345": "VeryLongAcco", // 12 chars limit
-		"":                 "ZyraNet",
-		"My Org #1":        "MyOrg1",
+		"":                         "ZyraNet",
+		"My Org #1":                "MyOrg1",
 	}
 	for in, want := range cases {
 		if got := sanitizeAccountReference(in); got != want {
@@ -356,9 +356,9 @@ func TestSanitizeAccountReference(t *testing.T) {
 func TestSanitizeTransactionDesc(t *testing.T) {
 	cases := map[string]string{
 		"Internet Payment for 10 Mbps Monthly": "InternetPayme", // 13 chars limit
-		"WiFi":          "WiFi",
-		"Test Payment":  "TestPayment",
-		"":              "Internet",
+		"WiFi":                                 "WiFi",
+		"Test Payment":                         "TestPayment",
+		"":                                     "Internet",
 	}
 	for in, want := range cases {
 		if got := sanitizeTransactionDesc(in); got != want {
