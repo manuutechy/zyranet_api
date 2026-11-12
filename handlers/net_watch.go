@@ -202,3 +202,20 @@ func ZoneWatchSettings(c *fiber.Ctx) error {
 		"olt_ip":           zone.OltIP,
 	}, "Saved. The router picks up the OLT address on its next sync (about a minute).")
 }
+
+// NetworkLive is Network › Live: speed meters, who's online, the last
+// ?minutes= (15–360) per minute, 24 h online strips and how active plans are
+// spread. Same scope as Watch.
+func NetworkLive(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	zoneIDs, ok := watchZoneScope(c, claims)
+	if !ok {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
+	out, err := services.BuildNetworkLive(config.DB, claims.OrganizationID, zoneIDs, c.QueryInt("minutes", 60), time.Now())
+	if err != nil {
+		return utils.ErrorResponse(c, "Could not load the network.", "", fiber.StatusInternalServerError)
+	}
+	c.Set("Cache-Control", "no-store")
+	return utils.SuccessResponse(c, out, "")
+}
