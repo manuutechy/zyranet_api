@@ -150,6 +150,20 @@ func PublicZoneRedirectPage(c *fiber.Ctx) error {
 	return c.SendString(html)
 }
 
+// PublicZoneAuthPage is hotspot/zyra-login.html on the router. The portal
+// (https) can't POST to the router's http /login without Chrome's "not
+// secure" interstitial, so it opens this page instead, passing the device
+// login in the URL fragment (never sent to any server, nor in a Referer).
+// The page wipes the fragment from history and posts the login to /login on
+// its own http origin. No "$(" anywhere: RouterOS substitutes $(var) in
+// hotspot pages.
+func PublicZoneAuthPage(c *fiber.Ctx) error {
+	html := `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connecting - Zyra Net</title><style>html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#111827;background:#f9fafb}p{font-size:15px}</style></head><body><p>Connecting you…</p><form id="f" method="post" action="/login"><input type="hidden" name="username"><input type="hidden" name="password"><input type="hidden" name="dst"></form><script>(function(){var q=new URLSearchParams(location.hash.slice(1));try{history.replaceState(null,"",location.pathname)}catch(e){}var f=document.getElementById("f");f.username.value=q.get("u")||"";f.password.value=q.get("p")||"";var d=q.get("d")||"";if(!/^https?:[/][/]/i.test(d)){d="http://connectivitycheck.gstatic.com/generate_204"}f.dst.value=d;if(f.username.value){f.submit()}else{location.replace("/login")}})();</script></body></html>`
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	c.Set("Cache-Control", "no-store")
+	return c.SendString(html)
+}
+
 // PublicZoneHeartbeat receives 1-minute heartbeats from active MikroTik routers.
 func PublicZoneHeartbeat(c *fiber.Ctx) error {
 	var zone models.Zone
