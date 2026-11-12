@@ -234,7 +234,7 @@ func PublicZoneSync(c *fiber.Ctx) error {
 var (
 	wifiReportMu   sync.Mutex
 	wifiReportLast = map[uint]string{}
-	wifiReportSafe = regexp.MustCompile(`^[A-Za-z0-9._/+-]{0,32}$`)
+	wifiReportSafe = regexp.MustCompile(`^[A-Za-z0-9._/+()-]{0,48}$`)
 )
 
 // PublicZoneWifiReport receives the built-in WiFi's state from the sync
@@ -246,7 +246,7 @@ func PublicZoneWifiReport(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNotFound)
 	}
 	var parts []string
-	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "ssidok", "bridged", "ver"} {
+	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "country", "fmode", "install", "status", "chan", "ssidok", "bridged", "ver"} {
 		v := c.Query(k)
 		if !wifiReportSafe.MatchString(v) {
 			v = "?"
