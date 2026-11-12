@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -396,12 +397,58 @@ func GetZoneTraffic(c *fiber.Ctx) error {
 	}
 
 	iface := c.Query("interface", "ether1")
-	traffic, err := mikrotikSvc.GetInterfaceTraffic(zone, iface)
-	if err != nil {
-		return utils.ErrorResponse(c, err.Error(), "Failed to read interface traffic.", fiber.StatusInternalServerError)
+	// A router we couldn't reach is not dialled again for 2 minutes: each
+	// failed dial takes ~5 s, and the page polls every few seconds.
+	var traffic *services.InterfaceTraffic
+	if !trafficUnreachable(zone.ID) {
+		t, err := mikrotikSvc.GetInterfaceTraffic(zone, iface)
+		if err != nil {
+			return utils.ErrorResponse(c, err.Error(), "Failed to read interface traffic.", fiber.StatusInternalServerError)
+		}
+		traffic = t
+		if !t.Available {
+			markTrafficUnreachable(zone.ID)
+		}
+	} else {
+		traffic = &services.InterfaceTraffic{Interface: iface, Timestamp: time.Now().UTC().Format(time.RFC3339), Message: "Live traffic unavailable — router not reachable directly"}
+	}
+	// Not reachable: fall back to the router's own reading of its internet
+	// port from its last heartbeat (sent every minute), if recent.
+	wan := zone.WanPort
+	if wan == "" {
+		wan = "ether1"
+	}
+	if !traffic.Available && iface == wan {
+		var rows []models.ZoneLineStat
+		config.DB.Where("zone_id = ? AND down_mbps IS NOT NULL AND recorded_at >= ?", zone.ID, time.Now().Add(-3*time.Minute)).
+			Order("recorded_at DESC").Limit(1).Find(&rows)
+		if len(rows) == 1 {
+			r := rows[0]
+			traffic.Available, traffic.Message, traffic.Source = true, "", "check-in"
+			traffic.RxMbps, traffic.TxMbps = *r.DownMbps, *r.UpMbps
+			traffic.RxBps, traffic.TxBps = int64(*r.DownMbps*1e6), int64(*r.UpMbps*1e6)
+			traffic.ReadingAt = r.RecordedAt.UTC().Format(time.RFC3339)
+		}
 	}
 
 	return utils.SuccessResponse(c, traffic, "Live interface traffic data.")
+}
+
+var (
+	trafficMu      sync.Mutex
+	trafficNoReach = map[uint]time.Time{}
+)
+
+func trafficUnreachable(zoneID uint) bool {
+	trafficMu.Lock()
+	defer trafficMu.Unlock()
+	return time.Now().Before(trafficNoReach[zoneID])
+}
+
+func markTrafficUnreachable(zoneID uint) {
+	trafficMu.Lock()
+	trafficNoReach[zoneID] = time.Now().Add(2 * time.Minute)
+	trafficMu.Unlock()
 }
 
 // helpers
