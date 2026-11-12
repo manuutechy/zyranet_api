@@ -423,6 +423,7 @@ func writeWifiKeepAlive(sb *strings.Builder, zone *models.Zone) {
 :local id [:pick [/interface wireless find default-name=WLAN] 0]
 :if ([/interface wireless get $id disabled]) do={ /interface wireless set $id disabled=no }
 :if ([/interface wireless get $id mode] != "ap-bridge") do={ /interface wireless set $id mode=ap-bridge }
+:if ([/interface wireless get $id hide-ssid]) do={ /interface wireless set $id hide-ssid=no }
 :if ([/interface wireless get $id ssid] != "SSID") do={ /interface wireless set $id ssid="SSID" }
 :if ([:len [/interface bridge port find interface=WLAN]] = 0) do={ /interface bridge port add bridge=bridge-hotspot interface=WLAN }
 } on-error={}
@@ -431,7 +432,7 @@ func writeWifiKeepAlive(sb *strings.Builder, zone *models.Zone) {
 :local ids [/interface wireless find default-name=WLAN]
 :if ([:len $ids] > 0) do={
 :local id [:pick $ids 0]
-:set r ("has=1&disabled=" . [/interface wireless get $id disabled] . "&running=" . [/interface wireless get $id running] . "&mode=" . [/interface wireless get $id mode] . "&band=" . [/interface wireless get $id band] . "&freq=" . [/interface wireless get $id frequency] . "&clients=" . [:len [/interface wireless registration-table find]] . "&country=" . [/interface wireless get $id country] . "&fmode=" . [/interface wireless get $id frequency-mode] . "&install=" . [/interface wireless get $id installation])
+:set r ("has=1&disabled=" . [/interface wireless get $id disabled] . "&running=" . [/interface wireless get $id running] . "&mode=" . [/interface wireless get $id mode] . "&band=" . [/interface wireless get $id band] . "&freq=" . [/interface wireless get $id frequency] . "&clients=" . [:len [/interface wireless registration-table find]] . "&country=" . [/interface wireless get $id country] . "&fmode=" . [/interface wireless get $id frequency-mode] . "&install=" . [/interface wireless get $id installation] . "&hidden=" . [/interface wireless get $id hide-ssid] . "&auth=" . [/interface wireless get $id default-authentication])
 :do { :local m [/interface wireless monitor $id once as-value]; :set r ($r . "&status=" . ($m->"status") . "&chan=" . ($m->"channel")) } on-error={ :set r ($r . "&status=err") }
 :if ([/interface wireless get $id ssid] = "SSID") do={ :set r ($r . "&ssidok=1") } else={ :set r ($r . "&ssidok=0") }
 :if ([:len [/interface bridge port find interface=WLAN]] > 0) do={ :set r ($r . "&bridged=1") } else={ :set r ($r . "&bridged=0") }
