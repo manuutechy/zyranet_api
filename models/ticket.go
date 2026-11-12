@@ -8,7 +8,7 @@ import (
 
 // Ticket represents a customer support request.
 type Ticket struct {
-	ID         uint           `gorm:"primaryKey" json:"id"`
+	ID             uint           `gorm:"primaryKey" json:"id"`
 	OrganizationID uint           `gorm:"index;default:1" json:"organization_id"`
 	ZoneID         *uint          `gorm:"index" json:"zone_id"`
 	CustomerID     *uint          `json:"customer_id"`
@@ -19,7 +19,7 @@ type Ticket struct {
 	AttachmentURL  string         `gorm:"size:500" json:"attachment_url"`
 	Source         string         `gorm:"size:50;default:captive_portal" json:"source"` // captive_portal|dashboard|admin
 	InternalNotes  string         `gorm:"type:text;column:internal_notes" json:"internal_notes"`
-	Status         string         `gorm:"size:30;default:pending" json:"status"` // pending|open|in_progress|resolved|closed
+	Status         string         `gorm:"size:30;default:pending" json:"status"`  // pending|open|in_progress|resolved|closed
 	Priority       string         `gorm:"size:20;default:medium" json:"priority"` // low|medium|high
 	AssignedTo     *uint          `json:"assigned_to"`
 	CreatedAt      time.Time      `json:"created_at"`

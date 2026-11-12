@@ -175,6 +175,7 @@ func Register(app *fiber.App) {
 	v1.Get("/public/zones/auth-page/:id", handlers.PublicZoneAuthPage)
 	v1.Get("/public/zones/heartbeat/:id", handlers.PublicZoneHeartbeat)
 	v1.Get("/public/zones/wifi-report/:id", handlers.PublicZoneWifiReport)
+	v1.Get("/public/zones/wg-key/:id", handlers.PublicZoneWgKey)
 	v1.Get("/public/zones/sync/:id", handlers.PublicZoneSync)
 
 	// ---- CUSTOMER JWT ROUTES ----

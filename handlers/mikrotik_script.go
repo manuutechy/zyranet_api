@@ -150,6 +150,31 @@ func PublicZoneRedirectPage(c *fiber.Ctx) error {
 	return c.SendString(html)
 }
 
+var wgKeyRe = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+
+// PublicZoneWgKey receives the router's tunnel public key from the sync
+// script. It is logged (on change) for the hub's peer list; nothing else.
+func PublicZoneWgKey(c *fiber.Ctx) error {
+	var zone models.Zone
+	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil || !zoneTokenAuthorized(c, &zone) {
+		return c.SendStatus(fiber.StatusNotFound)
+	}
+	pub := strings.ReplaceAll(c.Query("pub"), " ", "+") // '+' arrives as a space
+	if !wgKeyRe.MatchString(pub) {
+		return c.SendStatus(fiber.StatusUnprocessableEntity)
+	}
+	line := "pub=" + pub + " ip=" + c.Query("ip")
+	wifiReportMu.Lock()
+	key := zone.ID + 1_000_000
+	changed := wifiReportLast[key] != line
+	wifiReportLast[key] = line
+	wifiReportMu.Unlock()
+	if changed {
+		log.Printf("[wg-key] zone %d (%s): %s", zone.ID, zone.Name, line)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 // PublicZoneAuthPage is hotspot/zyra-login.html on the router. The portal
 // (https) can't POST to the router's http /login without Chrome's "not
 // secure" interstitial, so it opens this page instead, passing the device

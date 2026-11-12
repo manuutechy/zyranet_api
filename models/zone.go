@@ -81,6 +81,12 @@ type Zone struct {
 	// OltIP is the fibre OLT the router pings each heartbeat (Network › Watch).
 	OltIP *string `gorm:"size:45" json:"olt_ip"`
 
+	// TunnelIP is the router's address on the Zyra Net WireGuard tunnel
+	// (e.g. 10.200.0.10). Set = every sync makes sure the router has the
+	// tunnel and the server's API login, so routers behind NAT can be read
+	// live. Nil = no tunnel (the router is reached at RouterIP, if at all).
+	TunnelIP *string `gorm:"size:45" json:"tunnel_ip"`
+
 	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
 	Packages     []Package     `gorm:"foreignKey:ZoneID" json:"packages,omitempty"`

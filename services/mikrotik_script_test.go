@@ -291,3 +291,46 @@ func TestWifiKeepAliveBlock(t *testing.T) {
 		t.Error("no radio → no block")
 	}
 }
+
+func TestWriteTunnel(t *testing.T) {
+	ip, u, pw := "10.200.0.10", "zyranet-api", "Abcdef123456"
+	z := &models.Zone{ID: 10, ProvisionToken: "tok", TunnelIP: &ip, RouterUsername: &u, RouterPassword: &pw}
+	var sb strings.Builder
+	writeTunnel(&sb, z)
+	out := sb.String()
+	for _, want := range []string{
+		`/interface wireguard add name=zyra-wg`,
+		`/ip address add address=10.200.0.10/24 interface=zyra-wg`,
+		`endpoint-address=159.195.109.170 endpoint-port=51820 allowed-address=10.200.0.1/32`,
+		`/user add name=zyranet-api group=zyranet-api password="Abcdef123456" address=10.200.0.1/32`,
+		`wg-key/10?token=tok&ip=10.200.0.10&pub=`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"TUNIP", "SRVPUB", "SRVEND", "APIPW", "FETCHSEC", "TOKEN"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("placeholder %s left", bad)
+		}
+	}
+	if strings.Count(out, "{") != strings.Count(out, "}") {
+		t.Error("unbalanced braces")
+	}
+	// No tunnel IP, or one outside the tunnel subnet → nothing.
+	for _, tip := range []*string{nil, strp("192.168.1.5"), strp("10.200.0.1")} {
+		sb.Reset()
+		writeTunnel(&sb, &models.Zone{ID: 1, ProvisionToken: "x", TunnelIP: tip})
+		if sb.Len() != 0 {
+			t.Errorf("tunnel %v: expected nothing", tip)
+		}
+	}
+	// Other username → tunnel only, no router user created.
+	other := "admin"
+	sb.Reset()
+	writeTunnel(&sb, &models.Zone{ID: 10, ProvisionToken: "tok", TunnelIP: &ip, RouterUsername: &other, RouterPassword: &pw})
+	if strings.Contains(sb.String(), "/user add") {
+		t.Error("must only create the zyranet-api user")
+	}
+}
+func strp(s string) *string { return &s }
