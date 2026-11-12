@@ -122,7 +122,7 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		sb.WriteString("# --- Hotspot Server Setup (Overload-Protected & Instant Direct-IP Redirection) ---\n")
 		sb.WriteString(fmt.Sprintf(":do { /ip dns static remove [find name=\"login.zyranet.lan\"] } on-error={}\n"))
 		sb.WriteString(fmt.Sprintf(":if ([:len [/ip hotspot profile find name=\"hsp-zyranet\"]] = 0) do={ /ip hotspot profile add name=hsp-zyranet hotspot-address=%s login-by=http-pap,http-chap,mac split-user-domain=no dns-name=\"\" } else={ /ip hotspot profile set [find name=\"hsp-zyranet\"] hotspot-address=%s login-by=http-pap,http-chap,mac split-user-domain=no dns-name=\"\" }\n", gatewayIP, gatewayIP))
-		sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=3m keepalive-timeout=1m disabled=no }\n")
+		sb.WriteString(":if ([:len [/ip hotspot find name=\"hs-zyranet\"]] = 0) do={ /ip hotspot add name=hs-zyranet interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=none keepalive-timeout=5m disabled=no } else={ /ip hotspot set [find name=\"hs-zyranet\"] interface=$br address-pool=hs-pool-zyranet profile=hsp-zyranet idle-timeout=none keepalive-timeout=5m disabled=no }\n")
 		sb.WriteString(":do { /ip hotspot cookie remove [find] } on-error={}\n\n")
 
 		// Allow the cloud captive portal, API, M-Pesa endpoints, and CDN through walled garden (HTTP & HTTPS)
@@ -328,6 +328,11 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString("# --- Hotspot Authentication Methods ---\n")
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
+		// Keep paid devices logged in while their phone sleeps: no idle logout
+		// (plans end on the clock, server-side) and 5 min to answer the
+		// router's are-you-there check. Changed only when different, so the
+		// hotspot isn't touched every minute.
+		sb.WriteString(":do { :local h [/ip hotspot find name=\"hs-zyranet\"]; :if ([:len $h] > 0) do={ :if ([/ip hotspot get $h keepalive-timeout] != 5m) do={ /ip hotspot set $h idle-timeout=none keepalive-timeout=5m } } } on-error={}\n")
 		// Ensure hotspot redirect.html points to destination, not captive portal
 		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
 		// zyra-login.html: the portal hands the device login to this page in
@@ -526,7 +531,7 @@ func writeHotspotProfile(sb *strings.Builder, pkg *models.Package) {
 		timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
 	}
 	sb.WriteString(fmt.Sprintf(
-		":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=3m keepalive-timeout=1m shared-users=1 add-mac-cookie=no }\n",
+		":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 add-mac-cookie=no }\n",
 		profileName, profileName, rateLimit, timeout, profileName, rateLimit, timeout,
 	))
 }
