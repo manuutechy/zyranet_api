@@ -246,7 +246,7 @@ func PublicZoneWifiReport(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNotFound)
 	}
 	var parts []string
-	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "country", "fmode", "install", "status", "chan", "ssidok", "bridged", "ver"} {
+	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "country", "fmode", "install", "hidden", "auth", "status", "chan", "ssidok", "bridged", "ver"} {
 		v := c.Query(k)
 		if !wifiReportSafe.MatchString(v) {
 			v = "?"
