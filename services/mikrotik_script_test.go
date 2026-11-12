@@ -262,3 +262,32 @@ func TestGetInterfaceTraffic_UnreachableIsNotInvented(t *testing.T) {
 		t.Fatalf("expected an explanation message, got %+v", tr)
 	}
 }
+
+func TestWifiKeepAliveBlock(t *testing.T) {
+	var sb strings.Builder
+	z := &models.Zone{ID: 10, WanPort: "ether1", LanPorts: "ether2,wlan1", ProvisionToken: "tok123"}
+	writeWifiKeepAlive(&sb, z)
+	out := sb.String()
+	for _, want := range []string{
+		`[/interface wireless find default-name=wlan1]`,
+		`/interface wireless set $id ssid="Zyra Net WiFi"`,
+		`/interface bridge port add bridge=bridge-hotspot interface=wlan1`,
+		`wifi-report/10?token=tok123&radio=wlan1&`,
+		`mode=https keep-result=no`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "WLAN") || strings.Contains(out, "TOKEN") || strings.Contains(out, "FETCHSEC") {
+		t.Errorf("placeholder left:\n%s", out)
+	}
+	if strings.Count(out, "{") != strings.Count(out, "}") {
+		t.Error("unbalanced braces")
+	}
+	sb.Reset()
+	writeWifiKeepAlive(&sb, &models.Zone{ID: 1, WanPort: "ether1", LanPorts: "ether2,ether3", ProvisionToken: "x"})
+	if sb.Len() != 0 {
+		t.Error("no radio → no block")
+	}
+}

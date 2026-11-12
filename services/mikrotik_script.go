@@ -394,7 +394,57 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	}
 
 	writeManagementAccess(&sb)
+	// Last: a radio problem must never stop logins or access rules above.
+	writeWifiKeepAlive(&sb, &zone)
 	return sb.String(), nil
+}
+
+// wifiSSID is the network name the built-in WiFi broadcasts (see setup).
+const wifiSSID = "Zyra Net WiFi"
+
+// writeWifiKeepAlive: for zones whose customers use the router's built-in
+// WiFi (wlan* in the customer ports), every sync makes sure the radio is on,
+// an access point, named right and on the customer bridge — changing only
+// what differs, so phones aren't dropped each minute — then reports the
+// radio's real state to /public/zones/wifi-report (the router is behind NAT,
+// so this is the only way to see it). Legacy wireless package only
+// (RouterOS 6 and older boards on 7); wifi* radios are left alone.
+func writeWifiKeepAlive(sb *strings.Builder, zone *models.Zone) {
+	_, lanPorts, err := utils.NormalizeRouterPorts(zone.WanPort, zone.LanPorts)
+	if err != nil || zone.ProvisionToken == "" {
+		return
+	}
+	for _, r := range strings.Split(lanPorts, ",") {
+		if !strings.HasPrefix(r, "wlan") {
+			continue
+		}
+		block := `# --- Built-in WiFi WLAN: keep it on, then report its state ---
+:do {
+:local id [:pick [/interface wireless find default-name=WLAN] 0]
+:if ([/interface wireless get $id disabled]) do={ /interface wireless set $id disabled=no }
+:if ([/interface wireless get $id mode] != "ap-bridge") do={ /interface wireless set $id mode=ap-bridge }
+:if ([/interface wireless get $id ssid] != "SSID") do={ /interface wireless set $id ssid="SSID" }
+:if ([:len [/interface bridge port find interface=WLAN]] = 0) do={ /interface bridge port add bridge=bridge-hotspot interface=WLAN }
+} on-error={}
+:do {
+:local r "has=0"
+:local ids [/interface wireless find default-name=WLAN]
+:if ([:len $ids] > 0) do={
+:local id [:pick $ids 0]
+:set r ("has=1&disabled=" . [/interface wireless get $id disabled] . "&running=" . [/interface wireless get $id running] . "&mode=" . [/interface wireless get $id mode] . "&band=" . [/interface wireless get $id band] . "&freq=" . [/interface wireless get $id frequency] . "&clients=" . [:len [/interface wireless registration-table find]])
+:if ([/interface wireless get $id ssid] = "SSID") do={ :set r ($r . "&ssidok=1") } else={ :set r ($r . "&ssidok=0") }
+:if ([:len [/interface bridge port find interface=WLAN]] > 0) do={ :set r ($r . "&bridged=1") } else={ :set r ($r . "&bridged=0") }
+}
+:local v [/system resource get version]
+:local sp [:find $v " "]
+:if ([:typeof $sp] = "num") do={ :set v [:pick $v 0 $sp] }
+/tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/wifi-report/ZONE?token=TOKEN&radio=WLAN&" . $r . "&ver=" . $v) FETCHSEC keep-result=no
+} on-error={}
+
+`
+		block = strings.NewReplacer("WLAN", r, "SSID", wifiSSID, "ZONE", fmt.Sprint(zone.ID), "TOKEN", zone.ProvisionToken, "FETCHSEC", fetchSecurity(zone)).Replace(block)
+		sb.WriteString(block)
+	}
 }
 
 const (
