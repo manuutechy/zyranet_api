@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"regexp"
@@ -246,13 +247,32 @@ func PublicZoneWifiReport(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNotFound)
 	}
 	var parts []string
-	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "country", "fmode", "install", "hidden", "auth", "status", "chan", "ssidok", "bridged", "ver"} {
+	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "country", "fmode", "install", "hidden", "auth", "status", "chan", "ssidok", "bridged", "hs_active", "hs_hosts", "hs_users", "ver"} {
 		v := c.Query(k)
 		if !wifiReportSafe.MatchString(v) {
 			v = "?"
 		}
 		if v != "" {
 			parts = append(parts, k+"="+v)
+		}
+	}
+	// Last few hotspot log lines, base64 from the router (spaces can't go
+	// in its URL). Decoded, cut to printable text, logged with the report.
+	if b64 := c.Query("log"); b64 != "" && len(b64) <= 4096 {
+		if raw, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(b64, " ", "+")); err == nil {
+			clean := strings.Map(func(r rune) rune {
+				if r == '\n' {
+					return '|'
+				}
+				if r < 32 || r > 126 {
+					return -1
+				}
+				return r
+			}, string(raw))
+			if len(clean) > 600 {
+				clean = clean[:600]
+			}
+			parts = append(parts, "log=["+clean+"]")
 		}
 	}
 	line := strings.Join(parts, " ")
