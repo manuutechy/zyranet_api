@@ -3,6 +3,10 @@ package handlers
 import (
 	"crypto/subtle"
 	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -225,4 +229,39 @@ func PublicZoneSync(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "text/plain; charset=utf-8")
 	return c.SendString(content)
+}
+
+var (
+	wifiReportMu   sync.Mutex
+	wifiReportLast = map[uint]string{}
+	wifiReportSafe = regexp.MustCompile(`^[A-Za-z0-9._/+-]{0,32}$`)
+)
+
+// PublicZoneWifiReport receives the built-in WiFi's state from the sync
+// script (routers behind NAT can't be asked directly). Logged when it
+// changes; nothing is stored.
+func PublicZoneWifiReport(c *fiber.Ctx) error {
+	var zone models.Zone
+	if err := config.DB.First(&zone, c.Params("id")).Error; err != nil || !zoneTokenAuthorized(c, &zone) {
+		return c.SendStatus(fiber.StatusNotFound)
+	}
+	var parts []string
+	for _, k := range []string{"radio", "has", "disabled", "running", "mode", "band", "freq", "clients", "ssidok", "bridged", "ver"} {
+		v := c.Query(k)
+		if !wifiReportSafe.MatchString(v) {
+			v = "?"
+		}
+		if v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	line := strings.Join(parts, " ")
+	wifiReportMu.Lock()
+	changed := wifiReportLast[zone.ID] != line
+	wifiReportLast[zone.ID] = line
+	wifiReportMu.Unlock()
+	if changed {
+		log.Printf("[wifi-report] zone %d (%s): %s", zone.ID, zone.Name, line)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
