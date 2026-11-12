@@ -170,7 +170,11 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 		// Auto-deploy Cloud Redirect login.html and redirect.html directly to the router's /hotspot directory
 		sb.WriteString("# --- Auto-deploy Cloud Redirect login.html & redirect.html ---\n")
 		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/login-page/%d\" dst-path=\"hotspot/login.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
-		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
+		// zyra-login.html: the portal hands the device login to this page in
+		// the #fragment and it posts it to /login from the router's own http
+		// origin (no browser "not secure" page, password never in a URL sent anywhere).
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/auth-page/%d\" dst-path=\"hotspot/zyra-login.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
 
 	}
 
@@ -325,7 +329,11 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		// Ensure hotspot redirect.html points to destination, not captive portal
-		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
+		// zyra-login.html: the portal hands the device login to this page in
+		// the #fragment and it posts it to /login from the router's own http
+		// origin (no browser "not secure" page, password never in a URL sent anywhere).
+		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/auth-page/%d\" dst-path=\"hotspot/zyra-login.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
 	}
 
 	// Auto-upgrade heartbeat script to push real live telemetry metrics
