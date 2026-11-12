@@ -1150,6 +1150,11 @@ type InterfaceTraffic struct {
 	// reachable directly); the numbers are then zero, never estimates.
 	Available bool   `json:"available"`
 	Message   string `json:"message,omitempty"`
+	// Source is "router" for a direct reading, "check-in" when the router
+	// can't be reached and the figure is its own once-a-minute heartbeat
+	// reading of the internet port (ReadingAt = when it was taken).
+	Source    string `json:"source,omitempty"`
+	ReadingAt string `json:"reading_at,omitempty"`
 }
 
 // trafficUnavailableMsg is shown instead of numbers when the router can't be read live.
@@ -1200,6 +1205,7 @@ func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (
 					TxPackets: txPps,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Available: true,
+					Source:    "router",
 				}, nil
 			}
 		}
