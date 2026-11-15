@@ -74,7 +74,7 @@ python3 -I "$REPO/test/chr/check.py" "http://$REST" "$LAB/serve/expect.json" "$c
 # Drift: break things the way a person or a reset would, then the next sync
 # must put every one of them back (skipping writes must not mean skipping repairs).
 echo; echo "breaking settings on purpose, then syncing again"
-run ':do { /ip hotspot user profile set [find name="1_Hour"] add-mac-cookie=no rate-limit="1k/1k" }; /ip hotspot set [find name="hs-zyranet"] keepalive-timeout=1m idle-timeout=3m; /ip hotspot profile set [find name="hsp-zyranet"] login-by=http-pap; /ip firewall filter remove [find comment="Zyra Net Block Management"]; /queue tree remove [find name="zq-up-heavy"]; /ip firewall address-list remove [find list="zyranet-mgmt" address="10.200.0.1"]; /ip firewall filter remove [find comment="Zyra Net Remote Access"]' >/dev/null
+run ':do { /ip hotspot user profile set [find name="1_Hour"] add-mac-cookie=no rate-limit="1k/1k" }; /ip hotspot set [find name="hs-zyranet"] keepalive-timeout=1m idle-timeout=3m; /ip hotspot profile set [find name="hsp-zyranet"] login-by=http-pap; /ip firewall filter remove [find comment="Zyra Net Block Management"]; /queue tree remove [find name="zq-up-heavy"]; /ip firewall address-list remove [find list="zyranet-mgmt" address="10.200.0.1"]; /ip firewall filter remove [find comment="Zyra Net Remote Access"]; /system script set [find name="zyranet-gc"] source="/ip hotspot host remove [find unauthorized=yes idle-time>5m]"' >/dev/null
 load sync2.rsc
 python3 -I "$REPO/test/chr/check.py" "http://$REST" "$LAB/serve/expect.json" || status=1
 exit "${status:-0}"
