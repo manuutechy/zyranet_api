@@ -155,7 +155,7 @@ func ZoneWatchSeries(c *fiber.Ctx) error {
 }
 
 // ZoneWatchSettings saves the zone's uplink speed and OLT address.
-// Body: { uplink_down_mbps, uplink_up_mbps, olt_ip } (each optional).
+// Body: { uplink_down_mbps, uplink_up_mbps, olt_ip, smart_speed } (each optional).
 func ZoneWatchSettings(c *fiber.Ctx) error {
 	zone, errResp := watchZoneFor(c)
 	if zone == nil {
@@ -165,11 +165,15 @@ func ZoneWatchSettings(c *fiber.Ctx) error {
 		Down  *int    `json:"uplink_down_mbps"`
 		Up    *int    `json:"uplink_up_mbps"`
 		OltIP *string `json:"olt_ip"`
+		Smart *bool   `json:"smart_speed"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 	upd := map[string]interface{}{}
+	if body.Smart != nil {
+		upd["smart_speed"] = *body.Smart
+	}
 	for _, v := range []struct {
 		col string
 		val *int
@@ -196,11 +200,15 @@ func ZoneWatchSettings(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Could not save.", "", fiber.StatusInternalServerError)
 	}
 	config.DB.First(zone, zone.ID)
+	smartOn, smartWhy := services.SmartSpeedState(zone)
 	return utils.SuccessResponse(c, fiber.Map{
-		"uplink_down_mbps": zone.UplinkDownMbps,
-		"uplink_up_mbps":   zone.UplinkUpMbps,
-		"olt_ip":           zone.OltIP,
-	}, "Saved. The router picks up the OLT address on its next sync (about a minute).")
+		"uplink_down_mbps":   zone.UplinkDownMbps,
+		"uplink_up_mbps":     zone.UplinkUpMbps,
+		"olt_ip":             zone.OltIP,
+		"smart_speed":        zone.SmartSpeed,
+		"smart_speed_active": smartOn,
+		"smart_speed_status": smartWhy,
+	}, "Saved. The router picks it up on its next sync (about a minute).")
 }
 
 // NetworkLive is Network › Live: speed meters, who's online, the last

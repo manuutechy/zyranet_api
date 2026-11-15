@@ -326,8 +326,13 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	if doHotspot {
 		// Ensure hotspot profile authentication methods
 		sb.WriteString("# --- Hotspot Authentication Methods ---\n")
+		// mac-cookie: a paid device that drops off the WiFi is let back in by
+		// the router itself (see smart_wifi.go). Separate guarded line so a
+		// router without it keeps the plain methods.
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
 		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
+		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,mac-cookie,http-pap,http-chap } on-error={}\n")
+		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,mac-cookie,http-pap,http-chap } on-error={}\n")
 		// Keep paid devices logged in while their phone sleeps: no idle logout
 		// (plans end on the clock, server-side) and 5 min to answer the
 		// router's are-you-there check. Changed only when different, so the
@@ -385,6 +390,7 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		for i := range packages {
 			pkgByID[packages[i].ID] = &packages[i]
 			writeHotspotProfile(&sb, &packages[i])
+			writeProfileExtras(&sb, &zone, sanitizeProfileName(packages[i].Name))
 		}
 		sb.WriteString("\n")
 
@@ -402,11 +408,20 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString("# --- Expired / Retired Device Logins ---\n")
 		for i := range gone {
 			writeCredentialRemoval(&sb, &gone[i])
+			// Plan over: drop the device off the WiFi so its phone rejoins and
+			// the portal opens on the plans.
+			// Only once: ended since the router's previous sync.
+			if mac, ok := NormalizeMAC(gone[i].MacAddress); ok && endedSince(&gone[i], zone.LastSyncAt, now) {
+				writeDeviceKick(&sb, &zone, mac)
+			}
 		}
 		sb.WriteString("\n")
 	}
 
 	writeManagementAccess(&sb)
+	if doHotspot {
+		writeSmartSpeed(&sb, &zone)
+	}
 	// Last: a radio or tunnel problem must never stop logins or access rules above.
 	writeWifiKeepAlive(&sb, &zone)
 	writeTunnel(&sb, &zone)
@@ -587,7 +602,7 @@ func writeHotspotProfile(sb *strings.Builder, pkg *models.Package) {
 		timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
 	}
 	sb.WriteString(fmt.Sprintf(
-		":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 add-mac-cookie=no } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 add-mac-cookie=no }\n",
+		":if ([:len [/ip hotspot user profile find name=\"%s\"]] = 0) do={ /ip hotspot user profile add name=\"%s\" rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 } else={ /ip hotspot user profile set [find name=\"%s\"] rate-limit=\"%s\" session-timeout=\"%s\" idle-timeout=none keepalive-timeout=5m shared-users=1 }\n",
 		profileName, profileName, rateLimit, timeout, profileName, rateLimit, timeout,
 	))
 }

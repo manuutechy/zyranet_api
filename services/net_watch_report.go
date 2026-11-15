@@ -200,15 +200,18 @@ type WatchPoint struct {
 }
 
 type ZoneWatchSeries struct {
-	ZoneID         uint         `json:"zone_id"`
-	Name           string       `json:"name"`
-	Hours          int          `json:"hours"`
-	BucketMinutes  int          `json:"bucket_minutes"`
-	UplinkDownMbps int          `json:"uplink_down_mbps"`
-	UplinkUpMbps   int          `json:"uplink_up_mbps"`
-	OltIP          string       `json:"olt_ip"`
-	Readings       int          `json:"readings"`
-	Points         []WatchPoint `json:"points"`
+	ZoneID           uint         `json:"zone_id"`
+	Name             string       `json:"name"`
+	Hours            int          `json:"hours"`
+	BucketMinutes    int          `json:"bucket_minutes"`
+	UplinkDownMbps   int          `json:"uplink_down_mbps"`
+	UplinkUpMbps     int          `json:"uplink_up_mbps"`
+	OltIP            string       `json:"olt_ip"`
+	SmartSpeed       bool         `json:"smart_speed"`
+	SmartSpeedActive bool         `json:"smart_speed_active"`
+	SmartSpeedStatus string       `json:"smart_speed_status"`
+	Readings         int          `json:"readings"`
+	Points           []WatchPoint `json:"points"`
 }
 
 // BuildZoneWatchSeries buckets the last `hours` of readings (≤ 288 points).
@@ -271,9 +274,11 @@ func BuildZoneWatchSeries(db *gorm.DB, zone *models.Zone, hours int, now time.Ti
 			pts[i].OltMs = &v
 		}
 	}
+	smartOn, smartWhy := SmartSpeedState(zone)
 	return &ZoneWatchSeries{
 		ZoneID: zone.ID, Name: zone.Name, Hours: hours, BucketMinutes: bucket,
 		UplinkDownMbps: zone.UplinkDownMbps, UplinkUpMbps: zone.UplinkUpMbps, OltIP: zoneOltIP(zone),
+		SmartSpeed: zone.SmartSpeed, SmartSpeedActive: smartOn, SmartSpeedStatus: smartWhy,
 		Readings: len(rows), Points: pts,
 	}, nil
 }

@@ -267,7 +267,7 @@ func HotspotSession(c *fiber.Ctx) error {
 	cust, _ := sessionCustomer(c, c.Query("mac"), "")
 	now := time.Now()
 	if cust == nil || cust.Package == nil || cust.Status != "active" || cust.ExpiresAt == nil || !cust.ExpiresAt.After(now) {
-		return c.JSON(fiber.Map{"active": false})
+		return c.JSON(fiber.Map{"active": false, "ended_recently": deviceEndedRecently(c.Query("mac"), c.Query("zone_id"), now)})
 	}
 	return c.JSON(fiber.Map{
 		"active":     true,
@@ -276,6 +276,29 @@ func HotspotSession(c *fiber.Ctx) error {
 		"time_left":  int64(time.Until(*cust.ExpiresAt).Seconds()),
 		"expires_at": *cust.ExpiresAt,
 	})
+}
+
+// deviceEndedRecently: this device's plan on this WiFi ended in the last 24 h
+// and it has no live plan, so the portal can say "your plan has ended" when
+// the router sends the phone back. A yes/no only: no name, phone or plan.
+func deviceEndedRecently(macIn, zoneIDStr string, now time.Time) bool {
+	mac, ok := services.NormalizeMAC(macIn)
+	zone := zoneByID(zoneIDStr)
+	if !ok || zone == nil {
+		return false
+	}
+	var live int64
+	config.DB.Model(&models.HotspotCredential{}).
+		Where("organization_id = ? AND mac_address = ? AND status = ? AND expires_at > ?", zone.OrganizationID, mac, "active", now).
+		Count(&live)
+	if live > 0 {
+		return false
+	}
+	var ended int64
+	config.DB.Model(&models.HotspotCredential{}).
+		Where("organization_id = ? AND mac_address = ? AND expires_at > ? AND (expires_at <= ? OR status <> ?)", zone.OrganizationID, mac, now.Add(-24*time.Hour), now, "active").
+		Count(&ended)
+	return ended > 0
 }
 
 // HotspotLogout ends this device's own router session. It needs proof that
