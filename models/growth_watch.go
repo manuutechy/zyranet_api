@@ -69,3 +69,31 @@ type ZoneWatchState struct {
 }
 
 func (ZoneWatchState) TableName() string { return "zone_watch_states" }
+
+// ZoneLaneStat is one heartbeat's Smart speed reading: the router's byte
+// counters for each traffic lane (games & calls, browsing, big transfers;
+// download and upload), and what moved since the previous reading.
+// Delta* are nil when no honest figure exists (first reading, a gap, or a
+// counter that went backwards after the lanes were rebuilt).
+type ZoneLaneStat struct {
+	ID         uint      `gorm:"primaryKey" json:"-"`
+	ZoneID     uint      `gorm:"not null;index:idx_zone_lane_stats_zone_at,priority:1" json:"zone_id"`
+	RecordedAt time.Time `gorm:"not null;index:idx_zone_lane_stats_zone_at,priority:2;index" json:"recorded_at"`
+	Secs       *float64  `json:"-"` // seconds since the previous reading the deltas cover
+
+	DownRt    uint64 `json:"-"`
+	DownQuick uint64 `json:"-"`
+	DownHeavy uint64 `json:"-"`
+	UpRt      uint64 `json:"-"`
+	UpQuick   uint64 `json:"-"`
+	UpHeavy   uint64 `json:"-"`
+
+	DeltaDownRt    *uint64 `json:"-"`
+	DeltaDownQuick *uint64 `json:"-"`
+	DeltaDownHeavy *uint64 `json:"-"`
+	DeltaUpRt      *uint64 `json:"-"`
+	DeltaUpQuick   *uint64 `json:"-"`
+	DeltaUpHeavy   *uint64 `json:"-"`
+}
+
+func (ZoneLaneStat) TableName() string { return "zone_lane_stats" }

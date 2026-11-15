@@ -83,6 +83,10 @@ func parseRouterMs(v string) (float64, bool) {
 }
 
 func recordLineWatch(c *fiber.Ctx, zone *models.Zone, now time.Time) {
+	// Smart speed lanes (only sent when the lanes are on the router).
+	if counters, ok := services.ParseLaneCounters(c.Query("lanes")); ok {
+		services.IngestLaneReport(config.DB, zone, counters, now)
+	}
 	r := parseLineReport(c)
 	if !r.HasWatchData() {
 		return
@@ -223,6 +227,23 @@ func NetworkLive(c *fiber.Ctx) error {
 	out, err := services.BuildNetworkLive(config.DB, claims.OrganizationID, zoneIDs, c.QueryInt("minutes", 60), time.Now())
 	if err != nil {
 		return utils.ErrorResponse(c, "Could not load the network.", "", fiber.StatusInternalServerError)
+	}
+	c.Set("Cache-Control", "no-store")
+	return utils.SuccessResponse(c, out, "")
+}
+
+// NetworkSmartSpeed is Network › Smart speed: per router, whether the lanes
+// are on, what each lane carries now and today, and the last ?minutes=
+// (60–1440). Same scope as Watch.
+func NetworkSmartSpeed(c *fiber.Ctx) error {
+	claims := middleware.GetClaims(c)
+	zoneIDs, ok := watchZoneScope(c, claims)
+	if !ok {
+		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
+	}
+	out, err := services.BuildSmartSpeed(config.DB, claims.OrganizationID, zoneIDs, c.QueryInt("minutes", 60), time.Now())
+	if err != nil {
+		return utils.ErrorResponse(c, "Smart speed could not load.", "", fiber.StatusInternalServerError)
 	}
 	c.Set("Cache-Control", "no-store")
 	return utils.SuccessResponse(c, out, "")

@@ -17,6 +17,7 @@ func registerGrowthRoutes(admin fiber.Router, adminAuth fiber.Handler) {
 	fleet := middleware.RequireRoles("super_admin", "zone_manager")
 	admin.Get("/zones/watch", adminAuth, fleet, handlers.ZonesWatch)
 	admin.Get("/network/live", adminAuth, fleet, handlers.NetworkLive)
+	admin.Get("/network/smart-speed", adminAuth, fleet, handlers.NetworkSmartSpeed)
 	admin.Get("/zones/:id/watch", adminAuth, fleet, handlers.ZoneWatchSeries)
 	admin.Put("/zones/:id/watch-settings", adminAuth, fleet, handlers.ZoneWatchSettings)
 }
