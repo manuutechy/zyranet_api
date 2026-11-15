@@ -141,3 +141,46 @@ func TestSpeedLabel(t *testing.T) {
 		}
 	}
 }
+
+// All routers quiet: the screen gets their final readings, dated — never an
+// invented "now".
+func TestBuildNetworkLive_LastReadingWhenNobodyReports(t *testing.T) {
+	db := setupWatchDB(t)
+	if err := db.AutoMigrate(&models.Area{}, &models.ZoneStat{}); err != nil {
+		t.Fatal(err)
+	}
+	now := eat(2026, 11, 15, 13, 0)
+	wentQuiet := eat(2026, 11, 12, 18, 34)
+	z := mkZone(t, db, 1, "Oxygen", &wentQuiet)
+	never := mkZone(t, db, 1, "Never reported", nil)
+	_ = never
+	var rx, tx uint64 = 1e9, 1e8
+	for m := -3; m <= 0; m++ {
+		IngestLineReport(db, &z, LineReport{RxBytes: u64p(rx), TxBytes: u64p(tx), Hotspot: intp(2), PPPoE: intp(1)}, wentQuiet.Add(time.Duration(m)*time.Minute))
+		rx += 15e6 // 2 Mbps over a minute
+		tx += 75e5 // 1 Mbps
+	}
+	live, err := BuildNetworkLive(db, 1, nil, 60, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Speed.DownMbps != nil || live.Counts.Hotspot != nil {
+		t.Fatal("nothing is 'now' from a router quiet for days")
+	}
+	l := live.Last
+	if l == nil || l.Routers != 1 || l.AtEAT != "12 Nov 18:34" {
+		t.Fatalf("last: %+v", l)
+	}
+	if l.DownMbps == nil || *l.DownMbps != 2 || l.UpMbps == nil || *l.UpMbps != 1 || l.Sessions == nil || *l.Sessions != 3 {
+		t.Errorf("figures: down=%v up=%v sessions=%v", l.DownMbps, l.UpMbps, l.Sessions)
+	}
+	// A router reporting now → no "last" block.
+	fresh := now.Add(-20 * time.Second)
+	db.Model(&models.Zone{}).Where("id = ?", z.ID).Update("last_seen_at", fresh)
+	IngestLineReport(db, &z, LineReport{RxBytes: u64p(rx), TxBytes: u64p(tx)}, now.Add(-80*time.Second))
+	IngestLineReport(db, &z, LineReport{RxBytes: u64p(rx + 15e6), TxBytes: u64p(tx + 75e5)}, now.Add(-20*time.Second))
+	live, _ = BuildNetworkLive(db, 1, nil, 60, now)
+	if live.Last != nil || live.Speed.DownMbps == nil {
+		t.Errorf("fresh reading: last=%+v down=%v", live.Last, live.Speed.DownMbps)
+	}
+}
