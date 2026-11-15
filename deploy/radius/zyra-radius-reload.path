@@ -1,0 +1,9 @@
+[Unit]
+Description=Zyra Net: restart FreeRADIUS when the API requests it
+
+[Path]
+PathChanged=/var/lib/zyranet-radius/reload
+Unit=zyra-radius-reload.service
+
+[Install]
+WantedBy=multi-user.target

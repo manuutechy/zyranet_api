@@ -105,12 +105,24 @@ func TicketStorePublic(c *fiber.Ctx) error {
 		}
 	}
 
-	// Link customer if existing customer found with this phone
-	customerID := body.CustomerID
-	if customerID == nil && formattedPhone != "" {
-		var cust models.Customer
-		if err := config.DB.Where("phone = ?", formattedPhone).First(&cust).Error; err == nil {
+	// Link the customer with this phone — only inside the ISP the ticket is
+	// filed under. A customer_id from the body is never trusted on this
+	// public endpoint: it would attach a stranger's ticket to any account.
+	var customerID *uint
+	if formattedPhone != "" {
+		zoneRaw := ""
+		if targetZoneID != nil {
+			zoneRaw = fmt.Sprint(*targetZoneID)
+		}
+		if cust, err := customerByPhoneForPortal(c, formattedPhone, zoneRaw); err == nil && cust != nil {
 			customerID = &cust.ID
+			if targetZoneID == nil {
+				// No zone given: file it under the one ISP this phone belongs to.
+				var z models.Zone
+				if config.DB.Unscoped().Select("organization_id").First(&z, cust.ZoneID).Error == nil && z.OrganizationID > 0 {
+					organizationID = z.OrganizationID
+				}
+			}
 		}
 	}
 
@@ -192,18 +204,28 @@ func TicketStatusPublic(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Phone number or ticket ID is required.", "", fiber.StatusBadRequest)
 	}
 
-	var tickets []models.Ticket
-	query := config.DB.Model(&models.Ticket{})
-
+	// Public: the phone is required (a ticket id alone let anyone walk
+	// through every ISP's tickets), and only status fields come back — never
+	// the message, name, attachment or staff internal notes.
+	if strings.TrimSpace(phone) == "" {
+		return utils.ErrorResponse(c, "Phone number is required.", "", fiber.StatusBadRequest)
+	}
+	type publicTicket struct {
+		ID        uint      `json:"id"`
+		Subject   string    `json:"subject"`
+		Status    string    `json:"status"`
+		Priority  string    `json:"priority"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	tickets := []publicTicket{}
+	formatted := utils.FormatPhone(phone)
+	query := config.DB.Model(&models.Ticket{}).Where("phone = ? OR phone = ?", formatted, phone)
 	if ticketID != "" {
 		query = query.Where("id = ?", ticketID)
 	}
-	if phone != "" {
-		formatted := utils.FormatPhone(phone)
-		query = query.Where("phone = ? OR phone = ?", formatted, phone)
-	}
-
-	query.Order("created_at DESC").Limit(5).Find(&tickets)
+	query.Select("id", "subject", "status", "priority", "created_at", "updated_at").
+		Order("created_at DESC").Limit(5).Scan(&tickets)
 	return utils.SuccessResponse(c, tickets, "")
 }
 

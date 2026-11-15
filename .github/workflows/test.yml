@@ -1,0 +1,28 @@
+name: Test
+
+# Vet + tests only. No deploy, no secrets (tests use in-memory SQLite and fakes).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race (money + auth packages)
+        run: CGO_ENABLED=1 go test -race ./handlers ./services ./middleware ./routes ./utils ./models ./config

@@ -268,7 +268,7 @@ func PlatformPayoutBackfill(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil || body.OrganizationID == 0 {
 		return utils.ErrorResponse(c, "organization_id and from (YYYY-MM-DD) are required.", "", fiber.StatusUnprocessableEntity)
 	}
-	from, err := time.Parse("2006-01-02", body.From)
+	from, err := time.ParseInLocation("2006-01-02", body.From, utils.EAT) // an EAT day
 	if err != nil {
 		return utils.ErrorResponse(c, "from must be a date like 2026-09-01.", "", fiber.StatusUnprocessableEntity)
 	}

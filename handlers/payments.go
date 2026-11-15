@@ -204,11 +204,16 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		unlock := lockReceipt(ref)
 		defer unlock()
 		// Already a payment, or waiting in the paybill unmatched queue.
-		if c2bAlreadyRecorded(ref) {
+		// …or a paybill confirmation of it is already in (or being verified):
+		// recording it by hand too would credit it twice.
+		var inLedger int64
+		config.DB.Model(&models.C2BTransaction{}).Where("trans_id = ? AND status <> ?", ref, "parked").Count(&inLedger)
+		if c2bAlreadyRecorded(ref) || inLedger > 0 {
 			return utils.ErrorResponse(c, "This M-Pesa code is already recorded.", "Duplicate payment.", fiber.StatusConflict)
 		}
 	}
 	renewNotCovered := false
+	var payment models.Payment
 
 	if body.CustomerID == nil || *body.CustomerID == 0 {
 		// Hotspot voucher cash/C2B purchase
@@ -230,7 +235,9 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
 		}
 	} else {
-		// Existing subscriber payment
+		// Existing subscriber payment. OrgZoneIDs is already narrowed to a
+		// zone/area manager's own zones, so they can't reach another zone's
+		// customer.
 		orgZoneIDs, err := middleware.OrgZoneIDs(c)
 		if err != nil {
 			return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
@@ -240,65 +247,77 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, "Customer not found.", "", fiber.StatusNotFound)
 		}
 
-		if body.Action == "credit" || body.Action == "credit_and_renew" {
-			// Add amount as credit balance (atomically — see services.AdjustCredit)
-			services.AdjustCredit(config.DB, customer.ID, body.Amount)
-			customer.CreditBalance = services.CreditBalanceOf(config.DB, customer.ID)
-
-			note := fmt.Sprintf("Offline/C2B payment added as credit (%s)", body.Method)
-			if receiptPtr != nil {
-				note = fmt.Sprintf("C2B/Offline Payment Ref: %s (%s)", *receiptPtr, body.Method)
+		// Credit, renewal and the payment row are ONE transaction: before,
+		// each write stood alone with its error ignored, so a failed payment
+		// insert left the credit given with no payment and no receipt
+		// recorded — and a retry credited it again.
+		var expiresAt time.Time
+		renewed := false
+		err = config.DB.Transaction(func(tx *gorm.DB) error {
+			if body.Action == "credit" || body.Action == "credit_and_renew" {
+				if ok, err := services.AdjustCredit(tx, customer.ID, body.Amount); err != nil || !ok {
+					return fmt.Errorf("credit not added: %v", err)
+				}
+				note := fmt.Sprintf("Offline/C2B payment added as credit (%s)", body.Method)
+				if receiptPtr != nil {
+					note = fmt.Sprintf("C2B/Offline Payment Ref: %s (%s)", *receiptPtr, body.Method)
+				}
+				if err := tx.Create(&models.CreditLog{CustomerID: customer.ID, Amount: body.Amount, Type: "credit", Note: &note, AddedBy: &claims.UserID}).Error; err != nil {
+					return err
+				}
 			}
-			config.DB.Create(&models.CreditLog{
-				CustomerID: customer.ID,
-				Amount:     body.Amount,
-				Type:       "credit",
-				Note:       &note,
-				AddedBy:    &claims.UserID,
-			})
+			if (body.Action == "renew" || body.Action == "credit_and_renew") && packageIDPtr != nil {
+				// credit_and_renew renews only when the balance covers the plan.
+				if body.Action == "credit_and_renew" {
+					paid, err := services.AdjustCredit(tx, customer.ID, -pkg.Price)
+					if err != nil {
+						return err
+					}
+					if paid {
+						debitNote := fmt.Sprintf("Package %s auto-renewed from credit", pkg.Name)
+						if err := tx.Create(&models.CreditLog{CustomerID: customer.ID, Amount: pkg.Price, Type: "debit", Note: &debitNote, AddedBy: &claims.UserID}).Error; err != nil {
+							return err
+						}
+					} else {
+						renewNotCovered = true
+					}
+				}
+				if !renewNotCovered {
+					// Time still left on the plan is kept, not thrown away.
+					var fresh models.Customer
+					tx.Select("id", "expires_at").First(&fresh, customer.ID)
+					expiresAt = utils.CalculateExpiry(pkg.BillingCycle, fresh.ExpiresAt, pkg.TimeLimitMinutes)
+					if err := tx.Model(&models.Customer{}).Where("id = ?", customer.ID).Updates(map[string]interface{}{
+						"status": "active", "package_id": pkg.ID, "expires_at": expiresAt,
+					}).Error; err != nil {
+						return err
+					}
+					renewed = true
+				}
+			}
+			payment = models.Payment{
+				CustomerID: body.CustomerID, ZoneID: customer.ZoneID, PackageID: packageIDPtr,
+				Phone: body.Phone, Amount: body.Amount, Currency: "KES", Method: body.Method,
+				MpesaReceiptNumber: receiptPtr, Status: "completed",
+			}
+			return tx.Create(&payment).Error
+		})
+		if err != nil {
+			log.Printf("[payments] manual payment for customer %d not recorded: %v", customer.ID, err)
+			return utils.ErrorResponse(c, "The payment was not recorded (nothing was changed). Please try again.", "Failed to record payment.", fiber.StatusInternalServerError)
 		}
+		customer.CreditBalance = services.CreditBalanceOf(config.DB, customer.ID)
 
-		if (body.Action == "renew" || body.Action == "credit_and_renew") && packageIDPtr != nil {
-			// credit_and_renew renews only when the balance covers the plan; it
-			// used to renew regardless, giving the plan away when it didn't.
-			if body.Action == "credit_and_renew" {
-				if debitCredit(customer.ID, pkg.Price) {
-					customer.CreditBalance = services.CreditBalanceOf(config.DB, customer.ID)
-					debitNote := fmt.Sprintf("Package %s auto-renewed from credit", pkg.Name)
-					config.DB.Create(&models.CreditLog{
-						CustomerID: customer.ID,
-						Amount:     pkg.Price,
-						Type:       "debit",
-						Note:       &debitNote,
-						AddedBy:    &claims.UserID,
-					})
-				} else {
-					renewNotCovered = true
-				}
-			}
-
-			if !renewNotCovered {
-				// Time still left on the plan is kept (as M-Pesa and credit
-				// purchases do), not thrown away by an early renewal.
-				expiresAt := utils.CalculateExpiry(pkg.BillingCycle, customer.ExpiresAt, pkg.TimeLimitMinutes)
-				config.DB.Model(&customer).Updates(map[string]interface{}{
-					"status":     "active",
-					"package_id": pkg.ID,
-					"expires_at": expiresAt,
-				})
-
-				templateActive := GetSetting("sms_template_active")
-				msg := utils.RenderTemplate(templateActive, map[string]string{
-					"name":    customer.Name,
-					"package": pkg.Name,
-					"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
-				})
-				if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
-					go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
-				}
+		if renewed {
+			msg := utils.RenderTemplate(GetSetting("sms_template_active"), map[string]string{
+				"name":    customer.Name,
+				"package": pkg.Name,
+				"expiry":  utils.Kenya(expiresAt).Format("2006-01-02 15:04"),
+			})
+			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
+				go smsSvcGlobal.Send(claims.OrganizationID, body.Phone, msg) //nolint:errcheck
 			}
 		} else if body.Action == "credit" {
-			// Send credit notification SMS
 			msg := fmt.Sprintf("Hi %s, KES %.2f has been credited to your Zyra Net account. New Balance: KES %.2f.",
 				customer.Name, body.Amount, customer.CreditBalance)
 			if GetSetting("sms_enable_active") != "no" && body.Phone != "" {
@@ -307,20 +326,27 @@ func PaymentRecordManual(c *fiber.Ctx) error {
 		}
 	}
 
-	payment := models.Payment{
-		CustomerID:         body.CustomerID,
-		VoucherID:          voucherID,
-		ZoneID:             body.ZoneID,
-		PackageID:          packageIDPtr,
-		Phone:              body.Phone,
-		Amount:             body.Amount,
-		Currency:           "KES",
-		Method:             body.Method,
-		MpesaReceiptNumber: receiptPtr,
-		Status:             "completed",
-	}
-	if err := config.DB.Create(&payment).Error; err != nil {
-		return utils.ErrorResponse(c, err.Error(), "Failed to record payment.", fiber.StatusInternalServerError)
+	if payment.ID == 0 {
+		// Voucher sale (no subscriber).
+		payment = models.Payment{
+			CustomerID:         body.CustomerID,
+			VoucherID:          voucherID,
+			ZoneID:             body.ZoneID,
+			PackageID:          packageIDPtr,
+			Phone:              body.Phone,
+			Amount:             body.Amount,
+			Currency:           "KES",
+			Method:             body.Method,
+			MpesaReceiptNumber: receiptPtr,
+			Status:             "completed",
+		}
+		if err := config.DB.Create(&payment).Error; err != nil {
+			if voucherID != nil {
+				// No payment, so no sale: don't leave a sellable voucher behind.
+				config.DB.Delete(&models.Voucher{}, *voucherID)
+			}
+			return utils.ErrorResponse(c, err.Error(), "Failed to record payment.", fiber.StatusInternalServerError)
+		}
 	}
 	if renewNotCovered {
 		return utils.SuccessResponse(c, payment, fmt.Sprintf("Payment recorded and added as credit, but the balance doesn't cover %s (KES %.2f), so the plan was not renewed.", pkg.Name, pkg.Price), fiber.StatusCreated)
@@ -407,7 +433,9 @@ func PaymentInvoiceSMS(c *fiber.Ctx) error {
 		companyName = "Zyra Net"
 	}
 
-	invoiceURL := fmt.Sprintf("%s/api/v1/payments/%d/invoice", c.BaseURL(), payment.ID)
+	// The customer can't sign in to the admin: the link is the public,
+	// read-only receipt page, reachable only with its unguessable token.
+	invoiceURL := publicReceiptURL(c, payment.ID)
 	msg := fmt.Sprintf("Hi, your %s invoice INV-%d of KES %.0f is ready. View/Print it here: %s",
 		companyName, payment.ID, payment.Amount, invoiceURL)
 
@@ -436,7 +464,7 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 
 	logoImgTag := ""
 	if logoURL != "" {
-		logoImgTag = fmt.Sprintf(`<img src="%s" class="logo" alt="Logo"><br>`, logoURL)
+		logoImgTag = fmt.Sprintf(`<img src="%s" class="logo" alt="Logo"><br>`, esc(logoURL))
 	}
 
 	customerName := "Voucher Ticket Purchase"
@@ -587,28 +615,28 @@ func renderInvoiceHTML(c *fiber.Ctx, payment *models.Payment) string {
 </body>
 </html>`,
 		payment.ID,
-		primaryColor,
-		primaryColor,
-		primaryColor,
-		primaryColor,
+		esc(cssColor(primaryColor)),
+		esc(cssColor(primaryColor)),
+		esc(cssColor(primaryColor)),
+		esc(cssColor(primaryColor)),
 		logoImgTag,
-		companyName,
+		esc(companyName),
 		payment.ID,
 		utils.Kenya(payment.CreatedAt).Format("2006-01-02 15:04"),
-		customerName,
-		customerPhone,
-		accountNumber,
-		strings.ToUpper(payment.Method),
-		receiptNumber,
-		packageName,
-		speedUpload,
-		speedDownload,
-		billingCycle,
-		zoneName,
+		esc(customerName),
+		esc(customerPhone),
+		esc(accountNumber),
+		esc(strings.ToUpper(payment.Method)),
+		esc(receiptNumber),
+		esc(packageName),
+		esc(speedUpload),
+		esc(speedDownload),
+		esc(billingCycle),
+		esc(zoneName),
 		payment.Amount,
 		payment.Amount,
 		payment.Amount,
-		settings["support_phone"],
+		esc(settings["support_phone"]),
 	)
 }
 
@@ -687,24 +715,36 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 			})
 		}
 
-		// Pending unmatched payment! Reconcile immediately with the customer claiming it.
+		// Pending unmatched payment: put it on the account of the phone that
+		// PAID it, inside the ISP that owns the paybill (when it's an ISP's
+		// own). Knowing an M-Pesa code is not proof of anything: a signed-in
+		// customer only gets it if their own phone paid it, and a weak
+		// (MAC-only) session never counts. Without a sign-in the payer's phone
+		// must match exactly one customer — it used to take the first match
+		// in the whole database, any ISP.
 		claims := middleware.OptionalCustomerClaims(c)
 		var customer models.Customer
 		foundCust := false
+		payerTail := phoneTail9(unmatched.Phone)
+		ispOrg, ownShortcode := services.OrgForShortcode(unmatched.BusinessShortCode)
+		inISP := func(q *gorm.DB) *gorm.DB {
+			if !ownShortcode {
+				return q
+			}
+			return q.Where("zone_id IN (?)", config.DB.Unscoped().Model(&models.Zone{}).Select("id").Where("organization_id = ?", ispOrg))
+		}
 
-		if claims != nil && claims.CustomerID > 0 {
-			if err := config.DB.First(&customer, claims.CustomerID).Error; err == nil {
+		if payerTail != "" && claims != nil && claims.CustomerID > 0 && claims.AuthMethod != "device" {
+			if err := inISP(config.DB.Where("id = ?", claims.CustomerID)).First(&customer).Error; err == nil && phoneTail9(customer.Phone) == payerTail {
 				foundCust = true
 			}
 		}
 
-		if !foundCust && unmatched.Phone != "" {
-			phoneSuffix := unmatched.Phone
-			if len(phoneSuffix) >= 9 {
-				phoneSuffix = phoneSuffix[len(phoneSuffix)-9:]
-			}
-			if err := config.DB.Where("phone LIKE ?", "%"+phoneSuffix).First(&customer).Error; err == nil {
-				foundCust = true
+		if !foundCust && payerTail != "" {
+			var matches []models.Customer
+			inISP(config.DB.Where("phone LIKE ?", "%"+payerTail)).Limit(2).Find(&matches)
+			if len(matches) == 1 && phoneTail9(matches[0].Phone) == payerTail {
+				customer, foundCust = matches[0], true
 			}
 		}
 
@@ -749,6 +789,9 @@ func PaymentVerifyCode(c *fiber.Ctx) error {
 			Status:             "completed",
 			MpesaReceiptNumber: &transIDStr,
 			MpesaTransactionID: &transIDStr,
+			// Where the money landed, so a shared-paybill payment is counted
+			// in the ISP's payout (it used to be left out).
+			CollectedVia: c2bCollectionChannel(ownShortcode),
 		}
 		if body.Mac != "" {
 			newPayment.MacAddress = body.Mac
@@ -833,4 +876,22 @@ func lockReceipt(ref string) func() {
 	mu := m.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
+}
+
+// phoneTail9 is the last 9 digits of a Kenyan phone (7XXXXXXXX), "" when the
+// number is masked or too short to compare (Safaricom masks some C2B payers).
+func phoneTail9(p string) string {
+	digits := make([]byte, 0, len(p))
+	for i := 0; i < len(p); i++ {
+		switch {
+		case p[i] >= '0' && p[i] <= '9':
+			digits = append(digits, p[i])
+		case p[i] == '*' || p[i] == 'x' || p[i] == 'X':
+			return ""
+		}
+	}
+	if len(digits) < 9 {
+		return ""
+	}
+	return string(digits[len(digits)-9:])
 }

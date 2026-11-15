@@ -174,8 +174,7 @@ func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
 				var latestStat models.ZoneStat
 				config.DB.Where("zone_id = ?", zone.ID).Order("recorded_at DESC").First(&latestStat)
 
-				var activeCount int64
-				config.DB.Model(&models.Session{}).Where("zone_id = ? AND ended_at IS NULL", zone.ID).Count(&activeCount)
+				activeCount := OpenRadiusSessions(config.DB, []uint{zone.ID}, "")[zone.ID]
 				if latestStat.ConnectedClients > int(activeCount) {
 					activeCount = int64(latestStat.ConnectedClients)
 				}
@@ -299,8 +298,7 @@ func (s *MikroTikService) mockOnlineStatus(zone *models.Zone) *RouterStatus {
 		"last_status":  "online",
 	})
 
-	var activeCount int64
-	config.DB.Model(&models.Session{}).Where("zone_id = ? AND ended_at IS NULL", zone.ID).Count(&activeCount)
+	activeCount := OnlineNow(config.DB, zone.ID)
 
 	return &RouterStatus{
 		Online:           true,

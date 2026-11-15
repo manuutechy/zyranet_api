@@ -91,7 +91,8 @@ func ZoneShow(c *fiber.Ctx) error {
 	if err := config.DB.Preload("Manager").Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	if claims.AreaManager && !middleware.ZoneInScope(c, zone.ID) {
+	// Zone and area managers: only their own zone(s).
+	if !middleware.ZoneInScope(c, zone.ID) {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, zone, "")
@@ -106,7 +107,9 @@ func ZoneUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&zone, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Zone not found.", "", fiber.StatusNotFound)
 	}
-	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != zone.ID) && !(claims.AreaManager && middleware.ZoneInScope(c, zone.ID)) {
+	// Owner, or the zone/area manager of this zone. Any other role with a
+	// users.zone_id (field agent, finance) used to pass this check.
+	if claims.Role != "super_admin" && !(claims.Role == "zone_manager" && middleware.ZoneInScope(c, zone.ID)) {
 		return utils.ErrorResponse(c, "Unauthorized to update this zone.", "", fiber.StatusForbidden)
 	}
 
@@ -334,7 +337,7 @@ func ZoneResolveAlert(c *fiber.Ctx) error {
 	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&alert, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Alert not found.", "", fiber.StatusNotFound)
 	}
-	if claims.Role != "super_admin" && (claims.ZoneID == nil || *claims.ZoneID != alert.ZoneID) && !(claims.AreaManager && middleware.ZoneInScope(c, alert.ZoneID)) {
+	if claims.Role != "super_admin" && !(claims.Role == "zone_manager" && middleware.ZoneInScope(c, alert.ZoneID)) {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	now := time.Now()

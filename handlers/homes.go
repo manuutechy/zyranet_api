@@ -300,6 +300,7 @@ func HomePublicPayStatus(c *fiber.Ctx) error {
 			msg = *payment.StatusReason
 		}
 		out["message"] = msg
+		out["code"] = services.PaymentFailureCode(msg)
 	default:
 		out["message"] = "Waiting for you to enter your M-Pesa PIN."
 	}
@@ -445,8 +446,6 @@ func HomeSwitchOff(c *fiber.Ctx) error {
 	if err := config.DB.Model(&models.Customer{}).Where("id = ?", cust.ID).Update("status", "suspended").Error; err != nil {
 		return utils.ErrorResponse(c, "Could not switch off.", "", fiber.StatusInternalServerError)
 	}
-	now := time.Now()
-	config.DB.Model(&models.Session{}).Where("customer_id = ? AND ended_at IS NULL", cust.ID).Update("ended_at", &now)
 	cust.Status = "suspended"
 	if cust.Zone != nil {
 		z, cc := *cust.Zone, *cust

@@ -10,6 +10,7 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
 )
 
@@ -229,9 +230,8 @@ func ReportZones(c *fiber.Ctx) error {
 		config.DB.Model(&models.Voucher{}).
 			Where("zone_id = ? AND status IN ?", zone.ID, []string{"active", "depleted"}).Count(&vouchersSold)
 
-		config.DB.Model(&models.Session{}).
-			Where("zone_id = ?", zone.ID).
-			Where("ended_at IS NULL").Count(&activeSessions)
+		// Devices online now: open RADIUS sessions or the router's last check-in.
+		activeSessions = services.OnlineNow(config.DB, zone.ID)
 
 		comparison = append(comparison, ZoneComparison{
 			ZoneID:         zone.ID,
@@ -258,6 +258,17 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 	zoneID := scopedZoneID(c, c.Query("zone_id"))
+	sessionZones := orgZoneIDs
+	if zoneID != "" {
+		sessionZones = []uint{}
+		if z, err := strconv.ParseUint(zoneID, 10, 64); err == nil {
+			for _, id := range orgZoneIDs {
+				if id == uint(z) {
+					sessionZones = []uint{id}
+				}
+			}
+		}
+	}
 	// Kenyan calendar days, whatever the server's clock zone.
 	now := utils.Kenya(time.Now())
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, utils.EAT)
@@ -293,21 +304,12 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		}
 		activeCustomerQuery.Count(&s.ActiveCustomers)
 
-		activeSessionsQuery := config.DB.Model(&models.Session{}).
-			Joins("JOIN customers ON customers.id = sessions.customer_id").
-			Where("customers.type = ? AND sessions.ended_at IS NULL AND sessions.zone_id IN (?)", t, orgZoneIDs)
-		if zoneID != "" {
-			activeSessionsQuery = activeSessionsQuery.Where("sessions.zone_id = ?", zoneID)
+		// Sessions are RADIUS accounting records (services/sessions.go);
+		// API-mode zones have none, so these read 0 there.
+		for _, n := range services.OpenRadiusSessions(config.DB, sessionZones, t) {
+			s.ActiveSessions += n
 		}
-		activeSessionsQuery.Count(&s.ActiveSessions)
-
-		sessionsTodayQuery := config.DB.Model(&models.Session{}).
-			Joins("JOIN customers ON customers.id = sessions.customer_id").
-			Where("customers.type = ? AND sessions.started_at >= ? AND sessions.started_at < ? AND sessions.zone_id IN (?)", t, today, tomorrow, orgZoneIDs)
-		if zoneID != "" {
-			sessionsTodayQuery = sessionsTodayQuery.Where("sessions.zone_id = ?", zoneID)
-		}
-		sessionsTodayQuery.Count(&s.SessionsToday)
+		s.SessionsToday = services.RadiusSessionsStarted(config.DB, sessionZones, t, today, tomorrow)
 
 		// Revenue Today
 		revTodayQuery := config.DB.Model(&models.Payment{}).

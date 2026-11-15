@@ -1,0 +1,7 @@
+[Unit]
+Description=Zyra Net: checked FreeRADIUS restart requested by the API
+After=freeradius.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zyra-radius-reload

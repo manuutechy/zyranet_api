@@ -81,6 +81,20 @@ func HotspotPay(c *fiber.Ctx) error {
 	}
 	pkg := *pkgPtr
 
+	// One prompt at a time per phone, exactly like /mpesa/stkpush: a second
+	// tap within 90 s (same phone, or same device on this zone) gets the
+	// prompt already on the phone — two prompts risk paying twice.
+	unlock := mpesaSvcGlobal.LockSTKPhone(phone)
+	defer unlock()
+	if existing, ok := services.RecentPendingSTK(phone, body.Mac, zone.ID, 90*time.Second); ok {
+		return c.JSON(fiber.Map{
+			"reference": *existing.MpesaTransactionID,
+			"message":   "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying.",
+			"provider":  existing.Provider,
+			"reused":    true,
+		})
+	}
+
 	// Auto-generate voucher
 	voucher, err := voucherSvcGlobal.Generate(zone.ID, pkg.ID, "single_use", 1)
 	if err != nil {
@@ -206,11 +220,7 @@ func HotspotStatus(c *fiber.Ctx) error {
 		}
 		return c.JSON(fiber.Map{"status": "pending"})
 	} else if payment.Status == "failed" {
-		msg := "Payment failed"
-		if payment.StatusReason != nil {
-			msg = *payment.StatusReason
-		}
-		return c.JSON(fiber.Map{"status": "failed", "message": msg})
+		return c.JSON(failedPaymentJSON(&payment))
 	}
 
 	// Reconcile status with M-Pesa query API as a fallback if the transaction is pending
@@ -224,11 +234,7 @@ func HotspotStatus(c *fiber.Ctx) error {
 				}
 				return c.JSON(fiber.Map{"status": "pending"})
 			} else if newStatus == "failed" {
-				msg := "Payment failed"
-				if payment.StatusReason != nil {
-					msg = *payment.StatusReason
-				}
-				return c.JSON(fiber.Map{"status": "failed", "message": msg})
+				return c.JSON(failedPaymentJSON(&payment))
 			}
 		} else {
 			log.Printf("[M-Pesa] Error querying STK status: %v", err)
@@ -383,4 +389,15 @@ func resolveHotspotPlan(zoneID uint, planID string) (*models.Package, error) {
 		return nil, errors.New("That plan is not available on this WiFi. Refresh and pick a plan again.")
 	}
 	return &pkg, nil
+}
+
+// failedPaymentJSON is the poll answer for a failed payment: the English
+// message (old portals show it) plus a machine code the portal can switch on:
+// cancelled | pin | funds | no_response | unconfirmed | other.
+func failedPaymentJSON(p *models.Payment) fiber.Map {
+	msg := "Payment failed"
+	if p.StatusReason != nil && *p.StatusReason != "" {
+		msg = *p.StatusReason
+	}
+	return fiber.Map{"status": "failed", "message": msg, "code": services.PaymentFailureCode(msg)}
 }

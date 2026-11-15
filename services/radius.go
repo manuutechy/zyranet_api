@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -474,10 +475,14 @@ func (s *RadiusService) Start() {
 
 func (s *RadiusService) Stop() { close(s.stop) }
 
-// ReloadServer asks FreeRADIUS to re-read its client list (RADIUS_RELOAD_CMD).
-// It reports whether that happened; a failure is logged, never fatal — the
+// ReloadServer asks FreeRADIUS to re-read its client list: through the
+// request file (RADIUS_RELOAD_FILE, preferred) or RADIUS_RELOAD_CMD. It
+// reports whether that happened; a failure is logged, never fatal — the
 // caller then tells the operator to reload the server by hand.
 func (s *RadiusService) ReloadServer() bool {
+	if f := config.Config.RadiusReloadFile; f != "" {
+		return requestRadiusRestart(f, radiusReloadWait)
+	}
 	fields := strings.Fields(config.Config.RadiusReloadCmd)
 	if len(fields) == 0 {
 		return false
@@ -489,4 +494,52 @@ func (s *RadiusService) ReloadServer() bool {
 		return false
 	}
 	return true
+}
+
+// radiusReloadWait is how long ReloadServer waits for the root service's
+// receipt (config check + restart take a few seconds).
+var radiusReloadWait = 30 * time.Second
+
+// requestRadiusRestart writes "<nonce> <unix time>" to the request file and
+// waits for the root service (deploy/radius) to answer in <file>.done with
+// "<nonce> ok" or "<nonce> fail <why>". The API never runs anything as root
+// itself: its unit has NoNewPrivileges, so sudo can't work from it.
+func requestRadiusRestart(file string, wait time.Duration) bool {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("[radius] restart request: %v", err)
+		return false
+	}
+	nonce := hex.EncodeToString(b)
+	// The file must already exist (installed root:zyranet 640 → zyranet may
+	// write it but nobody can swap it): never create it here.
+	fh, err := os.OpenFile(file, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		log.Printf("[radius] restart request: cannot write %s: %v (is deploy/radius installed?)", file, err)
+		return false
+	}
+	_, werr := fmt.Fprintf(fh, "%s %d\n", nonce, time.Now().Unix())
+	if cerr := fh.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		log.Printf("[radius] restart request: %v", werr)
+		return false
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if got, err := os.ReadFile(file + ".done"); err == nil {
+			line := strings.TrimSpace(string(got))
+			if strings.HasPrefix(line, nonce+" ") {
+				if strings.TrimPrefix(line, nonce+" ") == "ok" {
+					return true
+				}
+				log.Printf("[radius] restart refused by the server: %s", strings.TrimPrefix(line, nonce+" "))
+				return false
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	log.Printf("[radius] restart request: no receipt in %s (is zyra-radius-reload.path enabled?)", wait)
+	return false
 }

@@ -104,7 +104,17 @@ type AppConfig struct {
 	// RadiusReloadCmd is run after a router is added to or removed from the
 	// RADIUS client list. FreeRADIUS only picks up SQL clients when it starts —
 	// a HUP/reload was tested and does not — so this is a restart. Empty disables it (then a person must reload the server).
+	// It used to default to "sudo -n systemctl restart freeradius", which can
+	// never work: the API's systemd unit has NoNewPrivileges, so sudo is
+	// refused. Use RadiusReloadFile instead; this stays for setups where a
+	// plain command can do it.
 	RadiusReloadCmd string
+	// RadiusReloadFile (RADIUS_RELOAD_FILE) is the file-watch restart, like
+	// the WireGuard peer file: the API writes a request line, a root systemd
+	// .path unit runs deploy/radius/zyra-radius-reload, which checks the
+	// request and the FreeRADIUS config, restarts it and writes a receipt to
+	// <file>.done. Takes precedence over RadiusReloadCmd.
+	RadiusReloadFile string
 
 	// BaseDomain is the parent domain ISPs' subdomains hang off: an ISP with
 	// subdomain "acme" has its staff admin at acme.<BaseDomain>.
@@ -139,7 +149,8 @@ func Load() {
 		DBPass: getEnv("DB_PASS", ""),
 
 		RadiusServerAddr: getEnv("RADIUS_SERVER_ADDR", "10.200.0.1"),
-		RadiusReloadCmd:  strings.TrimSpace(getEnv("RADIUS_RELOAD_CMD", "sudo -n systemctl restart freeradius")),
+		RadiusReloadCmd:  strings.TrimSpace(getEnv("RADIUS_RELOAD_CMD", "")),
+		RadiusReloadFile: strings.TrimSpace(getEnv("RADIUS_RELOAD_FILE", "")),
 
 		AllowLegacyRouterRequests: strings.EqualFold(getEnv("ALLOW_LEGACY_ROUTER_REQUESTS", "false"), "true"),
 

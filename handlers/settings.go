@@ -74,7 +74,13 @@ var settingDefaults = map[string]string{
 // panel. ISPs configure their own Daraja via /settings/mpesa
 // (OrganizationMpesaConfig) instead; SMS template wording/toggles
 // (sms_template_*, sms_enable_*) are unaffected and remain ISP-editable.
-var platformOnlyKeys = append(append(append([]string{}, daraKeys...), smsKeys...), cyzoraKeys...)
+//
+// The SMTP login (used to email invoices) is platform-only too: the settings
+// table is shared by every ISP and SettingsIndex is readable by any staff
+// role, so smtp_password used to reach field agents of every ISP, and any ISP
+// owner could repoint every ISP's mail. No admin page edits these.
+var platformOnlyKeys = append(append(append(append([]string{}, daraKeys...), smsKeys...), cyzoraKeys...),
+	"smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_from")
 
 // SettingsIndex returns all settings.
 func SettingsIndex(c *fiber.Ctx) error {

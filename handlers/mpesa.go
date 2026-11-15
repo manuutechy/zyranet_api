@@ -477,6 +477,19 @@ func creditC2B(l *models.C2BTransaction) {
 	}
 
 	claim := func(tx *gorm.DB) (bool, error) {
+		// Staff may have recorded this M-Pesa code by hand while Safaricom was
+		// still verifying it: then it is already paid for — close the ledger
+		// row without crediting a second time.
+		var n int64
+		if err := tx.Model(&models.Payment{}).Where("mpesa_receipt_number = ? OR mpesa_transaction_id = ?", l.TransID, l.TransID).Count(&n).Error; err != nil {
+			return false, err
+		}
+		if n > 0 {
+			log.Printf("[C2B Confirmation] %s already recorded as a payment — not credited again", l.TransID)
+			return false, tx.Model(&models.C2BTransaction{}).
+				Where("id = ? AND status IN ?", l.ID, []string{"received", "verifying"}).
+				Updates(map[string]interface{}{"status": "credited", "verify_note": "already recorded as a payment"}).Error
+		}
 		res := tx.Model(&models.C2BTransaction{}).
 			Where("id = ? AND status IN ?", l.ID, []string{"received", "verifying"}).
 			Updates(map[string]interface{}{"status": "credited", "verification": l.Verification})
