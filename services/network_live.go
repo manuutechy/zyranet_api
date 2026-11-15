@@ -66,8 +66,21 @@ type LiveShare struct {
 	Count int    `json:"count"`
 }
 
+// LiveLast is what the routers last reported when none is reporting now
+// (all offline or silent): their final readings, clearly dated, instead of
+// an empty screen. Nil while any router has a fresh reading.
+type LiveLast struct {
+	At       string   `json:"at"`     // RFC3339 of the newest of those readings
+	AtEAT    string   `json:"at_eat"` // "14:05", "Yesterday 22:10", "12 Nov 18:34"
+	DownMbps *float64 `json:"down_mbps"`
+	UpMbps   *float64 `json:"up_mbps"`
+	Sessions *int     `json:"sessions"` // hotspot + homes connected then
+	Routers  int      `json:"routers"`  // routers that have ever sent a reading
+}
+
 type NetworkLive struct {
 	GeneratedAt   string       `json:"generated_at"`
+	Last          *LiveLast    `json:"last"`
 	GeneratedEAT  string       `json:"generated_at_eat"`
 	Speed         LiveSpeed    `json:"speed"`
 	Counts        LiveCounts   `json:"counts"`
@@ -161,6 +174,11 @@ func BuildNetworkLive(db *gorm.DB, orgID uint, zoneIDs []uint, minutes int, now 
 
 	if len(ids) == 0 {
 		return out, nil
+	}
+
+	// ---- Nobody reporting: each router's final reading, dated ----
+	if sp.Reporting == 0 {
+		out.Last = lastReadings(db, ids, now)
 	}
 
 	// ---- Per-minute series, summed across routers ----
@@ -476,4 +494,52 @@ func topShares(m map[string]*LiveShare, bySpeedKey bool) []LiveShare {
 		list = append(list[:liveMaxShare-1], rest)
 	}
 	return list
+}
+
+// lastReadings sums each router's most recent line reading. Only what was
+// really reported: a router that never sent one is left out, and a missing
+// figure stays nil.
+func lastReadings(db *gorm.DB, zoneIDs []uint, now time.Time) *LiveLast {
+	var newest time.Time
+	var down, up float64
+	var sessions int
+	haveSpeed, haveSess, routers := false, false, 0
+	for _, id := range zoneIDs {
+		var rows []models.ZoneLineStat
+		db.Where("zone_id = ?", id).Order("recorded_at DESC").Limit(1).Find(&rows)
+		if len(rows) == 0 {
+			continue
+		}
+		r := rows[0]
+		routers++
+		if r.RecordedAt.After(newest) {
+			newest = r.RecordedAt
+		}
+		if r.DownMbps != nil && r.UpMbps != nil {
+			down += *r.DownMbps
+			up += *r.UpMbps
+			haveSpeed = true
+		}
+		if r.Hotspot != nil || r.PPPoE != nil {
+			if r.Hotspot != nil {
+				sessions += *r.Hotspot
+			}
+			if r.PPPoE != nil {
+				sessions += *r.PPPoE
+			}
+			haveSess = true
+		}
+	}
+	if routers == 0 {
+		return nil
+	}
+	l := &LiveLast{At: newest.UTC().Format(time.RFC3339), AtEAT: formatEATStamp(newest, now), Routers: routers}
+	if haveSpeed {
+		d, u := round2(down), round2(up)
+		l.DownMbps, l.UpMbps = &d, &u
+	}
+	if haveSess {
+		l.Sessions = &sessions
+	}
+	return l
 }
