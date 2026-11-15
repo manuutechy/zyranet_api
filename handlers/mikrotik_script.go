@@ -163,6 +163,21 @@ func PublicZoneWgKey(c *fiber.Ctx) error {
 	if !wgKeyRe.MatchString(pub) {
 		return c.SendStatus(fiber.StatusUnprocessableEntity)
 	}
+	// Read-only picture of the router's management guard (see writeTunnel),
+	// logged when it changes: `journalctl -u zyranet-api | grep router-fw]`.
+	if raw := strings.ReplaceAll(c.Query("fw"), " ", "+"); raw != "" && len(raw) < 16000 {
+		if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			txt := strings.ReplaceAll(strings.TrimSpace(string(dec)), "\n", " ¦ ")
+			wifiReportMu.Lock()
+			key := zone.ID + 2_000_000
+			changed := wifiReportLast[key] != txt
+			wifiReportLast[key] = txt
+			wifiReportMu.Unlock()
+			if changed {
+				log.Printf("[router-fw] zone %d (%s): %s", zone.ID, zone.Name, txt)
+			}
+		}
+	}
 	// Straight onto the hub: no one has to copy a key by hand. Only this
 	// zone's own token gets here, and only for the address the server chose.
 	if err := services.RegisterTunnelPeer(config.DB, &zone, pub); err != nil {
