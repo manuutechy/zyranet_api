@@ -150,6 +150,11 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		MacAddress: body.Mac,
 		IpAddress:  body.IP,
 	}
+	pollToken, pollHash, perr := newPollToken()
+	if perr != nil {
+		return utils.ErrorResponse(c, "Please try again.", "", fiber.StatusInternalServerError)
+	}
+	payment.PollTokenHash = pollHash
 	if err := config.DB.Create(&payment).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create payment record.", fiber.StatusInternalServerError)
 	}
@@ -182,6 +187,9 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		"transaction_id": start.Reference,
 		"message":        start.Message,
 		"provider":       start.Provider,
+		// Only here: send it on every /hotspot/status poll (X-Poll-Token or
+		// ?poll_token=) with ?mac=&zone_id=, or no session is handed out.
+		"poll_token": pollToken,
 	}, "STK Push initiated successfully.")
 }
 

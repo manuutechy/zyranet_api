@@ -301,3 +301,20 @@ func TestHomeSwitchOffOn(t *testing.T) {
 		t.Errorf("other ISP switch off: %d, want 404", st)
 	}
 }
+
+// A second renew tap within 90 s gets 409 prompt_pending and never the open
+// payment's id.
+func TestHomePublicPay_SecondTapIsPromptPendingWithoutID(t *testing.T) {
+	a := setupHomesTest(t)
+	initMoneyServices(t, "")
+	c, pkg := seedHomeCustomer(t, a.ZoneID, "active", 0)
+	config.DB.Model(&models.Zone{}).Where("id = ?", a.ZoneID).Update("last_seen_at", time.Now())
+	pid, ref := pkg.ID, "ws_CO_home_open_1"
+	open := models.Payment{CustomerID: &c.ID, ZoneID: a.ZoneID, PackageID: &pid, Phone: "254712345678", Amount: 30, Method: "mpesa", Status: "pending", MpesaTransactionID: &ref}
+	config.DB.Create(&open)
+	config.DB.Create(&models.HomeRenewal{PaymentID: open.ID, CustomerID: c.ID, Periods: 1})
+	st, out, raw := homeCall(t, publicHomeApp(), "POST", fmt.Sprintf("/public/home/%d/pay", *c.CustomerNo), `{"phone":"0712345678","periods":1}`)
+	if st != 409 || out["code"] != "prompt_pending" || strings.Contains(raw, "payment_id") || strings.Contains(raw, ref) {
+		t.Errorf("second tap: %d %s", st, raw)
+	}
+}

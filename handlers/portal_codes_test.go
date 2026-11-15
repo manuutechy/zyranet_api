@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"io"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -124,8 +126,8 @@ func TestMockSTKFailure_OnlyInMock(t *testing.T) {
 	}
 }
 
-// A poll that says it comes from another device or WiFi than the one that
-// paid gets "paid" but no session token and no router login.
+// The status poll hands out a session token / router login only with the
+// poll_token from the pay response AND the paying device's MAC + zone.
 func TestHotspotStatus_CredentialsOnlyForThePayingDevice(t *testing.T) {
 	setupC2BTestDB(t)
 	initMoneyServices(t, "")
@@ -134,20 +136,69 @@ func TestHotspotStatus_CredentialsOnlyForThePayingDevice(t *testing.T) {
 	pkgID := pkgOfZone(t, a.ZoneID)
 	exp := time.Now().Add(24 * time.Hour)
 	config.DB.Model(&models.Customer{}).Where("id = ?", c.ID).Updates(map[string]interface{}{"status": "active", "expires_at": exp})
+	tok, hash, err := newPollToken()
+	if err != nil || len(tok) < 64 {
+		t.Fatalf("poll token %q %v", tok, err)
+	}
 	ref, rc := "ws_CO_bind_0001", "RBIND00001"
 	config.DB.Create(&models.Payment{ZoneID: a.ZoneID, CustomerID: &c.ID, PackageID: &pkgID, Phone: c.Phone, Amount: 100, Method: "mpesa",
-		Status: "completed", MpesaTransactionID: &ref, MpesaReceiptNumber: &rc, MacAddress: "AA:BB:CC:DD:EE:77"})
+		Status: "completed", MpesaTransactionID: &ref, MpesaReceiptNumber: &rc, MacAddress: "AA:BB:CC:DD:EE:77", PollTokenHash: hash})
 	app := fiber.New()
 	app.Get("/s/:reference", HotspotStatus)
-	for _, q := range []string{"?mac=AA:BB:CC:DD:EE:99", fmt.Sprintf("?zone_id=%d", a.ZoneID+100), fmt.Sprintf("?mac=aa-bb-cc-dd-ee-99&zone_id=%d", a.ZoneID)} {
+	good := fmt.Sprintf("mac=aa-bb-cc-dd-ee-77&zone_id=%d", a.ZoneID)
+	wrongTok := strings.Repeat("0", 64)
+	for name, q := range map[string]string{
+		"nothing":                 "",
+		"missing token":           "?" + good,
+		"wrong token":             "?" + good + "&poll_token=" + wrongTok,
+		"right token, wrong MAC":  fmt.Sprintf("?mac=AA:BB:CC:DD:EE:99&zone_id=%d&poll_token=%s", a.ZoneID, tok),
+		"right token, wrong zone": fmt.Sprintf("?mac=AA:BB:CC:DD:EE:77&zone_id=%d&poll_token=%s", a.ZoneID+100, tok),
+		"right token, no MAC":     fmt.Sprintf("?zone_id=%d&poll_token=%s", a.ZoneID, tok),
+		"right token, no zone":    "?mac=AA:BB:CC:DD:EE:77&poll_token=" + tok,
+	} {
 		st, out := agentCall(t, app, "GET", "/s/"+ref+q, "", "")
-		if st != 200 || out["status"] != "paid" || out["token"] != nil || out["router_login"] != nil {
-			t.Errorf("%s: %d %v — a stranger's poll must get no session", q, st, out)
+		if st != 200 || out["status"] != "paid" || out["token"] != nil || out["router_login"] != nil || out["customer_id"] != nil {
+			t.Errorf("%s: %d %v — must be status only", name, st, out)
 		}
 	}
-	st, out := agentCall(t, app, "GET", fmt.Sprintf("/s/%s?mac=aa-bb-cc-dd-ee-77&zone_id=%d", ref, a.ZoneID), "", "")
-	if st != 200 || out["token"] == nil {
-		t.Errorf("the paying device: %d %v, want a session token", st, out)
+	// All correct: by query, and by the X-Poll-Token header.
+	if st, out := agentCall(t, app, "GET", "/s/"+ref+"?"+good+"&poll_token="+tok, "", ""); st != 200 || out["token"] == nil {
+		t.Errorf("all correct (query): %d %v, want a session token", st, out)
+	}
+	req := httptest.NewRequest("GET", "/s/"+ref+"?"+good, nil)
+	req.Header.Set("X-Poll-Token", tok)
+	resp, _ := app.Test(req, -1)
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(b), `"token"`) {
+		t.Errorf("all correct (header): %d %s", resp.StatusCode, b)
+	}
+}
+
+// The pay response carries the poll_token once; only its hash is stored.
+func TestHotspotPay_ReturnsPollTokenStoresOnlyHash(t *testing.T) {
+	setupC2BTestDB(t)
+	f := newFakeDarajaAPI(t)
+	productionPlatform(t)
+	initMoneyServices(t, f.URL)
+	old := voucherSvcGlobal
+	voucherSvcGlobal = services.NewVoucherService(services.NewSmsService())
+	t.Cleanup(func() { voucherSvcGlobal = old })
+	a := seedISP(t, "a", "", 1)
+	config.DB.Model(&models.Zone{}).Where("id = ?", a.ZoneID).Update("last_seen_at", time.Now())
+	st, out := postJSON(t, HotspotPay, "/pay", fmt.Sprintf(`{"phone":"0712345678","plan_id":"%d","zone_id":"%d","mac":"AA:BB:CC:DD:EE:03"}`, pkgOfZone(t, a.ZoneID), a.ZoneID))
+	tok, _ := out["poll_token"].(string)
+	var p models.Payment
+	config.DB.Last(&p)
+	if st != 200 || len(tok) < 64 || p.PollTokenHash != pollTokenHash(tok) || strings.Contains(p.PollTokenHash, tok) {
+		t.Errorf("pay: %d %v; stored hash %q", st, out, p.PollTokenHash)
+	}
+	st, out = postJSON(t, MpesaStkPush, "/stk", fmt.Sprintf(`{"phone":"0722000111","package_id":%d,"mac":"AA:BB:CC:DD:EE:04"}`, pkgOfZone(t, a.ZoneID)))
+	d, _ := out["data"].(map[string]interface{})
+	tok2, _ := d["poll_token"].(string)
+	var p2 models.Payment
+	config.DB.First(&p2, uint(d["payment_id"].(float64)))
+	if st != 200 || len(tok2) < 64 || p2.PollTokenHash != pollTokenHash(tok2) {
+		t.Errorf("stkpush: %d %v", st, out)
 	}
 }
 

@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	crand "crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -118,6 +122,11 @@ func HotspotPay(c *fiber.Ctx) error {
 		IpAddress:  body.IP,
 	}
 
+	pollToken, pollHash, perr2 := newPollToken()
+	if perr2 != nil {
+		return utils.ErrorResponse(c, "Please try again.", "", fiber.StatusInternalServerError)
+	}
+	payment.PollTokenHash = pollHash
 	if err := config.DB.Create(&payment).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create payment record.", fiber.StatusInternalServerError)
 	}
@@ -143,6 +152,9 @@ func HotspotPay(c *fiber.Ctx) error {
 		"reference": start.Reference,
 		"message":   "STK Push initiated successfully.",
 		"provider":  start.Provider,
+		// Only here, only once: send it back on every status poll
+		// (X-Poll-Token header or ?poll_token=) with ?mac=&zone_id=.
+		"poll_token": pollToken,
 	})
 }
 
@@ -417,20 +429,41 @@ func promptPendingResponse(c *fiber.Ctx) error {
 	})
 }
 
-// pollMatchesPayer: when the poll says which device and WiFi it comes from
-// (?mac=&zone_id=), they must be the ones that started the payment before
-// the poll hands out a session or router login. A poll that sends neither
-// (portals before captive #6) is still answered on the reference alone.
+// newPollToken makes the secret the starting device must show on every
+// status poll: 32 random bytes (hex) out, only its SHA-256 stored.
+func newPollToken() (token, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err = crand.Read(b); err != nil {
+		return "", "", err
+	}
+	token = hex.EncodeToString(b)
+	return token, pollTokenHash(token), nil
+}
+
+func pollTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// pollMatchesPayer: before the status poll hands out a session token, cookie
+// or router login, it must show ALL of: the poll_token from the pay response
+// (header X-Poll-Token or ?poll_token=), and the MAC + zone_id that started
+// the payment (?mac=&zone_id=). The reference alone is not enough, nor is a
+// MAC (anyone on the same WiFi can see it). Missing or wrong → status only.
 func pollMatchesPayer(c *fiber.Ctx, p *models.Payment) bool {
-	if z := strings.TrimSpace(c.Query("zone_id")); z != "" && z != fmt.Sprint(p.ZoneID) {
+	tok := strings.TrimSpace(c.Get("X-Poll-Token"))
+	if tok == "" {
+		tok = strings.TrimSpace(c.Query("poll_token"))
+	}
+	if tok == "" || p.PollTokenHash == "" ||
+		subtle.ConstantTimeCompare([]byte(pollTokenHash(tok)), []byte(p.PollTokenHash)) != 1 {
 		return false
 	}
-	if m := strings.TrimSpace(c.Query("mac")); m != "" {
-		got, ok1 := services.NormalizeMAC(m)
-		want, ok2 := services.NormalizeMAC(p.MacAddress)
-		if !ok1 || !ok2 || got != want {
-			return false
-		}
+	z := strings.TrimSpace(c.Query("zone_id"))
+	if z == "" || z != fmt.Sprint(p.ZoneID) {
+		return false
 	}
-	return true
+	got, ok1 := services.NormalizeMAC(c.Query("mac"))
+	want, ok2 := services.NormalizeMAC(p.MacAddress)
+	return ok1 && ok2 && got == want
 }
