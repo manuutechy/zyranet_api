@@ -193,11 +193,11 @@ func (s *MikroTikScriptService) GenerateScript(zoneID uint) (string, string, err
 	// Automated Ghost Device Garbage Collector & Memory Protection
 	sb.WriteString("# --- Automated Garbage Collection & Memory Overload Protection ---\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-gc\"] } on-error={}\n")
-	sb.WriteString(":do { /system script add name=zyranet-gc source=\"/ip hotspot host remove [find unauthorized=yes idle-time>5m]; /ip hotspot cookie remove [find expires-in<0s]\" comment=\"Zyra Net Ghost Device GC\" } on-error={}\n")
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-gc source=\"%s\" comment=\"Zyra Net Ghost Device GC\" } on-error={}\n", rosEscape(gcScriptSource)))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-gc-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-gc-sched interval=5m on-event=zyranet-gc comment=\"Zyra Net GC Scheduler\" } on-error={}\n\n")
 	sb.WriteString(":do { /system script remove [find name=\"zyranet-memprotect\"] } on-error={}\n")
-	sb.WriteString(":do { /system script add name=zyranet-memprotect source=\":if ([/system resource get cpu-load] > 85) do={ /ip dns cache flush; /ip hotspot host remove [find unauthorized=yes] }\" comment=\"Zyra Net CPU & Memory Overload Guard\" } on-error={}\n")
+	sb.WriteString(fmt.Sprintf(":do { /system script add name=zyranet-memprotect source=\"%s\" comment=\"Zyra Net CPU & Memory Overload Guard\" } on-error={}\n", rosEscape(memProtectSource)))
 	sb.WriteString(":do { /system scheduler remove [find name=\"zyranet-memprotect-sched\"] } on-error={}\n")
 	sb.WriteString(":do { /system scheduler add name=zyranet-memprotect-sched interval=2m on-event=zyranet-memprotect comment=\"Zyra Net Overload Scheduler\" } on-error={}\n\n")
 
@@ -347,6 +347,13 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/auth-page/%d\" dst-path=\"hotspot/zyra-login.html\" %s } on-error={}\n\n", zone.ID, fetchSecurity(&zone)))
 	}
 
+	// Housekeeping scripts: routers set up before 15 Nov 2026 have RouterOS 6
+	// sources ("unauthorized=yes") that error every run on RouterOS 7. Written
+	// only when different.
+	for _, sc := range []struct{ name, src string }{{"zyranet-gc", gcScriptSource}, {"zyranet-memprotect", memProtectSource}} {
+		sb.WriteString(fmt.Sprintf(":do { :local i [/system script find name=\"%s\"]; :if ([:len $i] > 0) do={ :if ([/system script get $i source] != \"%s\") do={ /system script set $i source=\"%s\" } } } on-error={}\n", sc.name, rosEscape(sc.src), rosEscape(sc.src)))
+	}
+
 	// Auto-upgrade heartbeat script to push real live telemetry metrics
 	sb.WriteString("# --- Auto-Upgrade Live Telemetry Heartbeat ---\n")
 	sb.WriteString(fmt.Sprintf(":do { /system script set [find name=\"zyranet-heartbeat\"] source=\"%s\" } on-error={}\n\n", heartbeatSource(&zone)))
@@ -427,6 +434,13 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 	writeTunnel(&sb, &zone)
 	return sb.String(), nil
 }
+
+// Housekeeping script sources (RouterOS 7: hosts not logged in are
+// authorized=no; "unauthorized=yes" was RouterOS 6 and errors on 7).
+const (
+	gcScriptSource   = `/ip hotspot host remove [find where authorized=no and idle-time>5m]; /ip hotspot cookie remove [find where expires-in<0s]`
+	memProtectSource = `:if ([/system resource get cpu-load] > 85) do={ /ip dns cache flush; /ip hotspot host remove [find where authorized=no] }`
+)
 
 // Tunnel hub (munch2 wg0). Overridable for another server.
 func wgServerPublicKey() string {

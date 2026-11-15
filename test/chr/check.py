@@ -120,6 +120,15 @@ check("management accept is the first ordinary input rule", bool(names) and name
 if "defconf: drop all not coming from LAN" in names and "Zyra Net Remote Access" in names:
     check("accept sits above the factory drop", names.index("Zyra Net Remote Access") < names.index("defconf: drop all not coming from LAN"))
 
+# Housekeeping scripts must run on this RouterOS (the memprotect body is run
+# directly: on an idle lab router its CPU branch never fires).
+out = run(':do { /system script run zyranet-gc; :put GC-OK } on-error={ :put GC-FAIL }')
+check("ghost-device clean-up script runs", "GC-OK" in out, out[-120:])
+src = run(':put [/system script get [find name="zyranet-memprotect"] source]')
+body = src[src.find("do={")+4: src.rfind("}")].strip() if "do={" in src else ""
+out = run(':do { ' + body + ' ; :put MP-OK } on-error={ :put MP-FAIL }') if body else "no body"
+check("overload guard's clean-up runs", "MP-OK" in out, (body[:80] + " -> " + out[-80:]))
+
 # --- idempotency: the second sync must not rebuild things ---
 if sync2_changes is not None:
     check("second sync changes nothing that matters", sync2_changes == 0, f"{sync2_changes} config changes")
