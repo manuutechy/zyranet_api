@@ -535,13 +535,14 @@ func AgentHandoverStore(c *fiber.Ctx) error {
 		Reference      string `json:"reference"`
 		Note           string `json:"note"`
 		IdempotencyKey string `json:"idempotency_key"`
+		AsFloat        bool   `json:"as_float"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return utils.ErrorResponse(c, "Invalid request body.", "", fiber.StatusBadRequest)
 	}
 	entry, replay, err := services.RecordHandover(config.DB, agentActor(c), services.AgentHandoverRequest{
 		AgentID: agent.ID, AmountCents: body.AmountCents, Method: body.Method, Reference: body.Reference,
-		Note: body.Note, Key: idempotencyKey(c, body.IdempotencyKey),
+		Note: body.Note, Key: idempotencyKey(c, body.IdempotencyKey), AsFloat: body.AsFloat,
 	})
 	if err != nil {
 		return ledgerFail(c, err)

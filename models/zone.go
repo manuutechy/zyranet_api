@@ -89,6 +89,11 @@ type Zone struct {
 	// tunnel and the server's API login, so routers behind NAT can be read
 	// live. Nil = no tunnel (the router is reached at RouterIP, if at all).
 	TunnelIP *string `gorm:"size:45" json:"tunnel_ip"`
+	// TunnelPubKey is the router's WireGuard public key as it last reported
+	// it; TunnelPeerAt is when that key was added to the hub. Both set = the
+	// tunnel is wired at both ends.
+	TunnelPubKey *string    `gorm:"size:64" json:"-"`
+	TunnelPeerAt *time.Time `json:"tunnel_peer_at"`
 
 	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

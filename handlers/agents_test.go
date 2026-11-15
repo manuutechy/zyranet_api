@@ -115,7 +115,7 @@ func TestAgentHandover_ParallelSameKeyRecordsOnce(t *testing.T) {
 	_, owner := staffUser(t, a.OrgID, "super_admin")
 	id := newAgent(t, app, owner, a.ZoneID, "")
 
-	body := `{"amount_cents":25000,"method":"cash","note":"Friday cash","idempotency_key":"handover-key-0001"}`
+	body := `{"amount_cents":25000,"method":"cash","note":"Friday cash","idempotency_key":"handover-key-0001","as_float":true}`
 	var wg sync.WaitGroup
 	statuses := make([]int, 12)
 	entryIDs := make([]float64, 12)
@@ -173,7 +173,7 @@ func TestAgentHandover_ParallelDifferentKeysAllCount(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			body := fmt.Sprintf(`{"amount_cents":1050,"method":"cash","idempotency_key":"k-parallel-%04d"}`, i)
+			body := fmt.Sprintf(`{"amount_cents":1050,"method":"cash","idempotency_key":"k-parallel-%04d","as_float":true}`, i)
 			if st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, body); st != 201 {
 				t.Errorf("handover %d: %d %v", i, st, out)
 			}
@@ -311,7 +311,7 @@ func TestAgentIssue_CreditLimitFloatAndUpfront(t *testing.T) {
 		t.Errorf("float with none: status %d, want 422", st)
 	}
 	// Agent pays 1,500: clears 990, leaves 510 float; 5 x 90 = 450 fits.
-	agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":150000,"method":"mpesa","reference":"SJK1ABC2DE","idempotency_key":"pay-key-0001"}`)
+	agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":150000,"method":"mpesa","reference":"SJK1ABC2DE","idempotency_key":"pay-key-0001","as_float":true}`)
 	if st, out := issue(5, "float", "float-key-02", ""); st != 201 {
 		t.Errorf("issue from float: %d %v", st, out)
 	}
@@ -319,7 +319,7 @@ func TestAgentIssue_CreditLimitFloatAndUpfront(t *testing.T) {
 		t.Errorf("balance %d, want -6000 (KES 60 float left)", got)
 	}
 	// The same M-Pesa code can't be recorded twice.
-	if st, _ := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":150000,"method":"mpesa","reference":"sjk1abc2de","idempotency_key":"pay-key-0002"}`); st != 409 {
+	if st, _ := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":150000,"method":"mpesa","reference":"sjk1abc2de","idempotency_key":"pay-key-0002","as_float":true}`); st != 409 {
 		t.Errorf("duplicate M-Pesa code: status %d, want 409", st)
 	}
 	// Upfront: issue and payment together, balance unchanged.
@@ -479,7 +479,7 @@ func TestAgentReverse_OnceAndOnlyHandoversOrAdjustments(t *testing.T) {
 	app, a, _ := setupAgentTest(t)
 	_, owner := staffUser(t, a.OrgID, "super_admin")
 	id := newAgent(t, app, owner, a.ZoneID, "")
-	_, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":5000,"method":"cash","idempotency_key":"rev-pay-0001"}`)
+	_, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":5000,"method":"cash","idempotency_key":"rev-pay-0001","as_float":true}`)
 	hid := int(out["data"].(map[string]interface{})["entry"].(map[string]interface{})["id"].(float64))
 
 	// Receipt
@@ -612,5 +612,37 @@ func TestAgentStatement_Math(t *testing.T) {
 	}
 	if st, _ := agentCall(t, app, "GET", fmt.Sprintf("/a/agents/%d/statement?from=2026-10-07&to=2026-10-01", id), owner, ""); st != 422 {
 		t.Errorf("reversed date range: status %d, want 422", st)
+	}
+}
+
+// A handover bigger than what the agent owes is refused unless the owner
+// confirms the extra is float; up to what is owed it goes straight through.
+func TestAgentHandover_OverpaymentNeedsFloatConfirm(t *testing.T) {
+	app, a, _ := setupAgentTest(t)
+	_, owner := staffUser(t, a.OrgID, "super_admin")
+	id := newAgent(t, app, owner, a.ZoneID, "")
+	// Owes nothing yet: any handover is "more than owed".
+	st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":5000000,"method":"cash","idempotency_key":"over-0001"}`)
+	if st != 409 || !strings.Contains(fmt.Sprint(out["error"]), "more than") {
+		t.Fatalf("typo-sized handover must be refused: %d %v", st, out)
+	}
+	var n int64
+	config.DB.Model(&models.AgentLedgerEntry{}).Where("agent_id = ? AND type = ?", id, models.AgentEntryHandover).Count(&n)
+	if n != 0 {
+		t.Fatalf("refused handover left %d ledger entries", n)
+	}
+	// Owner adds what the agent owes (an adjustment), then pays exactly that: fine without the flag.
+	if st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/adjustments", id), owner, `{"amount_cents":30000,"note":"owes for stock","idempotency_key":"over-adj-01"}`); st != 201 {
+		t.Fatalf("adjustment: %d %v", st, out)
+	}
+	if st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":30001,"method":"cash","idempotency_key":"over-0002"}`); st != 409 {
+		t.Fatalf("1 cent over must be refused: %d %v", st, out)
+	}
+	if st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":30000,"method":"cash","idempotency_key":"over-0003"}`); st != 201 {
+		t.Fatalf("paying exactly what is owed: %d %v", st, out)
+	}
+	// Paid ahead on purpose.
+	if st, out := agentCall(t, app, "POST", fmt.Sprintf("/a/agents/%d/handovers", id), owner, `{"amount_cents":10000,"method":"cash","idempotency_key":"over-0004","as_float":true}`); st != 201 {
+		t.Fatalf("confirmed float: %d %v", st, out)
 	}
 }

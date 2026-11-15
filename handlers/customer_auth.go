@@ -55,8 +55,9 @@ func InitCustomerAuthSMS(sms *services.SmsService) {
 // RequestOtp sends a 4-digit OTP to the customer's phone.
 func RequestOtp(c *fiber.Ctx) error {
 	var body struct {
-		Phone string `json:"phone"`
-		Name  string `json:"name"`
+		Phone  string `json:"phone"`
+		Name   string `json:"name"`
+		ZoneID string `json:"zone_id"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Phone == "" {
 		return utils.ErrorResponse(c, "Phone number required.", "Validation failed.", fiber.StatusUnprocessableEntity)
@@ -78,16 +79,11 @@ func RequestOtp(c *fiber.Ctx) error {
 	cleanName := strings.TrimSpace(body.Name)
 	if err := config.DB.Where("phone = ?", phone).First(&customer).Error; err != nil {
 		// Auto-register
-		var zone models.Zone
-		var pkg models.Package
-		config.DB.First(&zone)
-		config.DB.Where("type = ?", "hotspot").First(&pkg)
-		if pkg.ID == 0 {
-			config.DB.First(&pkg)
+		zonePtr, pkgPtr := signupTarget(c, body.ZoneID)
+		if zonePtr == nil || pkgPtr == nil {
+			return utils.ErrorResponse(c, signupNeedsZoneMsg, "Setup required.", fiber.StatusBadRequest)
 		}
-		if zone.ID == 0 || pkg.ID == 0 {
-			return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
-		}
+		zone, pkg := *zonePtr, *pkgPtr
 		pppoeUser := "user_" + phone[max(0, len(phone)-6):]
 
 		customerName := cleanName
@@ -231,16 +227,11 @@ func VerifyOtp(c *fiber.Ctx) error {
 
 	var customer models.Customer
 	if err := config.DB.Preload("Package").Preload("Zone").Where("phone = ?", phone).First(&customer).Error; err != nil {
-		var zone models.Zone
-		var pkg models.Package
-		config.DB.First(&zone)
-		config.DB.Where("type = ?", "hotspot").First(&pkg)
-		if pkg.ID == 0 {
-			config.DB.First(&pkg)
+		zonePtr, pkgPtr := signupTarget(c, body.ZoneID)
+		if zonePtr == nil || pkgPtr == nil {
+			return utils.ErrorResponse(c, signupNeedsZoneMsg, "Setup required.", fiber.StatusBadRequest)
 		}
-		if zone.ID == 0 || pkg.ID == 0 {
-			return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
-		}
+		zone, pkg := *zonePtr, *pkgPtr
 		pppoeUser := "user_" + phone[max(0, len(phone)-6):]
 		customer = models.Customer{
 			Name:          "Customer_" + phone[max(0, len(phone)-4):],
@@ -489,22 +480,18 @@ func CustomerAuthByDevice(c *fiber.Ctx) error {
 // M-Pesa code + phone instead.
 func CustomerAuthGuest(c *fiber.Ctx) error {
 	var body struct {
-		Mac string `json:"mac"`
-		IP  string `json:"ip"`
+		Mac    string `json:"mac"`
+		IP     string `json:"ip"`
+		ZoneID string `json:"zone_id"`
 	}
 	c.BodyParser(&body) // mac/ip are optional; an empty body just skips device-binding
 
 	// Find guest package and zone
-	var zone models.Zone
-	var pkg models.Package
-	config.DB.First(&zone)
-	config.DB.Where("type = ?", "hotspot").First(&pkg)
-	if pkg.ID == 0 {
-		config.DB.First(&pkg)
+	zonePtr, pkgPtr := signupTarget(c, body.ZoneID)
+	if zonePtr == nil || pkgPtr == nil {
+		return utils.ErrorResponse(c, signupNeedsZoneMsg, "Setup required.", fiber.StatusBadRequest)
 	}
-	if zone.ID == 0 || pkg.ID == 0 {
-		return utils.ErrorResponse(c, "System not configured. Please create a Zone and Package first.", "Setup required.", fiber.StatusBadRequest)
-	}
+	zone, pkg := *zonePtr, *pkgPtr
 
 	// Create a unique guest account number
 	var count int64

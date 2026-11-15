@@ -541,7 +541,7 @@ func BuildAreaMoney(db *gorm.DB, orgID uint, zoneIDs []uint, areas []models.Area
 		var rows []payRow
 		if err := db.Model(&models.Payment{}).
 			Select("zone_id, COALESCE(SUM(amount),0) AS takings, COUNT(*) AS n, COUNT(DISTINCT NULLIF(phone,'')) AS buyers").
-			Where("status = ? AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", ids, start, end).
+			Where("status = ? AND method <> 'credit' AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", ids, start, end).
 			Group("zone_id").Scan(&rows).Error; err != nil {
 			return nil, err
 		}
@@ -569,7 +569,7 @@ func BuildAreaMoney(db *gorm.DB, orgID uint, zoneIDs []uint, areas []models.Area
 		if err := db.Table("payments").
 			Select("zones.area_id AS area_id, COUNT(DISTINCT NULLIF(payments.phone,'')) AS n").
 			Joins("JOIN zones ON zones.id = payments.zone_id").
-			Where("payments.status = ? AND payments.zone_id IN ? AND payments.created_at >= ? AND payments.created_at < ?", "completed", ids, start, end).
+			Where("payments.status = ? AND payments.method <> 'credit' AND payments.zone_id IN ? AND payments.created_at >= ? AND payments.created_at < ?", "completed", ids, start, end).
 			Group("zones.area_id").Scan(&ab).Error; err != nil {
 			return nil, err
 		}
@@ -581,7 +581,7 @@ func BuildAreaMoney(db *gorm.DB, orgID uint, zoneIDs []uint, areas []models.Area
 			areaBuyers[k] = r.N
 		}
 		if err := db.Model(&models.Payment{}).Select("COUNT(DISTINCT NULLIF(phone,''))").
-			Where("status = ? AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", ids, start, end).
+			Where("status = ? AND method <> 'credit' AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", ids, start, end).
 			Scan(&totalBuyers).Error; err != nil {
 			return nil, err
 		}
@@ -631,7 +631,7 @@ func BuildAreaMoney(db *gorm.DB, orgID uint, zoneIDs []uint, areas []models.Area
 			noneIDs = append(noneIDs, z.ZoneID)
 		}
 		if err := db.Model(&models.Payment{}).Select("COUNT(DISTINCT NULLIF(phone,''))").
-			Where("status = ? AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", noneIDs, start, end).
+			Where("status = ? AND method <> 'credit' AND zone_id IN ? AND created_at >= ? AND created_at < ?", "completed", noneIDs, start, end).
 			Scan(&none.PayingCustomers).Error; err != nil {
 			return nil, err
 		}

@@ -37,7 +37,7 @@ func PlatformOverview(c *fiber.Ctx) error {
 	config.DB.Model(&models.Customer{}).Where("status = ?", "active").Count(&totalClients)
 
 	var totalRevenue float64
-	config.DB.Model(&models.Payment{}).Where("status = ?", "completed").
+	config.DB.Model(&models.Payment{}).Where("status = ? AND method <> 'credit'", "completed").
 		Select("COALESCE(SUM(amount), 0)").Scan(&totalRevenue)
 
 	var totalInvoiced float64
@@ -61,16 +61,16 @@ func PlatformOverview(c *fiber.Ctx) error {
 
 	var todayRevenue float64
 	var todayTransactions int64
-	config.DB.Model(&models.Payment{}).Where("status = ? AND created_at >= ?", "completed", startOfToday).
+	config.DB.Model(&models.Payment{}).Where("method <> 'credit' AND status = ? AND created_at >= ?", "completed", startOfToday).
 		Select("COALESCE(SUM(amount), 0)").Scan(&todayRevenue)
-	config.DB.Model(&models.Payment{}).Where("status = ? AND created_at >= ?", "completed", startOfToday).
+	config.DB.Model(&models.Payment{}).Where("method <> 'credit' AND status = ? AND created_at >= ?", "completed", startOfToday).
 		Count(&todayTransactions)
 
 	var thisMonthRevenue float64
 	var thisMonthTransactions int64
-	config.DB.Model(&models.Payment{}).Where("status = ? AND created_at >= ?", "completed", startOfMonth).
+	config.DB.Model(&models.Payment{}).Where("method <> 'credit' AND status = ? AND created_at >= ?", "completed", startOfMonth).
 		Select("COALESCE(SUM(amount), 0)").Scan(&thisMonthRevenue)
-	config.DB.Model(&models.Payment{}).Where("status = ? AND created_at >= ?", "completed", startOfMonth).
+	config.DB.Model(&models.Payment{}).Where("method <> 'credit' AND status = ? AND created_at >= ?", "completed", startOfMonth).
 		Count(&thisMonthTransactions)
 
 	// 7-day sales breakdown
@@ -83,10 +83,10 @@ func PlatformOverview(c *fiber.Ctx) error {
 		var dayAmount float64
 		var dayCount int64
 		config.DB.Model(&models.Payment{}).
-			Where("status = ? AND created_at >= ? AND created_at < ?", "completed", dayStart, dayEnd).
+			Where("method <> 'credit' AND status = ? AND created_at >= ? AND created_at < ?", "completed", dayStart, dayEnd).
 			Select("COALESCE(SUM(amount), 0)").Scan(&dayAmount)
 		config.DB.Model(&models.Payment{}).
-			Where("status = ? AND created_at >= ? AND created_at < ?", "completed", dayStart, dayEnd).
+			Where("method <> 'credit' AND status = ? AND created_at >= ? AND created_at < ?", "completed", dayStart, dayEnd).
 			Count(&dayCount)
 
 		dailySales[6-i] = DailySale{

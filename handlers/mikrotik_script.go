@@ -163,14 +163,10 @@ func PublicZoneWgKey(c *fiber.Ctx) error {
 	if !wgKeyRe.MatchString(pub) {
 		return c.SendStatus(fiber.StatusUnprocessableEntity)
 	}
-	line := "pub=" + pub + " ip=" + c.Query("ip")
-	wifiReportMu.Lock()
-	key := zone.ID + 1_000_000
-	changed := wifiReportLast[key] != line
-	wifiReportLast[key] = line
-	wifiReportMu.Unlock()
-	if changed {
-		log.Printf("[wg-key] zone %d (%s): %s", zone.ID, zone.Name, line)
+	// Straight onto the hub: no one has to copy a key by hand. Only this
+	// zone's own token gets here, and only for the address the server chose.
+	if err := services.RegisterTunnelPeer(config.DB, &zone, pub); err != nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable) // the router tries again next minute
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
@@ -253,6 +249,10 @@ func PublicZoneSync(c *fiber.Ctx) error {
 	if !zoneTokenAuthorized(c, &zone) {
 		return c.SendString("# Zone not found\n")
 	}
+
+	// First sync of a new router: give it a tunnel address and the server's
+	// API login, so the script below already sets the tunnel up.
+	services.EnsureZoneTunnel(config.DB, &zone)
 
 	content, err := scriptSvc.GenerateSyncScript(zone.ID)
 	if err != nil {

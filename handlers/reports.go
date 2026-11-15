@@ -42,7 +42,7 @@ func ReportRevenue(c *fiber.Ctx) error {
 	}
 
 	query := config.DB.Model(&models.Payment{}).
-		Where("status = ?", "completed").
+		Where("status = ? AND method <> 'credit'", "completed"). // credit spends were counted when the money came in
 		Where("zone_id IN (?)", orgZoneIDs).
 		Where("created_at >= ? AND created_at < ?", start, end)
 
@@ -67,8 +67,8 @@ func ReportRevenue(c *fiber.Ctx) error {
 			"COUNT(id) as count, "+
 			"COALESCE(SUM(CASE WHEN method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) as mpesa_total, "+
 			"COALESCE(SUM(CASE WHEN method = 'mpesa_c2b' THEN amount ELSE 0 END), 0) as c2b_total, "+
-			"COALESCE(SUM(CASE WHEN method IN ('cash', 'manual', 'bank') THEN amount ELSE 0 END), 0) as cash_total").
-		Where("status = ?", "completed").
+										"COALESCE(SUM(CASE WHEN method IN ('cash', 'manual', 'bank') THEN amount ELSE 0 END), 0) as cash_total").
+		Where("status = ? AND method <> 'credit'", "completed"). // credit spends were counted when the money came in
 		Where("zone_id IN (?)", orgZoneIDs).
 		Where("created_at >= ? AND created_at < ?", start, end)
 	if zoneID != "" {
@@ -220,7 +220,7 @@ func ReportZones(c *fiber.Ctx) error {
 		var activeCustomers, vouchersSold, activeSessions int64
 
 		config.DB.Model(&models.Payment{}).
-			Where("zone_id = ? AND status = ?", zone.ID, "completed").
+			Where("zone_id = ? AND status = ? AND method <> 'credit'", zone.ID, "completed").
 			Select("COALESCE(SUM(amount), 0)").Scan(&revenue)
 
 		config.DB.Model(&models.Customer{}).
@@ -312,7 +312,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue Today
 		revTodayQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.created_at < ? AND payments.zone_id IN (?)", t, "completed", today, tomorrow, orgZoneIDs)
+			Where("packages.type = ? AND payments.method <> 'credit' AND payments.status = ? AND payments.created_at >= ? AND payments.created_at < ? AND payments.zone_id IN (?)", t, "completed", today, tomorrow, orgZoneIDs)
 		if zoneID != "" {
 			revTodayQuery = revTodayQuery.Where("payments.zone_id = ?", zoneID)
 		}
@@ -321,7 +321,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue This Week
 		revWeekQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", weekStart, orgZoneIDs)
+			Where("packages.type = ? AND payments.method <> 'credit' AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", weekStart, orgZoneIDs)
 		if zoneID != "" {
 			revWeekQuery = revWeekQuery.Where("payments.zone_id = ?", zoneID)
 		}
@@ -330,7 +330,7 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		// Revenue This Month
 		revMonthQuery := config.DB.Model(&models.Payment{}).
 			Joins("JOIN packages ON packages.id = payments.package_id").
-			Where("packages.type = ? AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", monthStart, orgZoneIDs)
+			Where("packages.type = ? AND payments.method <> 'credit' AND payments.status = ? AND payments.created_at >= ? AND payments.zone_id IN (?)", t, "completed", monthStart, orgZoneIDs)
 		if zoneID != "" {
 			revMonthQuery = revMonthQuery.Where("payments.zone_id = ?", zoneID)
 		}

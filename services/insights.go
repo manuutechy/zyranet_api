@@ -253,7 +253,7 @@ func BuildInsights(db *gorm.DB, scope InsightsScope, fromDay, toDay time.Time, n
 	var all []insPay
 	if err := db.Model(&models.Payment{}).
 		Select("phone, amount, method, provider, status, status_reason, package_id, created_at").
-		Where("zone_id IN (?)", zoneIDs).
+		Where("zone_id IN (?) AND method <> 'credit'", zoneIDs). // credit spends aren't money in
 		Where("created_at >= ? AND created_at < ?", dbT(prevStart), dbT(end)).
 		Order("created_at ASC").
 		Find(&all).Error; err != nil {
