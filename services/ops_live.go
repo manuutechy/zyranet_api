@@ -287,16 +287,16 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		WCount      int64
 	}
 	if err := db.Raw(`SELECT
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @t0 THEN amount ELSE 0 END), 0) AS today_amount,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @t0 THEN 1 ELSE 0 END), 0) AS today_count,
-		COUNT(DISTINCT CASE WHEN status = 'completed' AND created_at >= @t0 THEN NULLIF(phone, '') END) AS buyers,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @t0 THEN amount ELSE 0 END), 0) AS today_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @t0 THEN 1 ELSE 0 END), 0) AS today_count,
+		COUNT(DISTINCT CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @t0 THEN NULLIF(phone, '') END) AS buyers,
 		COALESCE(SUM(CASE WHEN status = 'failed' AND created_at >= @t0 THEN 1 ELSE 0 END), 0) AS failed,
 		COALESCE(SUM(CASE WHEN status = 'pending' AND created_at >= @t0 THEN 1 ELSE 0 END), 0) AS pending,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @y0 AND created_at < @ynow THEN amount ELSE 0 END), 0) AS y_amount,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @y0 AND created_at < @ynow THEN 1 ELSE 0 END), 0) AS y_count,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @y0 AND created_at < @t0 THEN amount ELSE 0 END), 0) AS y_full,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @w0 AND created_at < @wnow THEN amount ELSE 0 END), 0) AS w_amount,
-		COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= @w0 AND created_at < @wnow THEN 1 ELSE 0 END), 0) AS w_count
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @y0 AND created_at < @ynow THEN amount ELSE 0 END), 0) AS y_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @y0 AND created_at < @ynow THEN 1 ELSE 0 END), 0) AS y_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @y0 AND created_at < @t0 THEN amount ELSE 0 END), 0) AS y_full,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @w0 AND created_at < @wnow THEN amount ELSE 0 END), 0) AS w_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' AND created_at >= @w0 AND created_at < @wnow THEN 1 ELSE 0 END), 0) AS w_count
 		FROM payments
 		WHERE zone_id IN @zones
 		  AND ((created_at >= @w0 AND created_at < @wnow) OR created_at >= @y0)`,
@@ -356,7 +356,7 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		CreatedAt time.Time
 	}
 	if err := db.Raw(`SELECT zone_id, amount, created_at FROM payments
-		WHERE zone_id IN ? AND status = 'completed' AND created_at >= ?`, zoneIDs, dbT(y0)).Scan(&rows).Error; err != nil {
+		WHERE zone_id IN ? AND status = 'completed' AND method <> 'credit' AND created_at >= ?`, zoneIDs, dbT(y0)).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, r := range rows {

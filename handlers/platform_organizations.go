@@ -53,7 +53,7 @@ func organizationSummary(org models.Organization) OrganizationSummary {
 	config.DB.Model(&models.Zone{}).Where("organization_id = ? AND last_status = ?", org.ID, "online").Count(&s.ZonesOnline)
 	config.DB.Model(&models.Zone{}).Where("organization_id = ? AND last_status = ?", org.ID, "offline").Count(&s.ZonesOffline)
 	config.DB.Model(&models.Customer{}).Where("zone_id IN (?) AND status = ?", zoneIDs, "active").Count(&s.ActiveCustomers)
-	config.DB.Model(&models.Payment{}).Where("zone_id IN (?) AND status = ?", zoneIDs, "completed").
+	config.DB.Model(&models.Payment{}).Where("zone_id IN (?) AND status = ? AND method <> 'credit'", zoneIDs, "completed").
 		Select("COALESCE(SUM(amount), 0)").Scan(&s.TotalRevenue)
 
 	return s

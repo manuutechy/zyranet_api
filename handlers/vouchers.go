@@ -64,6 +64,13 @@ func VoucherGenerate(c *fiber.Ctx) error {
 	if claims.Role == "finance" {
 		return utils.ErrorResponse(c, "Unauthorized to generate vouchers.", "", fiber.StatusForbidden)
 	}
+	// Vouchers made here are free: nothing is owed for them. An agent's
+	// vouchers must come as a batch issued to them (Agents › Issue), which
+	// puts the face value on their statement. Only the owner and zone
+	// managers make loose vouchers, and each batch is written to the audit log.
+	if claims.Role != "super_admin" && claims.Role != "zone_manager" {
+		return utils.ErrorResponse(c, "Ask the owner for a voucher batch. Vouchers you sell are issued to you and counted on your statement.", "Forbidden.", fiber.StatusForbidden)
+	}
 
 	var body struct {
 		ZoneID     uint   `json:"zone_id"`
@@ -128,6 +135,12 @@ func VoucherGenerate(c *fiber.Ctx) error {
 
 	// Vouchers are not pushed to the router as users any more: a voucher is
 	// redeemed on the portal, which gives that device its own router login.
+
+	// Who gave away what: free vouchers are money not collected.
+	auditAgent(c, "vouchers_generated_free", "Voucher", createdVouchers[0].ID, fiber.Map{
+		"zone_id": body.ZoneID, "package_id": body.PackageID, "package": pkg.Name, "quantity": body.Quantity,
+		"face_value_each": pkg.Price, "face_value_total": pkg.Price * float64(body.Quantity), "usage_limit": body.UsageLimit,
+	})
 
 	if body.Quantity == 1 {
 		return utils.SuccessResponse(c, createdVouchers[0], "Voucher generated successfully.", fiber.StatusCreated)

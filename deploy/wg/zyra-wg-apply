@@ -1,0 +1,49 @@
+#!/bin/bash
+# Zyra Net tunnel hub: make wg0's peers match /var/lib/zyranet-wg/peers.
+#
+# The API (user zyranet, no privileges) writes that file: one line per router,
+# "<wireguard public key> <tunnel address>". This script runs as root — from
+# zyra-wg-peers.path whenever the file changes, and from wg0's PostUp at boot —
+# checks every line, applies the list, and writes the SHA-256 of what it
+# applied to peers.applied (the API waits for that receipt).
+#
+# Anything unexpected → nothing is changed and no receipt is written.
+# Install: see deploy/wg/README.md.
+set -euo pipefail
+DIR=/var/lib/zyranet-wg
+F="$DIR/peers"
+IFACE=wg0
+KEY_RE='^[A-Za-z0-9+/]{43}=$'
+IP_RE='^10\.200\.0\.([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$'
+
+[ -f "$F" ] && [ ! -L "$F" ] || exit 0
+[ "$(stat -c %s "$F")" -le 65536 ] || { echo "zyra-wg-apply: peers file too big" >&2; exit 1; }
+
+# One private copy: what is checked is exactly what is applied and hashed.
+COPY=$(mktemp /run/zyra-wg-peers.XXXXXX)
+trap 'rm -f "$COPY"' EXIT
+cat "$F" > "$COPY"
+
+declare -A want=() seen_ip=()
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -z "$line" ] && continue
+  key=${line%% *}; ip=${line#* }
+  if [ "$key $ip" != "$line" ] || ! [[ $key =~ $KEY_RE ]] || ! [[ $ip =~ $IP_RE ]]; then
+    echo "zyra-wg-apply: bad line, nothing changed" >&2; exit 1
+  fi
+  if [ -n "${want[$key]:-}" ] || [ -n "${seen_ip[$ip]:-}" ]; then
+    echo "zyra-wg-apply: duplicate key or address, nothing changed" >&2; exit 1
+  fi
+  want[$key]=$ip; seen_ip[$ip]=1
+done < "$COPY"
+
+for key in "${!want[@]}"; do
+  wg set "$IFACE" peer "$key" allowed-ips "${want[$key]}/32"
+done
+for key in $(wg show "$IFACE" peers); do
+  [ -n "${want[$key]:-}" ] || wg set "$IFACE" peer "$key" remove
+done
+
+sha256sum < "$COPY" | cut -d' ' -f1 > "$DIR/peers.applied.new"
+mv -f "$DIR/peers.applied.new" "$DIR/peers.applied"
+echo "zyra-wg-apply: ${#want[@]} router peer(s) on $IFACE"

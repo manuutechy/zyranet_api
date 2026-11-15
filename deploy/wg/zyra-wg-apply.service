@@ -1,0 +1,7 @@
+[Unit]
+Description=Zyra Net tunnel hub: apply router peers to wg0
+After=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zyra-wg-apply

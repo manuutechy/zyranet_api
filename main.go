@@ -92,6 +92,7 @@ func main() {
 	if err := services.MigrateInstalls(config.DB); err != nil { // home installs + stock tables, users.crew_id
 		log.Fatalf("[database] installs migrate failed: %v", err)
 	}
+	services.ReconcileTunnelPeers(config.DB) // router tunnel keys back on the hub after a restart
 
 	// Backfill Organization #1 for the existing single-tenant install, and
 	// assign every pre-existing User/Zone to it. Multi-tenancy is additive:

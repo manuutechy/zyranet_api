@@ -1,0 +1,9 @@
+[Unit]
+Description=Zyra Net tunnel hub: apply router peers when the API updates the list
+
+[Path]
+PathChanged=/var/lib/zyranet-wg/peers
+Unit=zyra-wg-apply.service
+
+[Install]
+WantedBy=multi-user.target

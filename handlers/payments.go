@@ -95,8 +95,8 @@ func PaymentIndex(c *fiber.Ctx) error {
 		ManualCount  int64   `json:"manual_count"`
 	}
 	query.Session(&gorm.Session{}).Select(`
-		COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) AS completed_amount,
-		COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' THEN amount ELSE 0 END), 0) AS completed_amount,
+		COALESCE(SUM(CASE WHEN status = 'completed' AND method <> 'credit' THEN 1 ELSE 0 END), 0) AS completed_count,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN amount ELSE 0 END), 0) AS stk_amount,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') THEN 1 ELSE 0 END), 0) AS stk_count,
 		COALESCE(SUM(CASE WHEN status = 'completed' AND method IN ('mpesa', 'stk') AND provider = 'cyzora' THEN amount ELSE 0 END), 0) AS cyzora_amount,

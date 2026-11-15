@@ -547,6 +547,21 @@ type AgentHandoverRequest struct {
 	Reference   string
 	Note        string
 	Key         string
+	// AsFloat: the owner confirms that anything above what the agent owes is
+	// money paid ahead (float). Without it an overpayment is refused.
+	AsFloat bool
+}
+
+// centsText is cents as "1,250" or "1,250.50" for messages.
+func centsText(c int64) string {
+	whole := fmt.Sprintf("%d", c/100)
+	for i := len(whole) - 3; i > 0; i -= 3 {
+		whole = whole[:i] + "," + whole[i:]
+	}
+	if c%100 != 0 {
+		return fmt.Sprintf("%s.%02d", whole, c%100)
+	}
+	return whole
 }
 
 // RecordHandover records cash or M-Pesa received from an agent, reducing
@@ -565,6 +580,21 @@ func RecordHandover(db *gorm.DB, actor AgentActor, req AgentHandoverRequest) (*m
 	hash := requestHash("handover", req.AgentID, req.AmountCents, req.Method, req.Reference, req.Note)
 
 	entryID, replay, err := runIdempotent(db, actor, req.AgentID, req.Key, "handover", hash, func(tx *gorm.DB, agent *models.Agent) (uint, error) {
+		// More than the agent owes is either a typing slip (50,000 for 5,000)
+		// or money paid ahead. It is only taken as paid-ahead float when the
+		// owner says so; otherwise it is refused with the figures. (The agent
+		// row is locked, so the balance can't move under us.)
+		owed, err := AgentBalance(tx, agent.ID)
+		if err != nil {
+			return 0, err
+		}
+		if owed < 0 {
+			owed = 0
+		}
+		if req.AmountCents > owed && !req.AsFloat {
+			return 0, ledgerErr(409, "That is KES %s more than %s owes (KES %s). If it is money paid ahead, confirm it as float.",
+				centsText(req.AmountCents-owed), agent.Name, centsText(owed))
+		}
 		if req.Method == "mpesa" {
 			var n int64
 			tx.Model(&models.AgentLedgerEntry{}).
