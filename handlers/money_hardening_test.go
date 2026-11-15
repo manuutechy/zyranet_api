@@ -317,16 +317,17 @@ func TestStkPush_SecondTapReusesThePendingPrompt(t *testing.T) {
 	body := fmt.Sprintf(`{"phone":"0712345678","package_id":%d,"mac":"AA:BB:CC:DD:EE:01"}`, pkg.ID)
 	code1, out1 := postJSON(t, MpesaStkPush, "/stk", body)
 	code2, out2 := postJSON(t, MpesaStkPush, "/stk", strings.Replace(body, "0712345678", "254712345678", 1))
-	if code1 != 200 || code2 != 200 {
-		t.Fatalf("status %d / %d", code1, code2)
+	if code1 != 200 || code2 != 409 {
+		t.Fatalf("status %d / %d, want 200 then 409", code1, code2)
 	}
 	d1, _ := out1["data"].(map[string]interface{})
-	d2, _ := out2["data"].(map[string]interface{})
 	if f.stkPushes != 1 {
 		t.Errorf("%d STK prompts sent for two taps within 90s, want 1", f.stkPushes)
 	}
-	if d1["transaction_id"] == nil || d1["transaction_id"] != d2["transaction_id"] || d2["reused"] != true {
-		t.Errorf("second tap should return the first CheckoutRequestID: %v vs %v", d1, d2)
+	// The second tap must NOT get the open payment's reference (it is the key
+	// to the poll that signs the payer in).
+	if d1["transaction_id"] == nil || out2["code"] != "prompt_pending" || strings.Contains(fmt.Sprint(out2), fmt.Sprint(d1["transaction_id"])) {
+		t.Errorf("second tap: %v (first ref %v)", out2, d1["transaction_id"])
 	}
 	if n := count(t, &models.Voucher{}); n != 0 {
 		t.Errorf("%d vouchers created before any payment", n)

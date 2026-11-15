@@ -30,11 +30,12 @@ func TestHotspotPay_SecondTapReusesThePendingPrompt(t *testing.T) {
 	body := fmt.Sprintf(`{"phone":"0712345678","plan_id":"%d","zone_id":"%d","mac":"AA:BB:CC:DD:EE:02"}`, pkg.ID, a.ZoneID)
 	c1, o1 := postJSON(t, HotspotPay, "/pay", body)
 	c2, o2 := postJSON(t, HotspotPay, "/pay", strings.Replace(body, "0712345678", "254712345678", 1))
-	if c1 != 200 || c2 != 200 {
-		t.Fatalf("status %d %v / %d %v", c1, o1, c2, o2)
+	if c1 != 200 || c2 != 409 {
+		t.Fatalf("status %d %v / %d %v, want 200 then 409", c1, o1, c2, o2)
 	}
-	if f.stkPushes != 1 || o1["reference"] == nil || o1["reference"] != o2["reference"] || o2["reused"] != true {
-		t.Errorf("%d prompts; second tap %v should reuse %v", f.stkPushes, o2, o1["reference"])
+	if f.stkPushes != 1 || o1["reference"] == nil || o2["code"] != "prompt_pending" || o2["reference"] != nil ||
+		strings.Contains(fmt.Sprint(o2), fmt.Sprint(o1["reference"])) {
+		t.Errorf("%d prompts; second tap %v must be prompt_pending without the reference %v", f.stkPushes, o2, o1["reference"])
 	}
 	postJSON(t, HotspotPay, "/pay", strings.Replace(body, "0712345678", "0799000111", 1))
 	if f.stkPushes != 1 {
@@ -121,4 +122,37 @@ func TestMockSTKFailure_OnlyInMock(t *testing.T) {
 			t.Errorf("magic phone worked with MPESA_ENV=%q APP_ENV=%q", env[0], env[1])
 		}
 	}
+}
+
+// A poll that says it comes from another device or WiFi than the one that
+// paid gets "paid" but no session token and no router login.
+func TestHotspotStatus_CredentialsOnlyForThePayingDevice(t *testing.T) {
+	setupC2BTestDB(t)
+	initMoneyServices(t, "")
+	a := seedISP(t, "a", "", 1)
+	c := seedCustomer(t, a.ZoneID, "Payer", "254700000077", "ZYR#77")
+	pkgID := pkgOfZone(t, a.ZoneID)
+	exp := time.Now().Add(24 * time.Hour)
+	config.DB.Model(&models.Customer{}).Where("id = ?", c.ID).Updates(map[string]interface{}{"status": "active", "expires_at": exp})
+	ref, rc := "ws_CO_bind_0001", "RBIND00001"
+	config.DB.Create(&models.Payment{ZoneID: a.ZoneID, CustomerID: &c.ID, PackageID: &pkgID, Phone: c.Phone, Amount: 100, Method: "mpesa",
+		Status: "completed", MpesaTransactionID: &ref, MpesaReceiptNumber: &rc, MacAddress: "AA:BB:CC:DD:EE:77"})
+	app := fiber.New()
+	app.Get("/s/:reference", HotspotStatus)
+	for _, q := range []string{"?mac=AA:BB:CC:DD:EE:99", fmt.Sprintf("?zone_id=%d", a.ZoneID+100), fmt.Sprintf("?mac=aa-bb-cc-dd-ee-99&zone_id=%d", a.ZoneID)} {
+		st, out := agentCall(t, app, "GET", "/s/"+ref+q, "", "")
+		if st != 200 || out["status"] != "paid" || out["token"] != nil || out["router_login"] != nil {
+			t.Errorf("%s: %d %v — a stranger's poll must get no session", q, st, out)
+		}
+	}
+	st, out := agentCall(t, app, "GET", fmt.Sprintf("/s/%s?mac=aa-bb-cc-dd-ee-77&zone_id=%d", ref, a.ZoneID), "", "")
+	if st != 200 || out["token"] == nil {
+		t.Errorf("the paying device: %d %v, want a session token", st, out)
+	}
+}
+
+func pkgOfZone(t *testing.T, zoneID uint) uint {
+	var p models.Package
+	config.DB.Where("zone_id = ?", zoneID).First(&p)
+	return p.ID
 }

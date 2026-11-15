@@ -86,13 +86,8 @@ func HotspotPay(c *fiber.Ctx) error {
 	// prompt already on the phone — two prompts risk paying twice.
 	unlock := mpesaSvcGlobal.LockSTKPhone(phone)
 	defer unlock()
-	if existing, ok := services.RecentPendingSTK(phone, body.Mac, zone.ID, 90*time.Second); ok {
-		return c.JSON(fiber.Map{
-			"reference": *existing.MpesaTransactionID,
-			"message":   "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying.",
-			"provider":  existing.Provider,
-			"reused":    true,
-		})
+	if _, ok := services.RecentPendingSTK(phone, body.Mac, zone.ID, 90*time.Second); ok {
+		return promptPendingResponse(c)
 	}
 
 	// Auto-generate voucher
@@ -180,6 +175,12 @@ func HotspotStatus(c *fiber.Ctx) error {
 				resp["plan_name"] = pkg.Name
 				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
 			}
+		}
+		if !pollMatchesPayer(c, p) {
+			// Another device or WiFi holding this reference: say it's paid,
+			// hand out nothing that signs anyone in.
+			resp["message"] = "Payment received. Sign in with your phone number to connect."
+			return resp, true
 		}
 		if p.CustomerID == nil || *p.CustomerID == 0 {
 			// The payment completes before the customer is attached; keep the
@@ -400,4 +401,36 @@ func failedPaymentJSON(p *models.Payment) fiber.Map {
 		msg = *p.StatusReason
 	}
 	return fiber.Map{"status": "failed", "message": msg, "code": services.PaymentFailureCode(msg)}
+}
+
+// promptPendingResponse: a prompt is already open for this phone (or device).
+// The open payment's reference is NOT returned: it is the key to the payment
+// status poll, which signs the payer in, and a phone number or a MAC (a body
+// field anyone can type) is no proof of being that payer. The portal resumes
+// its own payment from local storage.
+func promptPendingResponse(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+		"success": false,
+		"code":    "prompt_pending",
+		"error":   "An M-Pesa prompt is already open on this phone. Approve it or wait a minute.",
+		"message": "An M-Pesa prompt is already open on this phone. Approve it or wait a minute.",
+	})
+}
+
+// pollMatchesPayer: when the poll says which device and WiFi it comes from
+// (?mac=&zone_id=), they must be the ones that started the payment before
+// the poll hands out a session or router login. A poll that sends neither
+// (portals before captive #6) is still answered on the reference alone.
+func pollMatchesPayer(c *fiber.Ctx, p *models.Payment) bool {
+	if z := strings.TrimSpace(c.Query("zone_id")); z != "" && z != fmt.Sprint(p.ZoneID) {
+		return false
+	}
+	if m := strings.TrimSpace(c.Query("mac")); m != "" {
+		got, ok1 := services.NormalizeMAC(m)
+		want, ok2 := services.NormalizeMAC(p.MacAddress)
+		if !ok1 || !ok2 || got != want {
+			return false
+		}
+	}
+	return true
 }

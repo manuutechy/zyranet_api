@@ -62,13 +62,10 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	// instead of a new one — two prompts risk paying twice.
 	unlock := mpesaSvcGlobal.LockSTKPhone(body.Phone)
 	defer unlock()
-	if existing, ok := services.RecentPendingSTK(body.Phone, body.Mac, pkg.ZoneID, 90*time.Second); ok {
-		return utils.SuccessResponse(c, fiber.Map{
-			"payment_id":     existing.ID,
-			"transaction_id": *existing.MpesaTransactionID,
-			"message":        "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying.",
-			"reused":         true,
-		}, "STK Push already in progress.")
+	if _, ok := services.RecentPendingSTK(body.Phone, body.Mac, pkg.ZoneID, 90*time.Second); ok {
+		// No reference back: it would let anyone who knows the phone poll
+		// (and be signed in on) someone else's payment. See promptPendingResponse.
+		return promptPendingResponse(c)
 	}
 
 	// This endpoint is intentionally public — it also serves the anonymous
