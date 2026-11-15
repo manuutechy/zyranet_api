@@ -82,6 +82,8 @@ func main() {
 		&models.GrowthPlan{},
 		&models.ZoneLineStat{},
 		&models.ZoneWatchState{},
+		// Smart speed lane readings — new table only.
+		&models.ZoneLaneStat{},
 	); err != nil {
 		config.DB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 		log.Fatalf("[database] AutoMigrate failed: %v", err)

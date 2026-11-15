@@ -571,6 +571,8 @@ func fetchSecurity(zone *models.Zone) string {
 func heartbeatSource(zone *models.Zone) string {
 	sec := fetchSecurity(zone)
 	watch, watchQuery := watchHeartbeatParts(zone)
+	lanes, lanesQuery := laneHeartbeatParts(zone)
+	watch, watchQuery = watch+lanes, watchQuery+lanesQuery
 	raw := fmt.Sprintf(`/tool fetch url="https://api.zyranet.co.ke/api/v1/public/zones/sync/%d?token=%s" dst-path="zyra-sync.rsc" %s; :if ([:len [/file find name="zyra-sync.rsc"]] > 0) do={ /import file-name=zyra-sync.rsc; /file remove [find name="zyra-sync.rsc"] }; :local c [/system resource get cpu-load]; :local tm [/system resource get total-memory]; :local fm [/system resource get free-memory]; :local cl [:len [/ip hotspot active find]]; :local b [/system resource get board-name]; %s/tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/heartbeat/%d?token=%s&cpu=" . $c . "&totalmem=" . $tm . "&freemem=" . $fm . "&clients=" . $cl%s . "&board=" . $b) %s keep-result=no`,
 		zone.ID, zone.ProvisionToken, sec, watch, zone.ID, zone.ProvisionToken, watchQuery, sec)
 	return rosEscape(raw)
