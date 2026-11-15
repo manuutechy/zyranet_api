@@ -72,11 +72,14 @@ type Zone struct {
 	RadiusSecret string `gorm:"size:64" json:"-"`
 	// UplinkDownMbps/UplinkUpMbps are what the ISP really gets from upstream,
 	// used only to generate the fair-queue tuning script.
-	UplinkDownMbps int            `json:"uplink_down_mbps"`
-	UplinkUpMbps   int            `json:"uplink_up_mbps"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+	UplinkDownMbps int `json:"uplink_down_mbps"`
+	UplinkUpMbps   int `json:"uplink_up_mbps"`
+	// SmartSpeed puts traffic lanes on the router (games/calls first, big
+	// downloads last). Needs the uplink speeds above; on by default.
+	SmartSpeed bool           `gorm:"default:true" json:"smart_speed"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 
 	// OltIP is the fibre OLT the router pings each heartbeat (Network › Watch).
 	OltIP *string `gorm:"size:45" json:"olt_ip"`
