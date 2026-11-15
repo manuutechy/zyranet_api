@@ -308,7 +308,7 @@ func InstallJobIndex(c *fiber.Ctx) error {
 	if c.Query("sort") == "recent" {
 		order = "id DESC"
 	}
-	if err := q.Preload("Crew").Preload("Zone").Preload("Package").Order(order).
+	if err := q.Preload("Crew").Preload("Zone", models.ZoneBrief).Preload("Package").Order(order).
 		Offset(utils.Offset(page, perPage)).Limit(perPage).Find(&jobs).Error; err != nil {
 		return utils.ErrorResponse(c, "Failed to load install jobs.", "", fiber.StatusInternalServerError)
 	}
@@ -334,7 +334,7 @@ func InstallJobShow(c *fiber.Ctx) error {
 	}
 	var job models.InstallJob
 	if err := services.InstallJobScope(config.DB.Model(&models.InstallJob{}), a).
-		Preload("Crew").Preload("Zone").Preload("Package").First(&job, paramID(c, "id")).Error; err != nil {
+		Preload("Crew").Preload("Zone", models.ZoneBrief).Preload("Package").First(&job, paramID(c, "id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Install job not found.", "", fiber.StatusNotFound)
 	}
 	var events []models.InstallJobEvent

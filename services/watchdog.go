@@ -102,13 +102,6 @@ func (w *WatchdogService) runOverloadProtectionSweep() {
 			continue
 		}
 
-		// Close any open sessions
-		config.DB.Model(&models.Session{}).
-			Where("customer_id = ? AND ended_at IS NULL", cust.ID).
-			Updates(map[string]interface{}{
-				"ended_at": &now,
-			})
-
 		// Home (PPPoE): switch off at the router in either auth mode — API
 		// (disable the PPP secret, end the tunnel) or RADIUS (drop the RADIUS
 		// rows, Disconnect-Request the live session). See home.go.

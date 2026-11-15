@@ -91,7 +91,9 @@ func (e *ExpiryReminderService) ProcessExpiringSubscribers() {
 		}
 
 		// Check if we already sent this specific reminder today to prevent duplicate SMS
-		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		// "Today" is the Kenyan day, not the UTC server's.
+		k := now.In(EAT)
+		todayStart := time.Date(k.Year(), k.Month(), k.Day(), 0, 0, 0, 0, EAT)
 		var recentLogCount int64
 		config.DB.Model(&models.AuditLog{}).
 			Where("model = ? AND model_id = ? AND action = ? AND created_at >= ?", "Customer", customer.ID, reminderType, todayStart).

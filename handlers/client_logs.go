@@ -61,9 +61,10 @@ type sessionRow struct {
 	Active          bool       `json:"active"`
 }
 
-// parseDay reads a YYYY-MM-DD query value; endOfDay pushes it to 23:59:59.
+// parseDay reads a YYYY-MM-DD query value as a Kenyan (EAT) day; endOfDay
+// pushes it to 23:59:59 EAT.
 func parseDay(v string, endOfDay bool) (time.Time, bool) {
-	t, err := time.Parse("2006-01-02", strings.TrimSpace(v))
+	t, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(v), utils.EAT)
 	if err != nil {
 		return time.Time{}, false
 	}

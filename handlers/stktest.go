@@ -23,19 +23,19 @@ func (b stkTestBody) validate() error {
 	return nil
 }
 
-// runStkTest fires a real STK push using whichever Daraja credentials the
-// given zone resolves to (platform-shared or the org's own — see
-// services/mpesa.go resolveMpesaCreds) without creating a Payment row, so
-// test pushes never pollute real revenue/billing figures.
+// runStkTest fires one real test prompt through the provider the zone's ISP
+// uses (Cyzora or Daraja — see services.PaymentRouting) without creating a
+// Payment row, so test pushes never pollute revenue/billing figures.
 func runStkTest(zoneID uint, body stkTestBody) (fiber.Map, error) {
-	stkResp, err := mpesaSvcGlobal.InitiateSTKPush(zoneID, body.Phone, body.Amount, "SA-TEST", "Zyra Net Daraja Test Payment")
+	start, err := mpesaSvcGlobal.TestPrompt(zoneID, body.Phone, body.Amount)
 	if err != nil {
 		return nil, err
 	}
 	return fiber.Map{
-		"checkout_request_id": stkResp.CheckoutRequestID,
-		"message":             stkResp.ResponseDescription,
-		"is_mock":             stkResp.IsMock,
+		"provider":            start.Provider,
+		"checkout_request_id": start.Reference,
+		"message":             start.Message,
+		"is_mock":             start.IsMock,
 	}, nil
 }
 

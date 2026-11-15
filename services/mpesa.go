@@ -929,7 +929,14 @@ func (s *MpesaService) ProcessPaymentSuccess(payment *models.Payment, receiptNum
 					return nil
 				})
 				if err != nil {
-					log.Printf("[M-Pesa] TOP-UP NOT CREDITED for payment %d (receipt %s, KES %.2f): %v — credit it manually", payment.ID, receiptNumber, payment.Amount, err)
+					// Undo the "completed" mark (the credit rolled back as a
+					// whole): left completed, Safaricom's retry and the status
+					// sweep would skip it and the customer's money would sit
+					// uncredited. Back to pending, the next one credits it.
+					config.DB.Model(&models.Payment{}).Where("id = ? AND status = ?", payment.ID, "completed").
+						Updates(map[string]interface{}{"status": "pending", "mpesa_receipt_number": nil, "collected_via": ""})
+					payment.Status = "pending"
+					log.Printf("[M-Pesa] TOP-UP NOT CREDITED for payment %d (receipt %s, KES %.2f): %v — put back to pending for retry", payment.ID, receiptNumber, payment.Amount, err)
 					return err
 				}
 
@@ -1430,6 +1437,16 @@ func RecentPendingSTK(phone, mac string, zoneID uint, within time.Duration) (*mo
 func (s *MpesaService) SimulateCallback(checkoutRequestID string, amount float64, phone string) {
 	go func() {
 		time.Sleep(500 * time.Millisecond)
+		// MPESA_ENV=mock test phones: a chosen failure (see MockSTKFailure).
+		if code, desc, ok := MockSTKFailure(phone); ok {
+			if err := s.HandleCallback(map[string]interface{}{"Body": map[string]interface{}{"stkCallback": map[string]interface{}{
+				"MerchantRequestID": "mock_" + randomHex(3), "CheckoutRequestID": checkoutRequestID,
+				"ResultCode": code, "ResultDesc": desc,
+			}}}); err != nil {
+				log.Printf("[M-Pesa] Simulated failure callback error: %v", err)
+			}
+			return
+		}
 		receipt := "MOCK" + strings.ToUpper(randomHex(3))
 		payload := map[string]interface{}{
 			"Body": map[string]interface{}{

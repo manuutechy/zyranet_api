@@ -60,12 +60,13 @@ func GeneratePlatformInvoices(periodStart, periodEnd time.Time) ([]models.Platfo
 	return created, nil
 }
 
-// PreviousCalendarMonth returns the [start, end) of the calendar month
-// before the current one, in UTC. Exported so cmd/generate_platform_invoices
-// can compute the same default period as the on-demand HTTP endpoint.
+// PreviousCalendarMonth returns the [start, end) of the Kenyan (EAT)
+// calendar month before the current one. It used UTC, which put the first
+// three hours of each Kenyan month into the previous month's invoice.
+// Exported so cmd/generate_platform_invoices computes the same default.
 func PreviousCalendarMonth() (time.Time, time.Time) {
-	now := time.Now().UTC()
-	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	now := utils.Kenya(time.Now())
+	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, utils.EAT)
 	firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
 	return firstOfLastMonth, firstOfThisMonth
 }
@@ -82,8 +83,8 @@ func PlatformInvoiceGenerate(c *fiber.Ctx) error {
 
 	periodStart, periodEnd := PreviousCalendarMonth()
 	if body.PeriodStart != "" && body.PeriodEnd != "" {
-		ps, err1 := time.Parse("2006-01-02", body.PeriodStart)
-		pe, err2 := time.Parse("2006-01-02", body.PeriodEnd)
+		ps, err1 := time.ParseInLocation("2006-01-02", body.PeriodStart, utils.EAT)
+		pe, err2 := time.ParseInLocation("2006-01-02", body.PeriodEnd, utils.EAT)
 		if err1 != nil || err2 != nil {
 			return utils.ErrorResponse(c, "period_start and period_end must be YYYY-MM-DD.", "", fiber.StatusUnprocessableEntity)
 		}

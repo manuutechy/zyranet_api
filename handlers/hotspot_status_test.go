@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/zyranet/zyranet-api/config"
@@ -35,8 +37,9 @@ func TestHotspotStatus_PaymentIDIsNotACredential(t *testing.T) {
 	var pkg models.Package
 	config.DB.First(&pkg)
 	receipt, checkout := "RCPT123", "ws_CO_21092026120000123456789"
+	pollTok, pollHash, _ := newPollToken()
 	p := models.Payment{CustomerID: &victim.ID, ZoneID: a.ZoneID, PackageID: &pkg.ID, Phone: "254711000001", Amount: 100,
-		Method: "mpesa", Status: "completed", MpesaReceiptNumber: &receipt, MpesaTransactionID: &checkout}
+		Method: "mpesa", Status: "completed", MpesaReceiptNumber: &receipt, MpesaTransactionID: &checkout, PollTokenHash: pollHash}
 	if err := config.DB.Create(&p).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +53,20 @@ func TestHotspotStatus_PaymentIDIsNotACredential(t *testing.T) {
 	if st, _, _ := statusGet(t, "abc"); st != 404 {
 		t.Errorf("short reference: status %d, want 404", st)
 	}
-	// The real checkout id (which only the payer holds) still works.
+	// The checkout id alone signs nobody in any more…
 	st, out, cookies = statusGet(t, checkout)
+	if st != 200 || out["status"] != "paid" || out["token"] != nil || cookies != 0 {
+		t.Errorf("checkout id alone: status=%d out=%v cookies=%d — must be status only", st, out, cookies)
+	}
+	// …the payer's device, with its poll token, still is (no MAC on this
+	// payment, so the MAC check fails closed: status only as well).
+	st, out, cookies = statusGet(t, fmt.Sprintf("%s?zone_id=%d&poll_token=%s", checkout, a.ZoneID, pollTok))
+	if st != 200 || out["token"] != nil || cookies != 0 {
+		t.Errorf("no MAC on the payment: %d %v — must be status only", st, out)
+	}
+	config.DB.Model(&models.Payment{}).Where("id = ?", p.ID).Update("mac_address", "AA:BB:CC:DD:EE:31")
+	config.DB.Model(&models.Customer{}).Where("id = ?", victim.ID).Update("expires_at", time.Now().Add(time.Hour))
+	st, out, cookies = statusGet(t, fmt.Sprintf("%s?zone_id=%d&mac=AA:BB:CC:DD:EE:31&poll_token=%s", checkout, a.ZoneID, pollTok))
 	if st != 200 || out["status"] != "paid" || out["token"] == nil || cookies != 1 {
 		t.Errorf("checkout id: status=%d out=%v cookies=%d — the payer must still be signed in", st, out, cookies)
 	}

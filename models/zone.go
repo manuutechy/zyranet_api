@@ -95,6 +95,9 @@ type Zone struct {
 	TunnelPubKey *string    `gorm:"size:64" json:"-"`
 	TunnelPeerAt *time.Time `json:"tunnel_peer_at"`
 
+	// brief: loaded through ZoneBrief (see AfterFind); not a column.
+	brief bool
+
 	Manager      *User         `gorm:"foreignKey:ManagerID" json:"manager,omitempty"`
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`
 	Packages     []Package     `gorm:"foreignKey:ZoneID" json:"packages,omitempty"`
@@ -107,6 +110,10 @@ func (Zone) TableName() string { return "zones" }
 // The admin only ever writes it; has_router_password says whether one is set.
 // Request bodies still decode router_password normally.
 func (z Zone) MarshalJSON() ([]byte, error) {
+	if z.brief {
+		return json.Marshal(zoneBriefJSON{ID: z.ID, Name: z.Name, Location: z.Location, Status: z.Status,
+			LastStatus: z.LastStatus, LastSeenAt: z.LastSeenAt, OrganizationID: z.OrganizationID, AreaID: z.AreaID})
+	}
 	type zoneAlias Zone
 	out := struct {
 		zoneAlias
@@ -131,4 +138,35 @@ func GenerateProvisionToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// zoneBriefJSON is all a zone nested in a list row (customer, payment,
+// voucher, ticket, user...) carries: which WiFi it is and whether it is up.
+// Router address, port, login user, public IP, tunnel and line settings are
+// for the zone pages only — list rows went to every staff role.
+type zoneBriefJSON struct {
+	ID             uint       `json:"id"`
+	Name           string     `json:"name"`
+	Location       string     `json:"location"`
+	Status         string     `json:"status"`
+	LastStatus     string     `json:"last_status"`
+	LastSeenAt     *time.Time `json:"last_seen_at"`
+	OrganizationID uint       `json:"organization_id"`
+	AreaID         *uint      `json:"area_id"`
+}
+
+var zoneBriefColumns = []string{"id", "name", "location", "status", "last_status", "last_seen_at", "organization_id", "area_id", "deleted_at"}
+
+// ZoneBrief is a Preload condition: Preload("Zone", models.ZoneBrief) loads
+// only the brief columns, and such a zone marshals as zoneBriefJSON.
+func ZoneBrief(db *gorm.DB) *gorm.DB { return db.Select(zoneBriefColumns) }
+
+// AfterFind marks zones loaded through ZoneBrief so MarshalJSON keeps them
+// brief (never a full zone with blank router fields).
+func (z *Zone) AfterFind(tx *gorm.DB) error {
+	sel := tx.Statement.Selects
+	if len(sel) == len(zoneBriefColumns) && sel[0] == "id" && sel[1] == "name" && sel[len(sel)-1] == "deleted_at" {
+		z.brief = true
+	}
+	return nil
 }

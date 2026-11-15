@@ -30,9 +30,53 @@ func orgLoginURL(orgID uint) string {
 	return middleware.AdminURL(org.Subdomain)
 }
 
-// UserIndex lists all users (super_admin only).
+// staffPick is the read-only view of a staff member a zone or area manager
+// gets for dropdowns (ticket assignment, agent link): no email, phone,
+// status or login details.
+type staffPick struct {
+	ID     uint   `json:"id"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
+	ZoneID *uint  `json:"zone_id"`
+}
+
+// userIndexScoped is UserIndex for zone managers (and area managers): only
+// staff of their own zone(s) plus themselves, in the slim staffPick shape.
+// Read-only: every write on /users stays owner-only.
+func userIndexScoped(c *fiber.Ctx, claims *middleware.Claims) error {
+	q := config.DB.Model(&models.User{}).Where("organization_id = ?", claims.OrganizationID)
+	inZones := middleware.ScopeZones(c, config.DB.Model(&models.User{}).Select("id").
+		Where("organization_id = ? AND zone_id IS NOT NULL", claims.OrganizationID), "zone_id")
+	if !claims.AreaManager && claims.ZoneID == nil {
+		// A zone manager with no zone sees only themselves.
+		inZones = config.DB.Model(&models.User{}).Select("id").Where("1 = 0")
+	}
+	q = q.Where("id = ? OR id IN (?)", claims.UserID, inZones)
+	if r := c.Query("role"); r != "" {
+		q = q.Where("role = ?", r)
+	}
+	if s := c.Query("search"); s != "" {
+		q = q.Where("name LIKE ?", "%"+s+"%")
+	}
+	users := []staffPick{}
+	if c.Query("all") != "" {
+		q.Select("id", "name", "role", "zone_id").Order("name").Scan(&users)
+		return utils.SuccessResponse(c, users, "")
+	}
+	page, perPage := utils.ParsePage(c)
+	var total int64
+	q.Count(&total)
+	q.Select("id", "name", "role", "zone_id").Order("name").Limit(perPage).Offset(utils.Offset(page, perPage)).Scan(&users)
+	return utils.PaginatedResponse(c, users, total, page, perPage)
+}
+
+// UserIndex lists the ISP's staff: everything for the owner (super_admin), a
+// slim read-only list of their own zone(s) for zone/area managers.
 func UserIndex(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
+	if claims.Role == "zone_manager" {
+		return userIndexScoped(c, claims)
+	}
 	if claims.Role != "super_admin" {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
@@ -41,7 +85,7 @@ func UserIndex(c *fiber.Ctx) error {
 	var users []models.User
 	var total int64
 
-	query := config.DB.Model(&models.User{}).Preload("Zone").Where("organization_id = ?", claims.OrganizationID)
+	query := config.DB.Model(&models.User{}).Preload("Zone", models.ZoneBrief).Where("organization_id = ?", claims.OrganizationID)
 	if r := c.Query("role"); r != "" {
 		query = query.Where("role = ?", r)
 	}
@@ -153,7 +197,7 @@ func UserShow(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	var user models.User
-	if err := config.DB.Preload("Zone").Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone", models.ZoneBrief).Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, user, "")
@@ -219,7 +263,7 @@ func UserUpdate(c *fiber.Ctx) error {
 	if pwChanged || roleChanged || statusChanged {
 		middleware.RevokeAdminSessions(config.DB, user.ID)
 	}
-	config.DB.Preload("Zone").First(&user, user.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).First(&user, user.ID)
 	return utils.SuccessResponse(c, user, "User updated successfully.")
 }
 

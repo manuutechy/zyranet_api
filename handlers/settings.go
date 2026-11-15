@@ -74,7 +74,13 @@ var settingDefaults = map[string]string{
 // panel. ISPs configure their own Daraja via /settings/mpesa
 // (OrganizationMpesaConfig) instead; SMS template wording/toggles
 // (sms_template_*, sms_enable_*) are unaffected and remain ISP-editable.
-var platformOnlyKeys = append(append(append([]string{}, daraKeys...), smsKeys...), cyzoraKeys...)
+//
+// The SMTP login (used to email invoices) is platform-only too: the settings
+// table is shared by every ISP and SettingsIndex is readable by any staff
+// role, so smtp_password used to reach field agents of every ISP, and any ISP
+// owner could repoint every ISP's mail. No admin page edits these.
+var platformOnlyKeys = append(append(append(append([]string{}, daraKeys...), smsKeys...), cyzoraKeys...),
+	"smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_from")
 
 // SettingsIndex returns all settings.
 func SettingsIndex(c *fiber.Ctx) error {
@@ -114,6 +120,11 @@ func SettingsPublic(c *fiber.Ctx) error {
 		"mpesaPaybillAccount": settings["mpesa_paybill_account"],
 		"mpesaBankAccount":    settings["mpesa_bank_account"],
 		"otpLoginEnabled":     settings["otp_login_enabled"] == "yes",
+		// smsAvailable: an SMS code can really be sent here (OTP login on,
+		// OTP SMS not switched off, and a provider with credentials). The
+		// portal hides "Use an SMS code instead" when false.
+		"smsAvailable": settings["otp_login_enabled"] == "yes" && settings["sms_enable_otp"] != "no" &&
+			services.NewSmsService().Available(publicSettingsOrg(c)),
 	}, "")
 }
 
@@ -314,4 +325,13 @@ func GetSetting(key string) string {
 		}
 	}
 	return strings.TrimSpace(settingDefaults[key])
+}
+
+// publicSettingsOrg is the ISP a public settings request is for: the zone the
+// portal is on (?zone_id=), else 0 (platform account only).
+func publicSettingsOrg(c *fiber.Ctx) uint {
+	if z := zoneByID(c.Query("zone_id")); z != nil {
+		return z.OrganizationID
+	}
+	return 0
 }

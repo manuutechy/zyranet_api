@@ -312,10 +312,11 @@ func TestHotspotStatus_PaidGivesTicketNotSharedLogin(t *testing.T) {
 	c := paidCustomer(t, a.ZoneID, "254711000001", "aa:bb:cc:dd:ee:01")
 	ref := "ws_CO_123456789"
 	pkgID := c.PackageID
+	pollTok, pollHash, _ := newPollToken()
 	config.DB.Create(&models.Payment{CustomerID: &c.ID, ZoneID: a.ZoneID, PackageID: &pkgID, Phone: "0711000001", Amount: 100,
-		Method: "mpesa", Status: "completed", MpesaTransactionID: &ref, MacAddress: "aa:bb:cc:dd:ee:01"})
+		Method: "mpesa", Status: "completed", MpesaTransactionID: &ref, MacAddress: "aa:bb:cc:dd:ee:01", PollTokenHash: pollHash})
 	app := routerAccessApp()
-	st, out := doJSON(t, app, "GET", "/hotspot/status/"+ref, nil)
+	st, out := doJSON(t, app, "GET", fmt.Sprintf("/hotspot/status/%s?mac=aa:bb:cc:dd:ee:01&zone_id=%d&poll_token=%s", ref, a.ZoneID, pollTok), nil)
 	if st != 200 || out["status"] != "paid" {
 		t.Fatalf("status: %d %v", st, out["_raw"])
 	}

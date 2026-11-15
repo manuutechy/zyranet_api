@@ -1,0 +1,62 @@
+#!/bin/bash
+# Zyra Net: restart FreeRADIUS when the API asks (new/removed router = new
+# RADIUS client; FreeRADIUS only reads SQL clients at start, so it must
+# restart).
+#
+# The API (user zyranet, NoNewPrivileges — sudo can never work from it)
+# writes ONE line to /var/lib/zyranet-radius/reload:
+#     <nonce: 32 hex> <unix time>
+# zyra-radius-reload.path runs this script as root whenever that file
+# changes. It checks the line, refuses stale or malformed requests, checks the
+# FreeRADIUS config BEFORE touching the running server, restarts it, and
+# writes "<nonce> ok" or "<nonce> fail <why>" to reload.done, which the API
+# waits for. Nothing else in the file is ever executed or interpreted.
+# Install: see deploy/radius/README.md.
+set -uo pipefail
+DIR=/var/lib/zyranet-radius
+F="$DIR/reload"
+DONE="$DIR/reload.done"
+LAST=/run/zyra-radius-reload.last
+UNIT=freeradius
+MIN_GAP=10      # seconds between two restarts
+MAX_AGE=120     # a request older than this is ignored
+
+answer() { # nonce, verdict
+  printf '%s %s\n' "$1" "$2" > "$DONE.new" && chmod 644 "$DONE.new" && mv -f "$DONE.new" "$DONE"
+}
+
+[ -f "$F" ] && [ ! -L "$F" ] || exit 0
+[ "$(stat -c %s "$F")" -le 128 ] || { echo "zyra-radius-reload: request too big, ignored" >&2; exit 1; }
+line=$(head -n1 "$F" | tr -d '\r')
+[ -n "$line" ] || exit 0   # emptied/truncated: nothing asked
+if ! [[ $line =~ ^([a-f0-9]{32})\ ([0-9]{9,11})$ ]]; then
+  echo "zyra-radius-reload: malformed request, ignored" >&2; exit 1
+fi
+nonce=${BASH_REMATCH[1]}; ts=${BASH_REMATCH[2]}
+now=$(date +%s)
+if [ $((now - ts)) -gt $MAX_AGE ] || [ $((ts - now)) -gt 30 ]; then
+  answer "$nonce" "fail stale request"; exit 0
+fi
+if [ -f "$DONE" ] && grep -q "^$nonce " "$DONE"; then
+  exit 0   # already answered (the .path unit can fire twice for one write)
+fi
+
+# Rate limit: at most one restart every MIN_GAP seconds.
+if [ -f "$LAST" ]; then
+  gap=$((now - $(cat "$LAST" 2>/dev/null || echo 0)))
+  [ "$gap" -ge $MIN_GAP ] || sleep $((MIN_GAP - gap))
+fi
+
+# Never restart into a broken config: the old process keeps serving.
+if ! out=$(freeradius -C 2>&1); then
+  echo "zyra-radius-reload: config check failed, not restarting: $(printf %s "$out" | tail -c 300)" >&2
+  answer "$nonce" "fail config check"; exit 1
+fi
+date +%s > "$LAST"
+if systemctl restart "$UNIT" && systemctl is-active --quiet "$UNIT"; then
+  answer "$nonce" "ok"
+  echo "zyra-radius-reload: $UNIT restarted"
+else
+  answer "$nonce" "fail restart"
+  echo "zyra-radius-reload: $UNIT restart failed" >&2; exit 1
+fi

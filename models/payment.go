@@ -36,6 +36,10 @@ type Payment struct {
 	// charge id (polled with GET /charges/{id}, matched by its webhooks).
 	// Daraja payments keep using MpesaTransactionID (CheckoutRequestID).
 	ProviderRef *string `gorm:"size:64;index" json:"provider_ref"`
+	// PollTokenHash is the SHA-256 (hex) of the poll_token handed only to the
+	// device that started this STK payment. The status poll signs the payer
+	// in only with that token (plus the same MAC and zone). Never returned.
+	PollTokenHash string `gorm:"size:64" json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

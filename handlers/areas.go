@@ -657,7 +657,7 @@ func PackageUseAreaPrice(c *fiber.Ctx) error {
 	if _, err := services.ApplyAreaPriceList(config.DB, zone.OrganizationID, *zone.AreaID, zone.ID, false); err != nil {
 		return utils.ErrorResponse(c, "Could not apply the area price.", "", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").First(&pkg, pkg.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).First(&pkg, pkg.ID)
 	return utils.SuccessResponse(c, pkg, "Area price is back on this plan.")
 }
 

@@ -25,6 +25,23 @@ func InitVoucherService(svc *services.VoucherService, mikrotik *services.MikroTi
 	}
 }
 
+// voucherReadScope limits who may read voucher codes (an unused code is
+// money: anyone holding it gets the WiFi). The owner sees the ISP's, a zone or
+// area manager their zone(s) (OrgZoneIDs is already narrowed to them), a field
+// agent only the vouchers issued to them. Finance and others: none.
+func voucherReadScope(c *fiber.Ctx, q *gorm.DB) (*gorm.DB, bool) {
+	claims := middleware.GetClaims(c)
+	switch claims.Role {
+	case "super_admin", "zone_manager":
+		return q, true
+	case "field_agent":
+		mine := config.DB.Model(&models.AgentVoucher{}).Select("voucher_id").Where("organization_id = ? AND agent_id IN (?)",
+			claims.OrganizationID, config.DB.Model(&models.Agent{}).Select("id").Where("organization_id = ? AND user_id = ?", claims.OrganizationID, claims.UserID))
+		return q.Where("id IN (?)", mine), true
+	}
+	return q, false
+}
+
 // VoucherIndex lists vouchers with filters.
 func VoucherIndex(c *fiber.Ctx) error {
 	page, perPage := utils.ParsePage(c)
@@ -36,7 +53,10 @@ func VoucherIndex(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 
-	query := config.DB.Model(&models.Voucher{}).Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs)
+	query, ok := voucherReadScope(c, config.DB.Model(&models.Voucher{}).Preload("Zone", models.ZoneBrief).Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
+	if !ok {
+		return utils.ErrorResponse(c, "Forbidden.", "You do not have permission to view vouchers.", fiber.StatusForbidden)
+	}
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
@@ -154,8 +174,12 @@ func VoucherShow(c *fiber.Ctx) error {
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
+	q, ok := voucherReadScope(c, config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
+	if !ok {
+		return utils.ErrorResponse(c, "Forbidden.", "You do not have permission to view vouchers.", fiber.StatusForbidden)
+	}
 	var voucher models.Voucher
-	if err := config.DB.Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs).First(&voucher, c.Params("id")).Error; err != nil {
+	if err := q.First(&voucher, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Voucher not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, voucher, "")
@@ -280,7 +304,7 @@ func VoucherRedeem(c *fiber.Ctx) error {
 		DeviceToken string `json:"device_token"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
-		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Voucher code is required.", "message": "", "code": services.VoucherFailInvalid})
 	}
 
 	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name, body.ZoneID, body.DeviceToken)
@@ -297,7 +321,7 @@ func VoucherRedeemAuthenticated(c *fiber.Ctx) error {
 		DeviceToken string `json:"device_token"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.Code == "" {
-		return utils.ErrorResponse(c, "Voucher code is required.", "", fiber.StatusUnprocessableEntity)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Voucher code is required.", "message": "", "code": services.VoucherFailInvalid})
 	}
 
 	return processVoucherRedemption(c, body.Code, body.Mac, body.Phone, body.Name, body.ZoneID, body.DeviceToken)
@@ -311,19 +335,22 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	// 1. Verify voucher existence
 	var voucher models.Voucher
 	if err := config.DB.Preload("Package").Where("code = ?", cleanCode).First(&voucher).Error; err != nil {
-		return utils.ErrorResponse(c, "Invalid voucher ticket code.", "Voucher not found.", fiber.StatusBadRequest)
+		return voucherRefused(c, "Invalid voucher ticket code.", "Voucher not found.", services.VoucherFailInvalid)
 	}
-	if voucher.Status == "expired" || voucher.Status == "depleted" || voucher.Status == services.VoucherStatusVoid {
-		return utils.ErrorResponse(c, "This voucher ticket has already been used or expired.", "", fiber.StatusBadRequest)
+	if voucher.Status == "expired" {
+		return voucherRefused(c, "This voucher ticket has expired.", "", services.VoucherFailExpired)
+	}
+	if voucher.Status == "depleted" || voucher.Status == services.VoucherStatusVoid {
+		return voucherRefused(c, "This voucher ticket has already been used or expired.", "", services.VoucherFailUsed)
 	}
 	if voucher.ExpiresAt != nil && time.Now().UTC().After(*voucher.ExpiresAt) {
-		return utils.ErrorResponse(c, "This voucher ticket has expired.", "", fiber.StatusBadRequest)
+		return voucherRefused(c, "This voucher ticket has expired.", "", services.VoucherFailExpired)
 	}
 	// A voucher only works on its own ISP's WiFi.
 	zone := zoneByID(zoneInput)
 	if zone != nil {
 		if org, ok := services.ZoneOrganization(voucher.ZoneID); !ok || org != zone.OrganizationID {
-			return utils.ErrorResponse(c, "Invalid voucher ticket code.", "Voucher not found.", fiber.StatusBadRequest)
+			return voucherRefused(c, "Invalid voucher ticket code.", "Voucher not found.", services.VoucherFailInvalid)
 		}
 	}
 
@@ -336,7 +363,7 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	// 3. Redeem voucher via VoucherService
 	result, err := voucherSvcGlobal.Redeem(cleanCode, customer.Phone)
 	if err != nil {
-		return utils.ErrorResponse(c, err.Error(), "Redemption failed.", fiber.StatusBadRequest)
+		return voucherRefused(c, err.Error(), "Redemption failed.", services.VoucherFailureCode(err))
 	}
 
 	// Update customer name and MAC if provided
@@ -384,4 +411,10 @@ func processVoucherRedemption(c *fiber.Ctx, codeInput, macInput, phoneInput, nam
 	result["customer"] = buildCustomerProfile(customer)
 
 	return utils.SuccessResponse(c, result, "Voucher redeemed successfully. Internet activated.")
+}
+
+// voucherRefused is a 400 for a voucher that can't be used, with a machine
+// code next to the English error: invalid | used | expired | other.
+func voucherRefused(c *fiber.Ctx, errMsg, message, code string) error {
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": errMsg, "message": message, "code": code})
 }

@@ -17,7 +17,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// parseCustomerDateTime attempts to parse user-provided date/time strings.
+// parseCustomerDateTime parses a date/time typed in the admin. Anything
+// without its own offset is Kenyan time (EAT): staff filter by their own
+// calendar, and the server's UTC would shift every day by three hours.
 func parseCustomerDateTime(val string, endOfDay bool) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339,
@@ -28,7 +30,7 @@ func parseCustomerDateTime(val string, endOfDay bool) (time.Time, error) {
 		"2006-01-02",
 	}
 	for _, layout := range layouts {
-		if t, err := time.Parse(layout, val); err == nil {
+		if t, err := time.ParseInLocation(layout, val, utils.EAT); err == nil {
 			if layout == "2006-01-02" && endOfDay {
 				t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, t.Location())
 			}
@@ -172,7 +174,7 @@ func CustomerIndex(c *fiber.Ctx) error {
 		orderClause = "name DESC"
 	}
 
-	query.Preload("Zone").Preload("Package").Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
+	query.Preload("Zone", models.ZoneBrief).Preload("Package").Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    customers,
@@ -235,6 +237,20 @@ func CustomerStore(c *fiber.Ctx) error {
 	if err := config.DB.Where("organization_id = ?", claims.OrganizationID).First(&targetZone, customer.ZoneID).Error; err != nil {
 		return utils.ErrorResponse(c, "Invalid zone for this organization.", "", fiber.StatusUnprocessableEntity)
 	}
+	// The body is decoded straight into the model: fields staff must never
+	// set here are reset. Credit is money (owner-only, via add-credit, with a
+	// credit log); ids and the customer number are the system's.
+	customer.ID, customer.CreditBalance, customer.CustomerNo = 0, 0, nil
+	customer.DeletedAt = gorm.DeletedAt{}
+	customer.Zone, customer.Package = nil, nil
+	if customer.PackageID > 0 {
+		var n int64
+		config.DB.Model(&models.Package{}).Where("id = ? AND zone_id IN (?)", customer.PackageID,
+			config.DB.Model(&models.Zone{}).Select("id").Where("organization_id = ?", claims.OrganizationID)).Count(&n)
+		if n == 0 {
+			return utils.ErrorResponse(c, "That package does not belong to your organization.", "", fiber.StatusUnprocessableEntity)
+		}
+	}
 	if customer.Type == "pppoe" && (customer.PPPoEPassword == nil || *customer.PPPoEPassword == "") {
 		pw := generatePPPoEPassword()
 		customer.PPPoEPassword = &pw
@@ -249,7 +265,7 @@ func CustomerStore(c *fiber.Ctx) error {
 	if err := config.DB.Create(&customer).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create customer.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").Preload("Package").First(&customer, customer.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").First(&customer, customer.ID)
 	return utils.SuccessResponse(c, customer, "Customer created successfully.", fiber.StatusCreated)
 }
 
@@ -381,7 +397,7 @@ func CustomerUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Model(&customer).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").Preload("Package").First(&customer, customer.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").First(&customer, customer.ID)
 	return utils.SuccessResponse(c, customer, "Customer updated successfully.")
 }
 
@@ -403,6 +419,11 @@ func CustomerDestroy(c *fiber.Ctx) error {
 
 // CustomerSuspend suspends a customer's account.
 func CustomerSuspend(c *fiber.Ctx) error {
+	// Cutting off a (possibly paying) customer: owner and zone managers only,
+	// like activate. Field agents and finance could do it before.
+	if claims := middleware.GetClaims(c); claims.Role != "super_admin" && claims.Role != "zone_manager" {
+		return utils.ErrorResponse(c, "Unauthorized to suspend customers.", "", fiber.StatusForbidden)
+	}
 	customer, err := findCustomerOrFail(c)
 	if err != nil {
 		return err
@@ -459,9 +480,8 @@ func CustomerSessions(c *fiber.Ctx) error {
 	if !customerInScope(c, customer) {
 		return utils.ErrorResponse(c, "Unauthorized to view this customer.", "", fiber.StatusForbidden)
 	}
-	var sessions []models.Session
-	config.DB.Where("customer_id = ?", customer.ID).Order("created_at DESC").Find(&sessions)
-	return utils.SuccessResponse(c, sessions, "")
+	// Real sessions come from RADIUS accounting (see services/sessions.go).
+	return utils.SuccessResponse(c, services.CustomerSessions(config.DB, customer.ID, 100), "")
 }
 
 // CustomerAddCredit adjusts a customer's credit balance. Credit is money, so
@@ -590,8 +610,6 @@ func purgeInactiveCustomers(zoneIDs []uint, scoped bool) (int64, error) {
 	if len(inactiveIDs) > 0 {
 		// 1. Delete associated customer devices for inactive
 		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CustomerDevice{})
-		// 2. Delete associated sessions
-		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.Session{})
 		// 3. Delete credit logs associated with purged guest/test accounts
 		config.DB.Where("customer_id IN ?", inactiveIDs).Delete(&models.CreditLog{})
 		// 4. Clear customer_id on payments & tickets to preserve financial audit logs

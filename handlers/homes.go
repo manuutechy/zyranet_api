@@ -219,13 +219,9 @@ func HomePublicPay(c *fiber.Ctx) error {
 
 	unlock := mpesaSvcGlobal.LockSTKPhone(phone)
 	defer unlock()
-	if existing, ok := services.RecentPendingSTK(phone, "", cust.ZoneID, 90*time.Second); ok {
-		var hr models.HomeRenewal
-		if config.DB.Where("payment_id = ? AND customer_id = ?", existing.ID, cust.ID).First(&hr).Error == nil {
-			return utils.SuccessResponse(c, fiber.Map{"payment_id": existing.ID, "reused": true,
-				"message": "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying."}, "")
-		}
-		return utils.ErrorResponse(c, "Another M-Pesa prompt was just sent to this phone. Finish or cancel it, then try again in a minute.", "Busy.", fiber.StatusConflict)
+	if _, ok := services.RecentPendingSTK(phone, "", cust.ZoneID, 90*time.Second); ok {
+		// Same answer as the hotspot locks: never the open payment's id.
+		return promptPendingResponse(c)
 	}
 
 	pkgID := pkg.ID
@@ -300,6 +296,7 @@ func HomePublicPayStatus(c *fiber.Ctx) error {
 			msg = *payment.StatusReason
 		}
 		out["message"] = msg
+		out["code"] = services.PaymentFailureCode(msg)
 	default:
 		out["message"] = "Waiting for you to enter your M-Pesa PIN."
 	}
@@ -445,8 +442,6 @@ func HomeSwitchOff(c *fiber.Ctx) error {
 	if err := config.DB.Model(&models.Customer{}).Where("id = ?", cust.ID).Update("status", "suspended").Error; err != nil {
 		return utils.ErrorResponse(c, "Could not switch off.", "", fiber.StatusInternalServerError)
 	}
-	now := time.Now()
-	config.DB.Model(&models.Session{}).Where("customer_id = ? AND ended_at IS NULL", cust.ID).Update("ended_at", &now)
 	cust.Status = "suspended"
 	if cust.Zone != nil {
 		z, cc := *cust.Zone, *cust

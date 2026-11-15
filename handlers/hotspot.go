@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	crand "crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -81,6 +85,15 @@ func HotspotPay(c *fiber.Ctx) error {
 	}
 	pkg := *pkgPtr
 
+	// One prompt at a time per phone, exactly like /mpesa/stkpush: a second
+	// tap within 90 s (same phone, or same device on this zone) gets the
+	// prompt already on the phone — two prompts risk paying twice.
+	unlock := mpesaSvcGlobal.LockSTKPhone(phone)
+	defer unlock()
+	if _, ok := services.RecentPendingSTK(phone, body.Mac, zone.ID, 90*time.Second); ok {
+		return promptPendingResponse(c)
+	}
+
 	// Auto-generate voucher
 	voucher, err := voucherSvcGlobal.Generate(zone.ID, pkg.ID, "single_use", 1)
 	if err != nil {
@@ -109,6 +122,11 @@ func HotspotPay(c *fiber.Ctx) error {
 		IpAddress:  body.IP,
 	}
 
+	pollToken, pollHash, perr2 := newPollToken()
+	if perr2 != nil {
+		return utils.ErrorResponse(c, "Please try again.", "", fiber.StatusInternalServerError)
+	}
+	payment.PollTokenHash = pollHash
 	if err := config.DB.Create(&payment).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create payment record.", fiber.StatusInternalServerError)
 	}
@@ -134,6 +152,9 @@ func HotspotPay(c *fiber.Ctx) error {
 		"reference": start.Reference,
 		"message":   "STK Push initiated successfully.",
 		"provider":  start.Provider,
+		// Only here, only once: send it back on every status poll
+		// (X-Poll-Token header or ?poll_token=) with ?mac=&zone_id=.
+		"poll_token": pollToken,
 	})
 }
 
@@ -166,6 +187,12 @@ func HotspotStatus(c *fiber.Ctx) error {
 				resp["plan_name"] = pkg.Name
 				resp["speed"] = fmt.Sprintf("%d Mbps", pkg.SpeedDownloadKbps/1024)
 			}
+		}
+		if !pollMatchesPayer(c, p) {
+			// Another device or WiFi holding this reference: say it's paid,
+			// hand out nothing that signs anyone in.
+			resp["message"] = "Payment received. Sign in with your phone number to connect."
+			return resp, true
 		}
 		if p.CustomerID == nil || *p.CustomerID == 0 {
 			// The payment completes before the customer is attached; keep the
@@ -206,11 +233,7 @@ func HotspotStatus(c *fiber.Ctx) error {
 		}
 		return c.JSON(fiber.Map{"status": "pending"})
 	} else if payment.Status == "failed" {
-		msg := "Payment failed"
-		if payment.StatusReason != nil {
-			msg = *payment.StatusReason
-		}
-		return c.JSON(fiber.Map{"status": "failed", "message": msg})
+		return c.JSON(failedPaymentJSON(&payment))
 	}
 
 	// Reconcile status with M-Pesa query API as a fallback if the transaction is pending
@@ -224,11 +247,7 @@ func HotspotStatus(c *fiber.Ctx) error {
 				}
 				return c.JSON(fiber.Map{"status": "pending"})
 			} else if newStatus == "failed" {
-				msg := "Payment failed"
-				if payment.StatusReason != nil {
-					msg = *payment.StatusReason
-				}
-				return c.JSON(fiber.Map{"status": "failed", "message": msg})
+				return c.JSON(failedPaymentJSON(&payment))
 			}
 		} else {
 			log.Printf("[M-Pesa] Error querying STK status: %v", err)
@@ -383,4 +402,68 @@ func resolveHotspotPlan(zoneID uint, planID string) (*models.Package, error) {
 		return nil, errors.New("That plan is not available on this WiFi. Refresh and pick a plan again.")
 	}
 	return &pkg, nil
+}
+
+// failedPaymentJSON is the poll answer for a failed payment: the English
+// message (old portals show it) plus a machine code the portal can switch on:
+// cancelled | pin | funds | no_response | unconfirmed | other.
+func failedPaymentJSON(p *models.Payment) fiber.Map {
+	msg := "Payment failed"
+	if p.StatusReason != nil && *p.StatusReason != "" {
+		msg = *p.StatusReason
+	}
+	return fiber.Map{"status": "failed", "message": msg, "code": services.PaymentFailureCode(msg)}
+}
+
+// promptPendingResponse: a prompt is already open for this phone (or device).
+// The open payment's reference is NOT returned: it is the key to the payment
+// status poll, which signs the payer in, and a phone number or a MAC (a body
+// field anyone can type) is no proof of being that payer. The portal resumes
+// its own payment from local storage.
+func promptPendingResponse(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+		"success": false,
+		"code":    "prompt_pending",
+		"error":   "An M-Pesa prompt is already open on this phone. Approve it or wait a minute.",
+		"message": "An M-Pesa prompt is already open on this phone. Approve it or wait a minute.",
+	})
+}
+
+// newPollToken makes the secret the starting device must show on every
+// status poll: 32 random bytes (hex) out, only its SHA-256 stored.
+func newPollToken() (token, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err = crand.Read(b); err != nil {
+		return "", "", err
+	}
+	token = hex.EncodeToString(b)
+	return token, pollTokenHash(token), nil
+}
+
+func pollTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// pollMatchesPayer: before the status poll hands out a session token, cookie
+// or router login, it must show ALL of: the poll_token from the pay response
+// (header X-Poll-Token or ?poll_token=), and the MAC + zone_id that started
+// the payment (?mac=&zone_id=). The reference alone is not enough, nor is a
+// MAC (anyone on the same WiFi can see it). Missing or wrong → status only.
+func pollMatchesPayer(c *fiber.Ctx, p *models.Payment) bool {
+	tok := strings.TrimSpace(c.Get("X-Poll-Token"))
+	if tok == "" {
+		tok = strings.TrimSpace(c.Query("poll_token"))
+	}
+	if tok == "" || p.PollTokenHash == "" ||
+		subtle.ConstantTimeCompare([]byte(pollTokenHash(tok)), []byte(p.PollTokenHash)) != 1 {
+		return false
+	}
+	z := strings.TrimSpace(c.Query("zone_id"))
+	if z == "" || z != fmt.Sprint(p.ZoneID) {
+		return false
+	}
+	got, ok1 := services.NormalizeMAC(c.Query("mac"))
+	want, ok2 := services.NormalizeMAC(p.MacAddress)
+	return ok1 && ok2 && got == want
 }

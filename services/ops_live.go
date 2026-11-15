@@ -151,7 +151,9 @@ type LivePayment struct {
 	CreatedAt   time.Time `json:"created_at"`
 	TimeEAT     string    `json:"time_eat"`
 
-	// Provider is who sent the prompt: "daraja" | "cyzora" ("" = no prompt).
+	// Provider is where the money came through: "cyzora" | "daraja" (STK
+	// prompts), "paybill" (customer paid the Paybill), "cash" (recorded by
+	// hand), "bank", "credit" (account credit) — see PaymentProvider.
 	Provider string `json:"provider"`
 }
 
@@ -440,9 +442,11 @@ func BuildLiveOps(db *gorm.DB, scope LiveScope, now time.Time) (*LiveOps, error)
 		if r.PackageName != nil {
 			lp.Package = *r.PackageName
 		}
+		prov := ""
 		if r.Provider != nil {
-			lp.Provider = *r.Provider
+			prov = *r.Provider
 		}
+		lp.Provider = PaymentProvider(prov, r.Method)
 		if r.Status == "failed" {
 			reason := ""
 			if r.StatusReason != nil {
@@ -553,4 +557,26 @@ func dbT(t time.Time) time.Time { return t.In(time.Local) }
 // LiveOpsForScope is BuildLiveOps against the app database.
 func LiveOpsForScope(scope LiveScope) (*LiveOps, error) {
 	return BuildLiveOps(config.DB, scope, time.Now())
+}
+
+// PaymentProvider names where a payment's money came through, for the money
+// views: the stored provider for STK prompts (cyzora | daraja), else from
+// the method. STK payments from before providers were recorded were all
+// Daraja (Cyzora arrived 11 Nov 2026 and always stamps the row).
+func PaymentProvider(provider, method string) string {
+	if p := strings.ToLower(strings.TrimSpace(provider)); p != "" {
+		return p
+	}
+	switch m := strings.ToLower(strings.TrimSpace(method)); m {
+	case "mpesa":
+		return ProviderDaraja
+	case "mpesa_c2b":
+		return "paybill"
+	case "manual", "cash":
+		return "cash"
+	case "":
+		return "other"
+	default:
+		return m // credit, bank, ...
+	}
 }

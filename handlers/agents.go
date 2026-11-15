@@ -391,7 +391,7 @@ func AgentBatches(c *fiber.Ctx) error {
 		return err
 	}
 	var batches []models.AgentVoucherBatch
-	config.DB.Preload("Package").Preload("Zone").Where("agent_id = ? AND organization_id = ?", agent.ID, agent.OrganizationID).
+	config.DB.Preload("Package").Preload("Zone", models.ZoneBrief).Where("agent_id = ? AND organization_id = ?", agent.ID, agent.OrganizationID).
 		Order("id DESC").Limit(100).Find(&batches)
 	type counts struct {
 		BatchID uint

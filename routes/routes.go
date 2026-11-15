@@ -146,6 +146,10 @@ func Register(app *fiber.App) {
 	v1.Post("/payouts/b2b/result", handlers.PayoutB2BResult)
 	v1.Post("/payouts/b2b/timeout", handlers.PayoutB2BTimeout)
 
+	// Customer-facing receipt (the invoice SMS link): read-only, by
+	// unguessable token. Bad tokens are rate-limited per IP.
+	v1.Get("/public/receipts/:token", failedLookupLimiter(30, time.Minute), handlers.PaymentReceiptPublic)
+
 	// Voucher redemption (public captive portal flow)
 	v1.Post("/vouchers/redeem", handlers.VoucherRedeem)
 
@@ -289,7 +293,7 @@ func Register(app *fiber.App) {
 
 	// Reports
 	admin.Get("/reports/revenue", adminAuth, seesMoney, handlers.ReportRevenue)
-	admin.Get("/reports/vouchers", adminAuth, handlers.ReportVouchers)
+	admin.Get("/reports/vouchers", adminAuth, seesMoney, handlers.ReportVouchers)
 	admin.Get("/reports/zones", adminAuth, seesMoney, handlers.ReportZones)
 	admin.Get("/reports/service-types", adminAuth, seesMoney, handlers.ReportServiceTypes)
 

@@ -27,6 +27,24 @@ func TestBuildLiveOps_RecentPaymentsCarryProvider(t *testing.T) {
 		got[p.ID] = p.Provider
 	}
 	if got[p1.ID] != "cyzora" || len(got) != 2 {
-		t.Errorf("providers = %v, want payment %d = cyzora and the other blank", got, p1.ID)
+		t.Errorf("providers = %v, want payment %d = cyzora", got, p1.ID)
+	}
+	for id, p := range got {
+		if id != p1.ID && p != "daraja" {
+			t.Errorf("payment %d provider = %q, want daraja (an old STK row)", id, p)
+		}
+	}
+}
+
+func TestPaymentProvider_FromMethod(t *testing.T) {
+	cases := map[[2]string]string{
+		{"cyzora", "mpesa"}: "cyzora", {"daraja", "mpesa"}: "daraja", {"", "mpesa"}: "daraja",
+		{"", "mpesa_c2b"}: "paybill", {"", "manual"}: "cash", {"", "credit"}: "credit",
+		{"", "bank"}: "bank", {"", ""}: "other",
+	}
+	for in, want := range cases {
+		if got := PaymentProvider(in[0], in[1]); got != want {
+			t.Errorf("PaymentProvider(%q, %q) = %q, want %q", in[0], in[1], got, want)
+		}
 	}
 }

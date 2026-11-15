@@ -10,7 +10,9 @@ import (
 	"github.com/zyranet/zyranet-api/config"
 	"github.com/zyranet/zyranet-api/middleware"
 	"github.com/zyranet/zyranet-api/models"
+	"github.com/zyranet/zyranet-api/services"
 	"github.com/zyranet/zyranet-api/utils"
+	"gorm.io/gorm"
 )
 
 // scopedZoneID returns the zone_id a report should be restricted to: a
@@ -176,27 +178,77 @@ func ReportVouchers(c *fiber.Ctx) error {
 	}
 	baseQuery.Scan(&pkgBreakdown)
 
+	// Used vouchers split by where the money came from: paid (an M-Pesa or
+	// cash purchase, or sold by an agent), still with an agent (issued, owed
+	// for, not sold yet) or free (made by the owner, no money).
+	paidSQL := "(EXISTS (SELECT 1 FROM payments p WHERE p.voucher_id = vouchers.id AND p.status = 'completed' AND p.method <> 'credit') OR EXISTS (SELECT 1 FROM agent_vouchers av WHERE av.voucher_id = vouchers.id AND av.status = 'sold'))"
+	agentSQL := "EXISTS (SELECT 1 FROM agent_vouchers av WHERE av.voucher_id = vouchers.id AND av.status = 'issued')"
+	var sales struct {
+		PaidUsed      int64 `json:"paid_used"`
+		FreeUsed      int64 `json:"free_used"`
+		AgentHeld     int64 `json:"with_agents"`
+		FreeUnused    int64 `json:"free_unused"`
+		PaidSoldTotal int64 `json:"paid_sold"`
+	}
+	usedSQL := "vouchers.status IN ('active','depleted')"
+	salesQ := config.DB.Model(&models.Voucher{}).Where("zone_id IN (?)", orgZoneIDs)
+	if zoneID != "" {
+		salesQ = salesQ.Where("zone_id = ?", zoneID)
+	}
+	salesQ.Select(`
+		COALESCE(SUM(CASE WHEN ` + usedSQL + ` AND ` + paidSQL + ` THEN 1 ELSE 0 END), 0) AS paid_used,
+		COALESCE(SUM(CASE WHEN ` + usedSQL + ` AND NOT ` + paidSQL + ` THEN 1 ELSE 0 END), 0) AS free_used,
+		COALESCE(SUM(CASE WHEN ` + agentSQL + ` THEN 1 ELSE 0 END), 0) AS agent_held,
+		COALESCE(SUM(CASE WHEN vouchers.status = 'unused' AND NOT ` + paidSQL + ` AND NOT ` + agentSQL + ` THEN 1 ELSE 0 END), 0) AS free_unused,
+		COALESCE(SUM(CASE WHEN ` + paidSQL + ` THEN 1 ELSE 0 END), 0) AS paid_sold_total`).Scan(&sales)
+
 	return utils.SuccessResponse(c, fiber.Map{
 		"status_summary":    statusSummary,
 		"package_breakdown": pkgBreakdown,
+		// sales.paid_sold = vouchers someone paid for (the only "sold"
+		// figure); free_used = used without any money in.
+		"sales": sales,
 	}, "")
 }
 
-// ReportZones returns zone performance comparison.
+// ReportZones compares zones. Takings and paid voucher sales are for a
+// range of Kenyan (EAT) days (date_from/date_to, YYYY-MM-DD; both empty =
+// all time); zone_id narrows to one zone, always inside the caller's scope.
+// Active customers and devices online are "now".
 func ReportZones(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
+	var start, end *time.Time
+	if f, t := c.Query("date_from"), c.Query("date_to"); f != "" || t != "" {
+		if f == "" {
+			f = "2000-01-01"
+		}
+		if t == "" {
+			t = utils.Kenya(time.Now()).Format("2006-01-02")
+		}
+		s0, e0, err := eatDayRange(f, t)
+		if err != nil {
+			return utils.ErrorResponse(c, "date_from and date_to must be YYYY-MM-DD.", "", fiber.StatusUnprocessableEntity)
+		}
+		start, end = &s0, &e0
+	}
 	var zones []models.Zone
 	zoneQuery := config.DB.Model(&models.Zone{}).Where("organization_id = ?", claims.OrganizationID)
 	zoneQuery = middleware.ScopeZones(c, zoneQuery, "id")
+	if z := c.Query("zone_id"); z != "" {
+		zoneQuery = zoneQuery.Where("id = ?", z)
+	}
 	zoneQuery.Find(&zones)
 	// A deleted zone that took money still appears (status "deleted"), so the
 	// zone rows add up to the revenue report instead of silently dropping it.
 	if claims.Role != "zone_manager" || claims.AreaManager {
 		var deleted []models.Zone
-		middleware.ScopeZones(c, config.DB.Unscoped().Model(&models.Zone{}), "id").
+		dq := middleware.ScopeZones(c, config.DB.Unscoped().Model(&models.Zone{}), "id").
 			Where("organization_id = ? AND deleted_at IS NOT NULL", claims.OrganizationID).
-			Where("id IN (?)", config.DB.Model(&models.Payment{}).Select("zone_id").Where("status = ?", "completed")).
-			Find(&deleted)
+			Where("id IN (?)", config.DB.Model(&models.Payment{}).Select("zone_id").Where("status = ?", "completed"))
+		if z := c.Query("zone_id"); z != "" {
+			dq = dq.Where("id = ?", z)
+		}
+		dq.Find(&deleted)
 		for i := range deleted {
 			deleted[i].Status = "deleted"
 		}
@@ -209,29 +261,37 @@ func ReportZones(c *fiber.Ctx) error {
 		Location       string  `json:"location"`
 		Revenue        float64 `json:"revenue"`
 		CustomersCount int64   `json:"customers_count"`
-		VouchersSold   int64   `json:"vouchers_sold"`
-		SessionsCount  int64   `json:"sessions_count"`
-		Status         string  `json:"status"`
+		// VouchersSold is PAID voucher sales in the range (bought by M-Pesa or
+		// cash, or sold by an agent) — free/owner vouchers are not sales.
+		VouchersSold  int64  `json:"vouchers_sold"`
+		SessionsCount int64  `json:"sessions_count"`
+		Status        string `json:"status"`
+	}
+	inRange := func(q *gorm.DB, col string) *gorm.DB {
+		if start != nil {
+			q = q.Where(col+" >= ? AND "+col+" < ?", *start, *end)
+		}
+		return q
 	}
 
 	comparison := []ZoneComparison{}
 	for _, zone := range zones {
 		var revenue float64
-		var activeCustomers, vouchersSold, activeSessions int64
+		var activeCustomers, paidVouchers, agentSold int64
 
-		config.DB.Model(&models.Payment{}).
-			Where("zone_id = ? AND status = ? AND method <> 'credit'", zone.ID, "completed").
+		inRange(config.DB.Model(&models.Payment{}).
+			Where("zone_id = ? AND status = ? AND method <> 'credit'", zone.ID, "completed"), "created_at").
 			Select("COALESCE(SUM(amount), 0)").Scan(&revenue)
 
 		config.DB.Model(&models.Customer{}).
 			Where("zone_id = ? AND status = ?", zone.ID, "active").Count(&activeCustomers)
 
-		config.DB.Model(&models.Voucher{}).
-			Where("zone_id = ? AND status IN ?", zone.ID, []string{"active", "depleted"}).Count(&vouchersSold)
-
-		config.DB.Model(&models.Session{}).
-			Where("zone_id = ?", zone.ID).
-			Where("ended_at IS NULL").Count(&activeSessions)
+		inRange(config.DB.Model(&models.Payment{}).
+			Where("zone_id = ? AND status = ? AND method <> 'credit' AND voucher_id IS NOT NULL", zone.ID, "completed"), "created_at").
+			Distinct("voucher_id").Count(&paidVouchers)
+		inRange(config.DB.Model(&models.AgentVoucher{}).
+			Where("status = ? AND voucher_id IN (?)", "sold", config.DB.Model(&models.Voucher{}).Select("id").Where("zone_id = ?", zone.ID)), "sold_at").
+			Count(&agentSold)
 
 		comparison = append(comparison, ZoneComparison{
 			ZoneID:         zone.ID,
@@ -239,9 +299,10 @@ func ReportZones(c *fiber.Ctx) error {
 			Location:       zone.Location,
 			Revenue:        revenue,
 			CustomersCount: activeCustomers,
-			VouchersSold:   vouchersSold,
-			SessionsCount:  activeSessions,
-			Status:         zone.Status,
+			VouchersSold:   paidVouchers + agentSold,
+			// Devices online now: open RADIUS sessions or the router's last check-in.
+			SessionsCount: services.OnlineNow(config.DB, zone.ID),
+			Status:        zone.Status,
 		})
 	}
 
@@ -258,6 +319,17 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 	zoneID := scopedZoneID(c, c.Query("zone_id"))
+	sessionZones := orgZoneIDs
+	if zoneID != "" {
+		sessionZones = []uint{}
+		if z, err := strconv.ParseUint(zoneID, 10, 64); err == nil {
+			for _, id := range orgZoneIDs {
+				if id == uint(z) {
+					sessionZones = []uint{id}
+				}
+			}
+		}
+	}
 	// Kenyan calendar days, whatever the server's clock zone.
 	now := utils.Kenya(time.Now())
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, utils.EAT)
@@ -293,21 +365,12 @@ func ReportServiceTypes(c *fiber.Ctx) error {
 		}
 		activeCustomerQuery.Count(&s.ActiveCustomers)
 
-		activeSessionsQuery := config.DB.Model(&models.Session{}).
-			Joins("JOIN customers ON customers.id = sessions.customer_id").
-			Where("customers.type = ? AND sessions.ended_at IS NULL AND sessions.zone_id IN (?)", t, orgZoneIDs)
-		if zoneID != "" {
-			activeSessionsQuery = activeSessionsQuery.Where("sessions.zone_id = ?", zoneID)
+		// Sessions are RADIUS accounting records (services/sessions.go);
+		// API-mode zones have none, so these read 0 there.
+		for _, n := range services.OpenRadiusSessions(config.DB, sessionZones, t) {
+			s.ActiveSessions += n
 		}
-		activeSessionsQuery.Count(&s.ActiveSessions)
-
-		sessionsTodayQuery := config.DB.Model(&models.Session{}).
-			Joins("JOIN customers ON customers.id = sessions.customer_id").
-			Where("customers.type = ? AND sessions.started_at >= ? AND sessions.started_at < ? AND sessions.zone_id IN (?)", t, today, tomorrow, orgZoneIDs)
-		if zoneID != "" {
-			sessionsTodayQuery = sessionsTodayQuery.Where("sessions.zone_id = ?", zoneID)
-		}
-		sessionsTodayQuery.Count(&s.SessionsToday)
+		s.SessionsToday = services.RadiusSessionsStarted(config.DB, sessionZones, t, today, tomorrow)
 
 		// Revenue Today
 		revTodayQuery := config.DB.Model(&models.Payment{}).

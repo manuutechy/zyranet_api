@@ -62,13 +62,10 @@ func MpesaStkPush(c *fiber.Ctx) error {
 	// instead of a new one — two prompts risk paying twice.
 	unlock := mpesaSvcGlobal.LockSTKPhone(body.Phone)
 	defer unlock()
-	if existing, ok := services.RecentPendingSTK(body.Phone, body.Mac, pkg.ZoneID, 90*time.Second); ok {
-		return utils.SuccessResponse(c, fiber.Map{
-			"payment_id":     existing.ID,
-			"transaction_id": *existing.MpesaTransactionID,
-			"message":        "An M-Pesa prompt was already sent to this phone. Enter your PIN on it to finish paying.",
-			"reused":         true,
-		}, "STK Push already in progress.")
+	if _, ok := services.RecentPendingSTK(body.Phone, body.Mac, pkg.ZoneID, 90*time.Second); ok {
+		// No reference back: it would let anyone who knows the phone poll
+		// (and be signed in on) someone else's payment. See promptPendingResponse.
+		return promptPendingResponse(c)
 	}
 
 	// This endpoint is intentionally public — it also serves the anonymous
@@ -153,6 +150,11 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		MacAddress: body.Mac,
 		IpAddress:  body.IP,
 	}
+	pollToken, pollHash, perr := newPollToken()
+	if perr != nil {
+		return utils.ErrorResponse(c, "Please try again.", "", fiber.StatusInternalServerError)
+	}
+	payment.PollTokenHash = pollHash
 	if err := config.DB.Create(&payment).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create payment record.", fiber.StatusInternalServerError)
 	}
@@ -185,6 +187,9 @@ func MpesaStkPush(c *fiber.Ctx) error {
 		"transaction_id": start.Reference,
 		"message":        start.Message,
 		"provider":       start.Provider,
+		// Only here: send it on every /hotspot/status poll (X-Poll-Token or
+		// ?poll_token=) with ?mac=&zone_id=, or no session is handed out.
+		"poll_token": pollToken,
 	}, "STK Push initiated successfully.")
 }
 
@@ -477,6 +482,19 @@ func creditC2B(l *models.C2BTransaction) {
 	}
 
 	claim := func(tx *gorm.DB) (bool, error) {
+		// Staff may have recorded this M-Pesa code by hand while Safaricom was
+		// still verifying it: then it is already paid for — close the ledger
+		// row without crediting a second time.
+		var n int64
+		if err := tx.Model(&models.Payment{}).Where("mpesa_receipt_number = ? OR mpesa_transaction_id = ?", l.TransID, l.TransID).Count(&n).Error; err != nil {
+			return false, err
+		}
+		if n > 0 {
+			log.Printf("[C2B Confirmation] %s already recorded as a payment — not credited again", l.TransID)
+			return false, tx.Model(&models.C2BTransaction{}).
+				Where("id = ? AND status IN ?", l.ID, []string{"received", "verifying"}).
+				Updates(map[string]interface{}{"status": "credited", "verify_note": "already recorded as a payment"}).Error
+		}
 		res := tx.Model(&models.C2BTransaction{}).
 			Where("id = ? AND status IN ?", l.ID, []string{"received", "verifying"}).
 			Updates(map[string]interface{}{"status": "credited", "verification": l.Verification})

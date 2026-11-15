@@ -41,13 +41,25 @@ func userAreaIDs(userID uint) *gorm.DB {
 	return config.DB.Model(&models.UserArea{}).Select("area_id").Where("user_id = ?", userID)
 }
 
-// limitToAreaZones narrows a query on the zones table to the caller's areas
-// when the caller is an area manager; otherwise it returns q unchanged.
+// limitToAreaZones narrows a query on the zones table to the zones a
+// zone-limited caller may see: an area manager's areas, a zone manager's one
+// zone — and nothing at all for a zone manager with no zone assigned (they
+// used to fall through to the whole ISP wherever a handler only checked
+// "ZoneID != nil"). Every other role is returned unchanged.
 func limitToAreaZones(claims *Claims, q *gorm.DB) *gorm.DB {
-	if claims == nil || !claims.AreaManager {
+	if claims == nil {
 		return q
 	}
-	return q.Where("area_id IN (?)", userAreaIDs(claims.UserID))
+	if claims.AreaManager {
+		return q.Where("area_id IN (?)", userAreaIDs(claims.UserID))
+	}
+	if claims.Role == "zone_manager" {
+		if claims.ZoneID == nil {
+			return q.Where("1 = 0")
+		}
+		return q.Where("id = ?", *claims.ZoneID)
+	}
+	return q
 }
 
 // IsAreaManager reports whether the caller is an area manager.
@@ -83,7 +95,10 @@ func ScopeZones(c *fiber.Ctx, q *gorm.DB, col string) *gorm.DB {
 		return q.Where(col+" IN (?)", limitToAreaZones(claims,
 			config.DB.Unscoped().Model(&models.Zone{}).Select("id").Where("organization_id = ?", claims.OrganizationID)))
 	}
-	if claims.Role == "zone_manager" && claims.ZoneID != nil {
+	if claims.Role == "zone_manager" {
+		if claims.ZoneID == nil {
+			return q.Where("1 = 0") // no zone assigned: nothing
+		}
 		return q.Where(col+" = ?", *claims.ZoneID)
 	}
 	return q
@@ -103,8 +118,8 @@ func ZoneInScope(c *fiber.Ctx, zoneID uint) bool {
 			Where("id = ? AND organization_id = ?", zoneID, claims.OrganizationID)).Count(&n)
 		return n > 0
 	}
-	if claims.Role == "zone_manager" && claims.ZoneID != nil {
-		return *claims.ZoneID == zoneID
+	if claims.Role == "zone_manager" {
+		return claims.ZoneID != nil && *claims.ZoneID == zoneID
 	}
 	return true
 }

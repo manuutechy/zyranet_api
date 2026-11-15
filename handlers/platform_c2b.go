@@ -138,6 +138,8 @@ func PlatformC2BUnmatchedResolve(c *fiber.Ctx) error {
 			Status:             "completed",
 			MpesaReceiptNumber: &transIDStr,
 			MpesaTransactionID: &transIDStr,
+			// Counted in the ISP's payout when it landed on the shared paybill.
+			CollectedVia: c2bCollectionChannel(func() bool { _, own := services.OrgForShortcode(unmatched.BusinessShortCode); return own }()),
 		}
 		if err := tx.Create(&payment).Error; err != nil {
 			return err

@@ -2,7 +2,11 @@ package models
 
 import "time"
 
-// Session tracks a hotspot internet session for a customer.
+// Session is DEPRECATED: nothing in the API writes or reads this table any
+// more (it was only ever filled by the demo seeder, so it was always empty).
+// Real sessions are RADIUS accounting rows (radacct) and router check-ins —
+// see services/sessions.go. Kept so existing databases and cmd/seed still
+// build; the table can be dropped by hand once nobody needs the seed data.
 type Session struct {
 	ID              uint       `gorm:"primaryKey" json:"id"`
 	CustomerID      uint       `gorm:"not null" json:"customer_id"`

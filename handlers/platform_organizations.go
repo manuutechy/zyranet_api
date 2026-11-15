@@ -121,7 +121,7 @@ func OrganizationShow(c *fiber.Ctx) error {
 		zoneIDs = append(zoneIDs, z.ID)
 	}
 	if len(zoneIDs) > 0 {
-		config.DB.Preload("Zone").Where("zone_id IN (?) AND resolved_at IS NULL", zoneIDs).
+		config.DB.Preload("Zone", models.ZoneBrief).Where("zone_id IN (?) AND resolved_at IS NULL", zoneIDs).
 			Order("created_at DESC").Find(&alerts)
 	}
 

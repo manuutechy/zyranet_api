@@ -73,11 +73,22 @@ func RequestOtp(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, fmt.Sprintf("Please wait %d seconds before requesting another code.", int(wait.Seconds())+1), "", fiber.StatusTooManyRequests)
 		}
 	}
+	// Which ISP's account is this? Scoped by the WiFi zone the portal is on;
+	// a phone with accounts at two ISPs and no zone is refused, not guessed.
+	found, lookupErr := customerByPhoneForPortal(c, phone, body.ZoneID)
+	if errors.Is(lookupErr, errPhoneAmbiguous) {
+		return utils.ErrorResponse(c, phoneAmbiguousMsg, "Ambiguous phone.", fiber.StatusConflict)
+	} else if lookupErr != nil {
+		return utils.ErrorResponse(c, "Something went wrong. Please try again.", "", fiber.StatusInternalServerError)
+	}
 	otpRequestStore.Store(phone, time.Now())
 
 	var customer models.Customer
 	cleanName := strings.TrimSpace(body.Name)
-	if err := config.DB.Where("phone = ?", phone).First(&customer).Error; err != nil {
+	if found != nil {
+		customer = *found
+	}
+	if found == nil {
 		// Auto-register
 		zonePtr, pkgPtr := signupTarget(c, body.ZoneID)
 		if zonePtr == nil || pkgPtr == nil {
@@ -226,7 +237,17 @@ func VerifyOtp(c *fiber.Ctx) error {
 	}
 
 	var customer models.Customer
-	if err := config.DB.Preload("Package").Preload("Zone").Where("phone = ?", phone).First(&customer).Error; err != nil {
+	found, lookupErr := customerByPhoneForPortal(c, phone, body.ZoneID)
+	if errors.Is(lookupErr, errPhoneAmbiguous) {
+		return utils.ErrorResponse(c, phoneAmbiguousMsg, "Ambiguous phone.", fiber.StatusConflict)
+	} else if lookupErr != nil {
+		return utils.ErrorResponse(c, "Something went wrong. Please try again.", "", fiber.StatusInternalServerError)
+	}
+	if found != nil {
+		if err := config.DB.Preload("Package").Preload("Zone").First(&customer, found.ID).Error; err != nil {
+			return utils.ErrorResponse(c, "Something went wrong. Please try again.", "", fiber.StatusInternalServerError)
+		}
+	} else {
 		zonePtr, pkgPtr := signupTarget(c, body.ZoneID)
 		if zonePtr == nil || pkgPtr == nil {
 			return utils.ErrorResponse(c, signupNeedsZoneMsg, "Setup required.", fiber.StatusBadRequest)

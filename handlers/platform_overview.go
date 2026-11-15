@@ -54,10 +54,11 @@ func PlatformOverview(c *fiber.Ctx) error {
 	}
 	estimatedEarnings := totalRevenue * (commissionPercent / 100)
 
-	// Time boundaries
-	now := time.Now()
-	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	// Time boundaries: Kenyan (EAT) days and months. The server runs on
+	// UTC, so its own midnight is 03:00 in Kenya.
+	now := utils.Kenya(time.Now())
+	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, utils.EAT).In(time.Local)
+	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, utils.EAT).In(time.Local)
 
 	var todayRevenue float64
 	var todayTransactions int64
@@ -78,7 +79,7 @@ func PlatformOverview(c *fiber.Ctx) error {
 	for i := 6; i >= 0; i-- {
 		dayStart := startOfToday.AddDate(0, 0, -i)
 		dayEnd := dayStart.AddDate(0, 0, 1)
-		dateLabel := dayStart.Format("2006-01-02")
+		dateLabel := utils.Kenya(dayStart).Format("2006-01-02")
 
 		var dayAmount float64
 		var dayCount int64
@@ -98,7 +99,7 @@ func PlatformOverview(c *fiber.Ctx) error {
 
 	// Recent 10 completed payments across all tenants
 	var recentPayments []models.Payment
-	config.DB.Preload("Customer").Preload("Zone").Preload("Package").
+	config.DB.Preload("Customer").Preload("Zone", models.ZoneBrief).Preload("Package").
 		Where("status = ?", "completed").
 		Order("created_at DESC").
 		Limit(10).
