@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"regexp"
@@ -327,17 +328,17 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		// Ensure hotspot profile authentication methods
 		sb.WriteString("# --- Hotspot Authentication Methods ---\n")
 		// mac-cookie: a paid device that drops off the WiFi is let back in by
-		// the router itself (see smart_wifi.go). Separate guarded line so a
-		// router without it keeps the plain methods.
-		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
-		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,http-pap,http-chap split-user-domain=no } on-error={}\n")
-		sb.WriteString(":do { /ip hotspot profile set [find name=\"hsp-zyranet\"] login-by=mac,mac-cookie,http-pap,http-chap } on-error={}\n")
-		sb.WriteString(":do { /ip hotspot profile set [find name=\"default\"] login-by=mac,mac-cookie,http-pap,http-chap } on-error={}\n")
+		// the router itself (see smart_wifi.go). Written only when a method is
+		// missing, so the profile isn't rewritten (and briefly without the
+		// cookie) every minute.
+		for _, prof := range []string{"hsp-zyranet", "default"} {
+			sb.WriteString(fmt.Sprintf(":do { :local p [/ip hotspot profile find name=\"%s\"]; :if ([:len $p] > 0) do={ :local lb [/ip hotspot profile get $p login-by]; :local need false; :foreach m in={\"mac\";\"mac-cookie\";\"http-pap\";\"http-chap\"} do={ :if ([:typeof [:find $lb $m]] = \"nil\") do={ :set need true } }; :if ($need || [/ip hotspot profile get $p split-user-domain]) do={ /ip hotspot profile set $p login-by=mac,mac-cookie,http-pap,http-chap split-user-domain=no } } } on-error={}\n", prof))
+		}
 		// Keep paid devices logged in while their phone sleeps: no idle logout
 		// (plans end on the clock, server-side) and 5 min to answer the
-		// router's are-you-there check. Changed only when different, so the
-		// hotspot isn't touched every minute.
-		sb.WriteString(":do { :local h [/ip hotspot find name=\"hs-zyranet\"]; :if ([:len $h] > 0) do={ :if ([/ip hotspot get $h keepalive-timeout] != 5m) do={ /ip hotspot set $h idle-timeout=none keepalive-timeout=5m } } } on-error={}\n")
+		// router's are-you-there check. Changed only when different (as time
+		// values: RouterOS hands some back as text).
+		sb.WriteString(":do { :local h [/ip hotspot find name=\"hs-zyranet\"]; :if ([:len $h] > 0) do={ :if ([:totime [/ip hotspot get $h keepalive-timeout]] != 5m || [:tostr [/ip hotspot get $h idle-timeout]] != \"none\") do={ /ip hotspot set $h idle-timeout=none keepalive-timeout=5m } } } on-error={}\n")
 		// Ensure hotspot redirect.html points to destination, not captive portal
 		sb.WriteString(fmt.Sprintf(":do { /tool fetch url=\"https://api.zyranet.co.ke/api/v1/public/zones/redirect-page/%d\" dst-path=\"hotspot/redirect.html\" %s } on-error={}\n", zone.ID, fetchSecurity(&zone)))
 		// zyra-login.html: the portal hands the device login to this page in
@@ -389,8 +390,7 @@ func (s *MikroTikScriptService) GenerateSyncScript(zoneID uint) (string, error) 
 		sb.WriteString("# --- Hotspot Plan Profiles (one login per device) ---\n")
 		for i := range packages {
 			pkgByID[packages[i].ID] = &packages[i]
-			writeHotspotProfile(&sb, &packages[i])
-			writeProfileExtras(&sb, &zone, sanitizeProfileName(packages[i].Name))
+			writeSyncHotspotProfile(&sb, &zone, &packages[i])
 		}
 		sb.WriteString("\n")
 
@@ -696,10 +696,29 @@ func addressList(base, extra string) []string {
 func writeManagementAccess(sb *strings.Builder) {
 	mgmt := strings.Join(managementSources(), ",")
 	api := strings.Join(apiSources(), ",")
-	sb.WriteString("# --- Remote management: only over the Zyra Net tunnel (API: the Zyra Net server only) ---\n")
-	sb.WriteString(":do { /ip firewall address-list remove [find list=\"zyranet-mgmt\"] } on-error={}\n")
+	// One entry per address: RouterOS refuses a duplicate, so a repeated
+	// address (one IP allowed for both) would never match the count below.
+	var all []string
+	seen := map[string]bool{}
 	for _, a := range append(managementSources(), apiSources()...) {
-		sb.WriteString(fmt.Sprintf(":do { /ip firewall address-list add list=zyranet-mgmt address=%s comment=\"Zyra Net management\" } on-error={}\n", a))
+		key := strings.TrimSuffix(a, "/32")
+		if !seen[key] {
+			seen[key] = true
+			all = append(all, a)
+		}
+	}
+	// The list's fingerprint rides on each address-list entry's comment. If
+	// every entry is there with this fingerprint and both firewall rules
+	// exist, nothing is touched: the old way deleted and re-added the list
+	// and the rules every minute, leaving a short unguarded gap each time.
+	h := fnv.New32a()
+	h.Write([]byte("v2|" + mgmt + "|" + api))
+	tag := fmt.Sprintf("Zyra Net management %08x", h.Sum32())
+	sb.WriteString("# --- Remote management: only over the Zyra Net tunnel (API: the Zyra Net server only) ---\n")
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip firewall address-list find list=\"zyranet-mgmt\" comment=\"%s\"]] != %d || [:len [/ip firewall address-list find list=\"zyranet-mgmt\"]] != %d || [:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] != 1 || [:len [/ip firewall filter find comment=\"Zyra Net Block Management\"]] != 1) do={\n", tag, len(all), len(all)))
+	sb.WriteString(":do { /ip firewall address-list remove [find list=\"zyranet-mgmt\"] } on-error={}\n")
+	for _, a := range all {
+		sb.WriteString(fmt.Sprintf(":do { /ip firewall address-list add list=zyranet-mgmt address=%s comment=\"%s\" } on-error={}\n", a, tag))
 	}
 	sb.WriteString(fmt.Sprintf(":do { /ip service set www disabled=no port=80 address=%s } on-error={}\n", mgmt))
 	sb.WriteString(fmt.Sprintf(":do { /ip service set www-ssl address=%s } on-error={}\n", mgmt))
@@ -711,7 +730,8 @@ func writeManagementAccess(sb *strings.Builder) {
 	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
 	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Management\"] } on-error={}\n")
 	sb.WriteString(":if ([:len [/ip firewall filter find]] > 0) do={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" place-before=0 } on-error={} } else={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" } on-error={} }\n")
-	sb.WriteString(":do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" place-before=1 } on-error={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" } on-error={} }\n\n")
+	sb.WriteString(":do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" place-before=1 } on-error={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" } on-error={} }\n")
+	sb.WriteString("}\n\n")
 }
 
 // rosEscape makes a value safe inside a double-quoted RouterOS string: it
