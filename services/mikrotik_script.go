@@ -476,7 +476,14 @@ func writeTunnel(sb *strings.Builder, zone *models.Zone) {
 `
 		block = strings.ReplaceAll(block, "APIPW", pw)
 	}
-	block += `:do { /tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/wg-key/ZONE?token=TOKEN&ip=TUNIP&pub=" . [/interface wireguard get [find name="zyra-wg"] public-key]) FETCHSEC keep-result=no } on-error={}
+	// With the key, a short read-only picture of what guards the router's
+	// management (input firewall order + service limits), so a tunnel that
+	// pings but won't connect can be diagnosed from the server.
+	block += `:local fw ""
+:do { :foreach r in=[/ip firewall filter find where chain=input] do={ :set fw ($fw . [/ip firewall filter get $r action] . "|" . [/ip firewall filter get $r comment] . "|" . [/ip firewall filter get $r src-address-list] . "|" . [/ip firewall filter get $r in-interface-list] . "|" . [/ip firewall filter get $r in-interface] . "|" . [/ip firewall filter get $r dynamic] . "|" . [/ip firewall filter get $r disabled] . "\n") } } on-error={ :set fw ($fw . "fw-error\n") }
+:do { :foreach n in={"www";"api";"winbox"} do={ :local i [/ip service find name=$n]; :set fw ($fw . "svc|" . $n . "|" . [/ip service get $i disabled] . "|" . [/ip service get $i port] . "|" . [:tostr [/ip service get $i available-from]] . "\n") } } on-error={ :set fw ($fw . "svc-error\n") }
+:do { :set fw ($fw . "lists|" . [:len [/ip firewall address-list find list="zyranet-mgmt"]] . "|wgif|" . [:len [/interface list member find interface="zyra-wg"]] . "\n") } on-error={}
+:do { /tool fetch url=("https://api.zyranet.co.ke/api/v1/public/zones/wg-key/ZONE?token=TOKEN&ip=TUNIP&pub=" . [/interface wireguard get [find name="zyra-wg"] public-key] . "&fw=" . [:convert $fw to=base64]) FETCHSEC keep-result=no } on-error={}
 
 `
 	block = strings.NewReplacer("TUNIP", ip, "SRVPUB", pub, "SRVEND", wgServerEndpoint(), "ZONE", fmt.Sprint(zone.ID), "TOKEN", zone.ProvisionToken, "FETCHSEC", fetchSecurity(zone)).Replace(block)
@@ -712,10 +719,10 @@ func writeManagementAccess(sb *strings.Builder) {
 	// exist, nothing is touched: the old way deleted and re-added the list
 	// and the rules every minute, leaving a short unguarded gap each time.
 	h := fnv.New32a()
-	h.Write([]byte("v2|" + mgmt + "|" + api))
+	h.Write([]byte("v3|" + mgmt + "|" + api)) // v3: accept placed above the first static rule
 	tag := fmt.Sprintf("Zyra Net management %08x", h.Sum32())
 	sb.WriteString("# --- Remote management: only over the Zyra Net tunnel (API: the Zyra Net server only) ---\n")
-	sb.WriteString(fmt.Sprintf(":if ([:len [/ip firewall address-list find list=\"zyranet-mgmt\" comment=\"%s\"]] != %d || [:len [/ip firewall address-list find list=\"zyranet-mgmt\"]] != %d || [:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] != 1 || [:len [/ip firewall filter find comment=\"Zyra Net Block Management\"]] != 1) do={\n", tag, len(all), len(all)))
+	sb.WriteString(fmt.Sprintf(":if ([:len [/ip firewall address-list find list=\"zyranet-mgmt\" comment=\"%s\"]] != %d || [:len [/ip firewall address-list find list=\"zyranet-mgmt\"]] != %d || [:len [/ip firewall filter find comment=\"Zyra Net Remote Access\"]] != 1 || [:len [/ip firewall filter find comment=\"Zyra Net Block Management\"]] != 1 || [:pick [/ip firewall filter find where chain=input dynamic=no] 0] != [:pick [/ip firewall filter find comment=\"Zyra Net Remote Access\"] 0]) do={\n", tag, len(all), len(all)))
 	sb.WriteString(":do { /ip firewall address-list remove [find list=\"zyranet-mgmt\"] } on-error={}\n")
 	for _, a := range all {
 		sb.WriteString(fmt.Sprintf(":do { /ip firewall address-list add list=zyranet-mgmt address=%s comment=\"%s\" } on-error={}\n", a, tag))
@@ -729,8 +736,14 @@ func writeManagementAccess(sb *strings.Builder) {
 	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Remote Access\"] } on-error={}\n")
 	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Hotspot Management\"] } on-error={}\n")
 	sb.WriteString(":do { /ip firewall filter remove [find comment=\"Zyra Net Block Management\"] } on-error={}\n")
-	sb.WriteString(":if ([:len [/ip firewall filter find]] > 0) do={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" place-before=0 } on-error={} } else={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment=\"Zyra Net Remote Access\" } on-error={} }\n")
-	sb.WriteString(":do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" place-before=1 } on-error={ :do { /ip firewall filter add chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment=\"Zyra Net Block Management\" } on-error={} }\n")
+	// Accept then block, both ABOVE the first ordinary input rule. "place-before=0"
+	// fails once the hotspot runs (its dynamic rules hold the top and nothing may
+	// go above them), which silently dropped the accept and left the factory
+	// "drop all not coming from LAN" rule blocking the tunnel (Oxygen, 15 Nov 2026).
+	acc := `chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=zyranet-mgmt action=accept comment="Zyra Net Remote Access"`
+	blk := `chain=input protocol=tcp dst-port=80,443,8291,8728,8729 src-address-list=!zyranet-mgmt action=drop comment="Zyra Net Block Management"`
+	sb.WriteString(":local zf [/ip firewall filter find where chain=input dynamic=no]\n")
+	sb.WriteString(fmt.Sprintf(":if ([:len $zf] > 0) do={ :local top [:pick $zf 0]; :do { /ip firewall filter add %s place-before=$top } on-error={ /ip firewall filter add %s }; :do { /ip firewall filter add %s place-before=$top } on-error={ /ip firewall filter add %s } } else={ :do { /ip firewall filter add %s } on-error={}; :do { /ip firewall filter add %s } on-error={} }\n", acc, acc, blk, blk, acc, blk))
 	sb.WriteString("}\n\n")
 }
 

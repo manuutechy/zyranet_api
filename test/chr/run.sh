@@ -53,6 +53,9 @@ load() { # fetch + import one script; fail on anything but a clean import
 }
 logcount() { curl -s -u admin: "http://$REST/rest/log" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))'; }
 
+# MikroTik's factory firewall, as on real routers (RB951 etc.): without it the
+# lab once passed while the field router locked the tunnel out (15 Nov 2026).
+run '/interface list add name=LAN; /interface list add name=WAN; /interface list member add list=WAN interface=ether1; /ip firewall filter add chain=input action=accept connection-state=established,related,untracked comment="defconf: accept established,related,untracked"; /ip firewall filter add chain=input action=drop connection-state=invalid comment="defconf: drop invalid"; /ip firewall filter add chain=input action=accept protocol=icmp comment="defconf: accept ICMP"; /ip firewall filter add chain=input action=drop in-interface-list=!LAN comment="defconf: drop all not coming from LAN"' >/dev/null
 load setup.rsc
 load sync1.rsc
 n0=$(logcount)
@@ -71,7 +74,7 @@ python3 -I "$REPO/test/chr/check.py" "http://$REST" "$LAB/serve/expect.json" "$c
 # Drift: break things the way a person or a reset would, then the next sync
 # must put every one of them back (skipping writes must not mean skipping repairs).
 echo; echo "breaking settings on purpose, then syncing again"
-run ':do { /ip hotspot user profile set [find name="1_Hour"] add-mac-cookie=no rate-limit="1k/1k" }; /ip hotspot set [find name="hs-zyranet"] keepalive-timeout=1m idle-timeout=3m; /ip hotspot profile set [find name="hsp-zyranet"] login-by=http-pap; /ip firewall filter remove [find comment="Zyra Net Block Management"]; /queue tree remove [find name="zq-up-heavy"]; /ip firewall address-list remove [find list="zyranet-mgmt" address="10.200.0.1"]' >/dev/null
+run ':do { /ip hotspot user profile set [find name="1_Hour"] add-mac-cookie=no rate-limit="1k/1k" }; /ip hotspot set [find name="hs-zyranet"] keepalive-timeout=1m idle-timeout=3m; /ip hotspot profile set [find name="hsp-zyranet"] login-by=http-pap; /ip firewall filter remove [find comment="Zyra Net Block Management"]; /queue tree remove [find name="zq-up-heavy"]; /ip firewall address-list remove [find list="zyranet-mgmt" address="10.200.0.1"]; /ip firewall filter remove [find comment="Zyra Net Remote Access"]' >/dev/null
 load sync2.rsc
 python3 -I "$REPO/test/chr/check.py" "http://$REST" "$LAB/serve/expect.json" || status=1
 exit "${status:-0}"

@@ -111,6 +111,15 @@ check("server's API login, tunnel only", len(api_user) == 1 and api_user[0].get(
 svc = {s["name"]: s for s in get("ip/service")}
 check("API service limited to the server", "10.200.0.1" in svc.get("api", {}).get("address", svc.get("api", {}).get("available-from", "")))
 
+# Management through the factory firewall: our accept must be the first ordinary
+# input rule, above "drop all not coming from LAN" (the tunnel isn't LAN).
+inp = [r for r in get("ip/firewall/filter") if r.get("chain") == "input" and r.get("dynamic") != "true"]
+names = [r.get("comment", "") for r in inp]
+check("management accept exists", "Zyra Net Remote Access" in names, names)
+check("management accept is the first ordinary input rule", bool(names) and names[0] == "Zyra Net Remote Access", names[:3])
+if "defconf: drop all not coming from LAN" in names and "Zyra Net Remote Access" in names:
+    check("accept sits above the factory drop", names.index("Zyra Net Remote Access") < names.index("defconf: drop all not coming from LAN"))
+
 # --- idempotency: the second sync must not rebuild things ---
 if sync2_changes is not None:
     check("second sync changes nothing that matters", sync2_changes == 0, f"{sync2_changes} config changes")
