@@ -310,7 +310,7 @@ func ZoneAlerts(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 
-	query := config.DB.Model(&models.ZoneAlert{}).Preload("Zone").Where("zone_id IN (?)", orgZoneIDs)
+	query := config.DB.Model(&models.ZoneAlert{}).Preload("Zone", models.ZoneBrief).Where("zone_id IN (?)", orgZoneIDs)
 	if filter == "unresolved" {
 		query = query.Where("resolved_at IS NULL")
 	}
@@ -334,7 +334,7 @@ func ZoneResolveAlert(c *fiber.Ctx) error {
 	}
 
 	var alert models.ZoneAlert
-	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&alert, id).Error; err != nil {
+	if err := config.DB.Preload("Zone", models.ZoneBrief).Where("zone_id IN (?)", orgZoneIDs).First(&alert, id).Error; err != nil {
 		return utils.ErrorResponse(c, "Alert not found.", "", fiber.StatusNotFound)
 	}
 	if claims.Role != "super_admin" && !(claims.Role == "zone_manager" && middleware.ZoneInScope(c, alert.ZoneID)) {

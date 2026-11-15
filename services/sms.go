@@ -399,3 +399,12 @@ func (s *SmsService) sendMobileSasa(creds smsCreds, phone, message string) (stri
 	}
 	return "failed", providerResponse
 }
+
+// Available says whether an SMS can actually go out for this ISP (0 = the
+// platform's own account): some provider has real credentials. It never
+// counts the local/dev "pretend success".
+func (s *SmsService) Available(organizationID uint) bool {
+	c := s.resolveSmsCreds(organizationID)
+	return c.HostPinnacle.configured() || s.platformHostPinnacle().configured() ||
+		strings.TrimSpace(c.MobilesasaToken) != "" || strings.TrimSpace(c.BrevoAPIKey) != ""
+}

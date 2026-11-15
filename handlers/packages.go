@@ -80,7 +80,7 @@ func PackageIndex(c *fiber.Ctx) error {
 	var pkgs []models.Package
 	var total int64
 
-	query := config.DB.Model(&models.Package{}).Preload("Zone").Where("zone_id IN (?)", orgZoneIDs)
+	query := config.DB.Model(&models.Package{}).Preload("Zone", models.ZoneBrief).Where("zone_id IN (?)", orgZoneIDs)
 	if z := c.Query("zone_id"); z != "" {
 		query = query.Where("zone_id = ?", z)
 	}
@@ -154,7 +154,7 @@ func PackageStore(c *fiber.Ctx) error {
 	if err := config.DB.Create(&pkg).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create package.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").First(&pkg, pkg.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).First(&pkg, pkg.ID)
 	return utils.SuccessResponse(c, pkg, "Package created successfully.", fiber.StatusCreated)
 }
 
@@ -165,7 +165,7 @@ func PackageShow(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 	var pkg models.Package
-	if err := config.DB.Preload("Zone").Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone", models.ZoneBrief).Where("zone_id IN (?)", orgZoneIDs).First(&pkg, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "Package not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, pkg, "")
@@ -222,7 +222,7 @@ func PackageUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Model(&pkg).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").First(&pkg, pkg.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).First(&pkg, pkg.ID)
 	return utils.SuccessResponse(c, pkg, "Package updated successfully.")
 }
 

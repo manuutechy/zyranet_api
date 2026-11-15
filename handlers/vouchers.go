@@ -53,7 +53,7 @@ func VoucherIndex(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
 
-	query, ok := voucherReadScope(c, config.DB.Model(&models.Voucher{}).Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
+	query, ok := voucherReadScope(c, config.DB.Model(&models.Voucher{}).Preload("Zone", models.ZoneBrief).Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
 	if !ok {
 		return utils.ErrorResponse(c, "Forbidden.", "You do not have permission to view vouchers.", fiber.StatusForbidden)
 	}
@@ -174,7 +174,7 @@ func VoucherShow(c *fiber.Ctx) error {
 	if err != nil {
 		return utils.ErrorResponse(c, "Failed to resolve organization zones.", "", fiber.StatusInternalServerError)
 	}
-	q, ok := voucherReadScope(c, config.DB.Preload("Zone").Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
+	q, ok := voucherReadScope(c, config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").Where("zone_id IN (?)", orgZoneIDs))
 	if !ok {
 		return utils.ErrorResponse(c, "Forbidden.", "You do not have permission to view vouchers.", fiber.StatusForbidden)
 	}

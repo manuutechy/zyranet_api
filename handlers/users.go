@@ -85,7 +85,7 @@ func UserIndex(c *fiber.Ctx) error {
 	var users []models.User
 	var total int64
 
-	query := config.DB.Model(&models.User{}).Preload("Zone").Where("organization_id = ?", claims.OrganizationID)
+	query := config.DB.Model(&models.User{}).Preload("Zone", models.ZoneBrief).Where("organization_id = ?", claims.OrganizationID)
 	if r := c.Query("role"); r != "" {
 		query = query.Where("role = ?", r)
 	}
@@ -197,7 +197,7 @@ func UserShow(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, "Unauthorized.", "", fiber.StatusForbidden)
 	}
 	var user models.User
-	if err := config.DB.Preload("Zone").Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
+	if err := config.DB.Preload("Zone", models.ZoneBrief).Where("organization_id = ?", claims.OrganizationID).First(&user, c.Params("id")).Error; err != nil {
 		return utils.ErrorResponse(c, "User not found.", "", fiber.StatusNotFound)
 	}
 	return utils.SuccessResponse(c, user, "")
@@ -263,7 +263,7 @@ func UserUpdate(c *fiber.Ctx) error {
 	if pwChanged || roleChanged || statusChanged {
 		middleware.RevokeAdminSessions(config.DB, user.ID)
 	}
-	config.DB.Preload("Zone").First(&user, user.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).First(&user, user.ID)
 	return utils.SuccessResponse(c, user, "User updated successfully.")
 }
 

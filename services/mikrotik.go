@@ -203,10 +203,6 @@ func (s *MikroTikService) GetStatus(zone *models.Zone) (*RouterStatus, error) {
 			}
 		}
 
-		// Local dev zones don't have a real reachable MikroTik behind them
-		if config.Config.AppEnv == "local" {
-			return s.mockOnlineStatus(zone), nil
-		}
 	}
 	return status, err
 }
@@ -289,28 +285,6 @@ func (s *MikroTikService) execCommandREST(zone *models.Zone, command string) (st
 		}
 	}
 	return strings.Join(lines, "\n"), nil
-}
-
-func (s *MikroTikService) mockOnlineStatus(zone *models.Zone) *RouterStatus {
-	now := time.Now()
-	config.DB.Model(zone).Updates(map[string]interface{}{
-		"last_seen_at": now,
-		"last_status":  "online",
-	})
-
-	activeCount := OnlineNow(config.DB, zone.ID)
-
-	return &RouterStatus{
-		Online:           true,
-		Uptime:           "14d6h32m10s",
-		CPULoad:          8 + int(zone.ID*7)%25,
-		MemoryUsedMB:     180 + int(zone.ID*53)%150,
-		MemoryTotalMB:    512,
-		ConnectedClients: int(activeCount),
-		BoardName:        zone.RouterName,
-		RouterOSVersion:  "7.15.3 (stable)",
-		LastSeenAt:       now.UTC().Format(time.RFC3339),
-	}
 }
 
 // PushFullConfig pushes hotspot users and PPPoE secrets to the router.
@@ -1164,24 +1138,9 @@ func (s *MikroTikService) GetInterfaceTraffic(zone *models.Zone, iface string) (
 		iface = "ether1"
 	}
 
-	if config.Config.AppEnv == "local" {
-		now := time.Now()
-		// Realistic simulated oscillating traffic curve for dev/demo
-		baseRx := 28.5 + float64(now.Second()%30)*0.85
-		baseTx := 11.2 + float64((now.Second()+15)%25)*0.45
-		return &InterfaceTraffic{
-			Interface: iface,
-			RxBps:     int64(baseRx * 1000 * 1000),
-			TxBps:     int64(baseTx * 1000 * 1000),
-			RxMbps:    baseRx,
-			TxMbps:    baseTx,
-			RxPackets: int64(baseRx * 125),
-			TxPackets: int64(baseTx * 85),
-			Timestamp: now.UTC().Format(time.RFC3339),
-			Available: true,
-		}, nil
-	}
-
+	// No invented figures, not even locally: a dev/test router that doesn't
+	// answer shows "unavailable" like a real one (this used to return a
+	// made-up 28–53 Mbps curve whenever APP_ENV=local).
 	if zone.ConnectionType == "api" {
 		client, err := s.dialAPI(zone)
 		if err == nil {

@@ -22,7 +22,7 @@ func TicketIndex(c *fiber.Ctx) error {
 	var tickets []models.Ticket
 	var total int64
 
-	query := config.DB.Model(&models.Ticket{}).Preload("Customer").Preload("AssignedUser").Preload("Zone")
+	query := config.DB.Model(&models.Ticket{}).Preload("Customer").Preload("AssignedUser").Preload("Zone", models.ZoneBrief)
 
 	// Every ISP staff role — super_admin included (it is the ISP owner, not
 	// platform staff) — sees only its own organization's tickets.
@@ -282,7 +282,7 @@ func TicketStoreCustomer(c *fiber.Ctx) error {
 func TicketShow(c *fiber.Ctx) error {
 	claims := middleware.GetClaims(c)
 	var ticket models.Ticket
-	query := config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone").Preload("Organization")
+	query := config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone", models.ZoneBrief).Preload("Organization")
 
 	query = query.Where("organization_id = ?", ticketOrgID(claims))
 	query = ticketZoneScope(c, claims, query)
@@ -329,7 +329,7 @@ func TicketUpdate(c *fiber.Ctx) error {
 			return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 		}
 	}
-	config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone").Preload("Organization").First(&ticket, ticket.ID)
+	config.DB.Preload("Customer").Preload("AssignedUser").Preload("Zone", models.ZoneBrief).Preload("Organization").First(&ticket, ticket.ID)
 	return utils.SuccessResponse(c, ticket, "Ticket updated successfully.")
 }
 

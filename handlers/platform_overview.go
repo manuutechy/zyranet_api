@@ -99,7 +99,7 @@ func PlatformOverview(c *fiber.Ctx) error {
 
 	// Recent 10 completed payments across all tenants
 	var recentPayments []models.Payment
-	config.DB.Preload("Customer").Preload("Zone").Preload("Package").
+	config.DB.Preload("Customer").Preload("Zone", models.ZoneBrief).Preload("Package").
 		Where("status = ?", "completed").
 		Order("created_at DESC").
 		Limit(10).

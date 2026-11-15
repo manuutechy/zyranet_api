@@ -120,6 +120,11 @@ func SettingsPublic(c *fiber.Ctx) error {
 		"mpesaPaybillAccount": settings["mpesa_paybill_account"],
 		"mpesaBankAccount":    settings["mpesa_bank_account"],
 		"otpLoginEnabled":     settings["otp_login_enabled"] == "yes",
+		// smsAvailable: an SMS code can really be sent here (OTP login on,
+		// OTP SMS not switched off, and a provider with credentials). The
+		// portal hides "Use an SMS code instead" when false.
+		"smsAvailable": settings["otp_login_enabled"] == "yes" && settings["sms_enable_otp"] != "no" &&
+			services.NewSmsService().Available(publicSettingsOrg(c)),
 	}, "")
 }
 
@@ -320,4 +325,13 @@ func GetSetting(key string) string {
 		}
 	}
 	return strings.TrimSpace(settingDefaults[key])
+}
+
+// publicSettingsOrg is the ISP a public settings request is for: the zone the
+// portal is on (?zone_id=), else 0 (platform account only).
+func publicSettingsOrg(c *fiber.Ctx) uint {
+	if z := zoneByID(c.Query("zone_id")); z != nil {
+		return z.OrganizationID
+	}
+	return 0
 }

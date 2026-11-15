@@ -254,7 +254,7 @@ func main() {
 			// dynamically: exactly those subdomains that belong to an ISP.
 			AllowOriginsFunc: middleware.IsTenantOrigin,
 			AllowMethods:     config.CORSAllowMethods,
-			AllowHeaders:     "Origin,Content-Type,Authorization,Accept,X-Device-Token,Idempotency-Key",
+			AllowHeaders:     "Origin,Content-Type,Authorization,Accept,X-Device-Token,Idempotency-Key,X-Poll-Token",
 			AllowCredentials: true,
 		}))
 	}

@@ -174,7 +174,7 @@ func CustomerIndex(c *fiber.Ctx) error {
 		orderClause = "name DESC"
 	}
 
-	query.Preload("Zone").Preload("Package").Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
+	query.Preload("Zone", models.ZoneBrief).Preload("Package").Order(orderClause).Limit(perPage).Offset(utils.Offset(page, perPage)).Find(&customers)
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    customers,
@@ -265,7 +265,7 @@ func CustomerStore(c *fiber.Ctx) error {
 	if err := config.DB.Create(&customer).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Failed to create customer.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").Preload("Package").First(&customer, customer.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").First(&customer, customer.ID)
 	return utils.SuccessResponse(c, customer, "Customer created successfully.", fiber.StatusCreated)
 }
 
@@ -397,7 +397,7 @@ func CustomerUpdate(c *fiber.Ctx) error {
 	if err := config.DB.Model(&customer).Updates(body).Error; err != nil {
 		return utils.ErrorResponse(c, err.Error(), "Update failed.", fiber.StatusInternalServerError)
 	}
-	config.DB.Preload("Zone").Preload("Package").First(&customer, customer.ID)
+	config.DB.Preload("Zone", models.ZoneBrief).Preload("Package").First(&customer, customer.ID)
 	return utils.SuccessResponse(c, customer, "Customer updated successfully.")
 }
 
