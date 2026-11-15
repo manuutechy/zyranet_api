@@ -107,12 +107,29 @@ func hotspotLogoutScript(zone *models.Zone) string {
 		`:if ($done && [:len $m] > 0) do={ ` + kick + ` } } on-error={}`
 }
 
-// writeProfileExtras adds the MAC cookie and the used-up kick to a plan
-// profile. Kept on its own guarded line: a router that rejects any of it
-// still gets every login below.
-func writeProfileExtras(sb *strings.Builder, zone *models.Zone, profileName string) {
-	sb.WriteString(fmt.Sprintf(":do { /ip hotspot user profile set [find name=\"%s\"] add-mac-cookie=yes mac-cookie-timeout=3d on-logout=\"%s\" } on-error={}\n",
-		profileName, rosEscape(hotspotLogoutScript(zone))))
+// writeSyncHotspotProfile keeps a plan's user profile right: speed, time
+// cap, one device per login, no idle logout, MAC cookie, and the used-up kick.
+// It is written only when something differs (each value compared on the
+// router), so a repeat sync leaves the profile alone. A router that refuses
+// the cookie/kick fields still gets the plan's speed and time.
+func writeSyncHotspotProfile(sb *strings.Builder, zone *models.Zone, pkg *models.Package) {
+	name := sanitizeProfileName(pkg.Name)
+	rate := formatRateLimitWithBurst(pkg.SpeedUploadKbps, pkg.SpeedDownloadKbps)
+	timeout := "0s"
+	if pkg.TimeLimitMinutes != nil && *pkg.TimeLimitMinutes > 0 {
+		timeout = fmt.Sprintf("%dm", *pkg.TimeLimitMinutes)
+	}
+	logout := rosEscape(hotspotLogoutScript(zone))
+	base := fmt.Sprintf(`rate-limit="%s" session-timeout="%s" idle-timeout=none keepalive-timeout=5m shared-users=1`, rate, timeout)
+	extras := fmt.Sprintf(`add-mac-cookie=yes mac-cookie-timeout=3d on-logout="%s"`, logout)
+	// No time cap: RouterOS hands an unset session-timeout back as nil, not 0s.
+	sessionDiffers := fmt.Sprintf(`[:totime [/ip hotspot user profile get $p session-timeout]] != [:totime "%s"]`, timeout)
+	if timeout == "0s" {
+		sessionDiffers = `[:typeof [/ip hotspot user profile get $p session-timeout]] != "nil"`
+	}
+	differs := fmt.Sprintf(`[/ip hotspot user profile get $p rate-limit] != "%s" || %s || [:totime [/ip hotspot user profile get $p keepalive-timeout]] != 5m || [:tostr [/ip hotspot user profile get $p idle-timeout]] != "none" || [:tostr [/ip hotspot user profile get $p shared-users]] != "1" || [:tostr [/ip hotspot user profile get $p add-mac-cookie]] != "true" || [:totime [/ip hotspot user profile get $p mac-cookie-timeout]] != 3d || [/ip hotspot user profile get $p on-logout] != "%s"`, rate, sessionDiffers, logout)
+	sb.WriteString(fmt.Sprintf(`:do { :local p [/ip hotspot user profile find name="%s"]; :if ([:len $p] = 0) do={ :do { /ip hotspot user profile add name="%s" %s %s } on-error={ /ip hotspot user profile add name="%s" %s } } else={ :local d false; :do { :if (%s) do={ :set d true } } on-error={ :set d true }; :if ($d) do={ :do { /ip hotspot user profile set $p %s %s } on-error={ /ip hotspot user profile set $p %s } } } } on-error={}`+"\n",
+		name, name, base, extras, name, base, differs, base, extras, base))
 }
 
 const smartSpeedVersion = "v1"

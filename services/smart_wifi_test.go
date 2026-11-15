@@ -46,12 +46,17 @@ func TestKickCommands_OnlyKnownRadioMenus(t *testing.T) {
 	}
 }
 
-func TestProfileExtras_EscapedLogoutScript(t *testing.T) {
+func TestSyncHotspotProfile_ConditionalAndEscaped(t *testing.T) {
 	var sb strings.Builder
-	writeProfileExtras(&sb, &models.Zone{WanPort: "ether1", LanPorts: "ether2,wlan1"}, "Daily_Fast")
+	min30 := 30
+	writeSyncHotspotProfile(&sb, &models.Zone{WanPort: "ether1", LanPorts: "ether2,wlan1"}, &models.Package{Name: "Daily Fast", SpeedUploadKbps: 1024, SpeedDownloadKbps: 2048, TimeLimitMinutes: &min30})
 	out := sb.String()
 	for _, want := range []string{
-		`[find name="Daily_Fast"] add-mac-cookie=yes mac-cookie-timeout=3d on-logout="`,
+		`[/ip hotspot user profile find name="Daily_Fast"]`,
+		`add-mac-cookie=yes mac-cookie-timeout=3d on-logout="`,
+		`session-timeout="30m"`,
+		`[:tostr [/ip hotspot user profile get $p add-mac-cookie]] != "true"`, // compared before writing
+		`:if ($d) do={`,
 		`:local m \$\"mac-address\"`, // $ escaped: expanded at logout, not at sync
 		`/interface wireless registration-table remove [find mac-address=\$m]`,
 		`:do { :local lu [/ip hotspot user get \$id limit-uptime]`,
@@ -61,17 +66,24 @@ func TestProfileExtras_EscapedLogoutScript(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
-	// No unescaped $ inside the quoted on-logout value.
-	val := out[strings.Index(out, `on-logout="`)+len(`on-logout="`):]
-	for i := 0; i < len(val); i++ {
-		if val[i] == '$' && (i == 0 || val[i-1] != '\\') {
-			t.Fatalf("unescaped $ at %d in on-logout: %s", i, val)
+	// Inside each quoted on-logout value every $ is escaped.
+	for rest := out; strings.Contains(rest, `on-logout="`); {
+		rest = rest[strings.Index(rest, `on-logout="`)+len(`on-logout="`):]
+		val := rest
+		for i := 0; i < len(val); i++ {
+			if val[i] == '"' && val[i-1] != '\\' {
+				break
+			}
+			if val[i] == '$' && (i == 0 || val[i-1] != '\\') {
+				t.Fatalf("unescaped $ at %d in on-logout: %s", i, val[:i+1])
+			}
 		}
 	}
-	balanced(t, "extras", out)
-	if !strings.HasPrefix(out, ":do {") || !strings.HasSuffix(strings.TrimSpace(out), "on-error={}") {
-		t.Error("extras must be on their own guarded line")
+	// A router that refuses the cookie/kick fields still gets speed and time.
+	if !strings.Contains(out, `on-error={ /ip hotspot user profile set $p rate-limit=`) {
+		t.Error("fallback without extras missing")
 	}
+	balanced(t, "profile", out)
 }
 
 func TestEndedSince_KickOnce(t *testing.T) {
@@ -164,7 +176,7 @@ func TestSyncScript_SmartWifi(t *testing.T) {
 	}
 	for _, want := range []string{
 		`login-by=mac,mac-cookie,http-pap,http-chap`,
-		`[find name="1_Hour"] add-mac-cookie=yes`,
+		`[/ip hotspot user profile find name="1_Hour"]`,
 		`:if ([:len [/ip hotspot user find mac-address=AA:BB:CC:DD:EE:01]] = 0) do={ :do { /ip hotspot host remove [find mac-address=AA:BB:CC:DD:EE:01] } on-error={}; :do { /interface wireless registration-table remove [find mac-address=AA:BB:CC:DD:EE:01] } on-error={} }`,
 		`zyra-smart v1 d=18400 u=9200 wan=ether1`,
 	} {
